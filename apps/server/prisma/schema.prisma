@@ -1,0 +1,45 @@
+// Starter models only. Each module owns its own tables (see report, section Logical Architecture).
+
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// Owned by the employee-qr module.
+model Employee {
+  id         String   @id @default(uuid())
+  code       String   @unique
+  firstName  String
+  lastName   String
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+}
+
+enum ScanMethod {
+  QR
+  MANUAL
+}
+
+enum ScanOutcome {
+  PENDING
+  GRANTED
+  DENIED
+}
+
+// Owned by the attendance module. eventId makes recording idempotent (FR-3.2).
+model AttendanceEvent {
+  id         String      @id @default(uuid())
+  eventId    String      @unique
+  employeeId String?
+  gateId     String
+  method     ScanMethod
+  outcome    ScanOutcome @default(PENDING)
+  occurredAt DateTime
+  createdAt  DateTime    @default(now())
+}
