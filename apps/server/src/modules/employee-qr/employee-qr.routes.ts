@@ -7,4 +7,6 @@ export const employeeQrRoutes = (_eqr: EmployeeQrService) =>
     .get('/employees', notImplemented)
     .post('/employees', notImplemented)
     .get('/me/qr', notImplemented)
-    .post('/employees/:id/qr/revoke', notImplemented);
+    .post('/employees/:id/qr/revoke', notImplemented)
+    // Edge agent (ADR-9). Response: EdgeSnapshot.
+    .get('/edge/snapshot', notImplemented);

@@ -1,3 +1,4 @@
+import type { PushEventsRequest, PushEventsResponse } from '../../shared/contracts/edge.js';
 import { todo } from '../../shared/errors.js';
 import type { DateRange, Scope } from '../../shared/types.js';
 import type { AttendanceRepo } from './attendance.repo.js';
@@ -27,6 +28,14 @@ export interface AttendanceRecorder {
   setOutcome(eventId: string, outcome: ScanOutcome): Promise<void>;
 }
 
+export interface EdgeIngest {
+  /**
+   * Stores events pushed by an edge outbox with edgeId and the server's receivedAt (ADR-9).
+   * Idempotent by eventId: duplicates are skipped but still listed in `accepted`.
+   */
+  ingest(req: PushEventsRequest): Promise<PushEventsResponse>;
+}
+
 export interface AttendanceQuery {
   dailyRecords(range: DateRange, scope: Scope): Promise<DailyRecord[]>;
   history(employeeId: string): Promise<DailyRecord[]>;
@@ -34,7 +43,7 @@ export interface AttendanceQuery {
 }
 
 /** Event store, daily records, missing punches, HR corrections (FR-1.6, FR-3.x). */
-export class AttendanceService implements AttendanceRecorder, AttendanceQuery {
+export class AttendanceService implements AttendanceRecorder, EdgeIngest, AttendanceQuery {
   constructor(private repo: AttendanceRepo) {}
 
   async record(): Promise<boolean> {
@@ -42,6 +51,10 @@ export class AttendanceService implements AttendanceRecorder, AttendanceQuery {
   }
 
   async setOutcome(): Promise<void> {
+    return todo();
+  }
+
+  async ingest(): Promise<PushEventsResponse> {
     return todo();
   }
 
