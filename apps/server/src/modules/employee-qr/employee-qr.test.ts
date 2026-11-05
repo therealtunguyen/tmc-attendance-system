@@ -452,3 +452,35 @@ describe('POST /api/qr/token', () => {
     expect(res.body).toEqual({ error: 'QR signing not configured' });
   });
 });
+
+describe('EmployeeQrService.validate (FR-2.2)', () => {
+  const svc = (keys: QrKeyConfig) => new EmployeeQrService(store, audit, keys, () => NOW);
+
+  it('admits a token it issued, with the first name for the kiosk', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const token = await svc(keysK1).issueToken(id);
+    expect(await svc(keysK1).validate(token)).toEqual({
+      ok: true,
+      employeeId: id,
+      firstName: 'Lan',
+      jti: expect.any(String),
+    });
+  });
+
+  it('denies a token issued before the employee was deactivated or revoked', async () => {
+    const off = await eqr.createEmployee('hr-1', lan);
+    const rev = await eqr.createEmployee('hr-1', { ...lan, code: 'BD-0002' });
+    const offToken = await svc(keysK1).issueToken(off.id);
+    const revToken = await svc(keysK1).issueToken(rev.id);
+    await eqr.deactivateEmployee('hr-1', off.id);
+    store.rows.get(rev.id)!.qrRevoked = true;
+    expect(await svc(keysK1).validate(offToken)).toMatchObject({ ok: false, reason: 'INACTIVE' });
+    expect(await svc(keysK1).validate(revToken)).toMatchObject({ ok: false, reason: 'REVOKED' });
+  });
+
+  it('admits a token from the previous key after a rotation', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const token = await svc(keysK1).issueToken(id);
+    expect(await svc(keysK2).validate(token)).toMatchObject({ ok: true, employeeId: id });
+  });
+});
