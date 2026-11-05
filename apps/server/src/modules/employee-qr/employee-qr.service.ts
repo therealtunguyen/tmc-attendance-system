@@ -1,7 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import type { EdgeSnapshot } from '../../shared/contracts/edge.js';
+import { QR_TOKEN_TTL_S, signQrToken } from '../../shared/contracts/qr-token.js';
 import { todo } from '../../shared/errors.js';
 import type { Scope } from '../../shared/types.js';
 import type { AuditLog } from '../iam/index.js';
+import { QrKeyring } from './employee-qr.keys.js';
 
 /** REPLAYED: a jti already seen (ADR-10). */
 export type DenyReason =
@@ -70,6 +73,13 @@ export interface QrKeyConfig {
   previousPublicKey: string;
 }
 
+/** issueToken refuses an employee who would be denied at the gate anyway. */
+export class QrNotIssuableError extends Error {
+  constructor(readonly reason: 'UNKNOWN' | 'INACTIVE' | 'REVOKED') {
+    super(`No QR token: employee is ${reason.toLowerCase()}`);
+  }
+}
+
 export interface QrIssuer {
   /** Short-lived token for the employee's live QR (ADR-10, FR-1.2). Token format: shared/contracts/qr-token.ts. */
   issueToken(employeeId: string): Promise<string>;
@@ -93,11 +103,19 @@ export interface EmployeeDirectory {
 export class EmployeeQrService
   implements QrValidation, QrIssuer, EdgeSnapshotSource, EmployeeDirectory, EmployeeAdmin
 {
+  private keyring?: QrKeyring;
+
   constructor(
     private repo: EmployeeStore,
     private audit: AuditLog,
     private keys: QrKeyConfig,
+    private now: () => Date = () => new Date(),
   ) {}
+
+  /** Built on first use, so the server still starts (and serves everything else) without QR keys. */
+  private get ring(): QrKeyring {
+    return (this.keyring ??= new QrKeyring(this.keys));
+  }
 
   async createEmployee(actorId: string, data: NewEmployee): Promise<Employee> {
     const employee = await this.repo.create(data);
@@ -141,8 +159,15 @@ export class EmployeeQrService
     return todo();
   }
 
-  async issueToken(): Promise<string> {
-    return todo();
+  /** Signed with the current key; a fresh jti every call, so a screenshot is useless after TTL (ADR-10). */
+  async issueToken(employeeId: string): Promise<string> {
+    const employee = await this.repo.find(employeeId);
+    if (!employee) throw new QrNotIssuableError('UNKNOWN');
+    if (!employee.active) throw new QrNotIssuableError('INACTIVE');
+    if (employee.qrRevoked) throw new QrNotIssuableError('REVOKED');
+    const exp = Math.floor(this.now().getTime() / 1000) + QR_TOKEN_TTL_S;
+    const { kid, signingKey } = this.ring;
+    return signQrToken({ sub: employee.id, exp, jti: randomUUID() }, kid, signingKey);
   }
 
   async snapshot(): Promise<EdgeSnapshot> {
