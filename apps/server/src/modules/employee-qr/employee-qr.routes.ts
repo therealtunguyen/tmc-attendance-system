@@ -1,8 +1,11 @@
 import { Router, type Request, type Response } from 'express';
+import { QR_TOKEN_TTL_S } from '../../shared/contracts/qr-token.js';
 import { notImplemented } from '../../shared/errors.js';
 import type { UserRef } from '../iam/index.js';
 import {
   DuplicateEmployeeCodeError,
+  QrNotConfiguredError,
+  QrNotIssuableError,
   type EmployeeChanges,
   type EmployeeQrService,
   type NewEmployee,
@@ -91,6 +94,24 @@ export const employeeQrRoutes = (eqr: EmployeeQrService) =>
       const employee = await eqr.deactivateEmployee(actorOf(res), req.params.id);
       if (!employee) return void res.status(404).json({ error: 'Employee not found' });
       res.json(employee);
+    })
+    // The signed-in employee's own token (FR-1.2, ADR-10). The portal asks again before it expires.
+    // Identity comes from the verified session (#43), never a request field. TODO(#43): user->employee link is assumed to be user.id.
+    .post('/qr/token', async (_req, res) => {
+      const user = res.locals.user as UserRef | undefined;
+      if (!user) return void res.status(401).json({ error: 'Sign in first' });
+      if (user.role !== 'EMP')
+        return void res.status(403).json({ error: 'Only employees have a QR' });
+      try {
+        const token = await eqr.issueToken(user.id);
+        res.set('Cache-Control', 'no-store').json({ token, ttlSeconds: QR_TOKEN_TTL_S });
+      } catch (e) {
+        if (e instanceof QrNotConfiguredError) {
+          return void res.status(503).json({ error: 'QR signing not configured' });
+        }
+        if (!(e instanceof QrNotIssuableError)) throw e;
+        res.status(403).json({ error: e.message, reason: e.reason });
+      }
     })
     .get('/me/qr', notImplemented)
     .post('/employees/:id/qr/revoke', notImplemented)

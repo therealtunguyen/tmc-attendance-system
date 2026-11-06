@@ -1,17 +1,22 @@
-import { randomUUID } from 'node:crypto';
+import { generateKeyPairSync, randomUUID } from 'node:crypto';
+import { Router } from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../app.js';
+import { QR_TOKEN_TTL_S, verifyQrToken } from '../../shared/contracts/qr-token.js';
 import type { Scope } from '../../shared/types.js';
 import type { AuditEntry, AuditLog } from '../iam/index.js';
+import { QrKeyring } from './employee-qr.keys.js';
 import { employeeQrRoutes } from './employee-qr.routes.js';
 import {
   DuplicateEmployeeCodeError,
   EmployeeQrService,
+  QrNotIssuableError,
   type Employee,
   type EmployeeChanges,
   type EmployeeStore,
   type NewEmployee,
+  type QrKeyConfig,
 } from './employee-qr.service.js';
 
 class InMemoryEmployees implements EmployeeStore {
@@ -251,5 +256,199 @@ describe('employee routes', () => {
     ]) {
       expect(res.status).toBe(404);
     }
+  });
+});
+
+/** A fresh Ed25519 pair as .env would hold it: private PKCS8 and public SPKI, base64 DER. */
+const pair = () => {
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  return {
+    privateKey: privateKey.export({ type: 'pkcs8', format: 'der' }).toString('base64'),
+    publicKey: publicKey.export({ type: 'spki', format: 'der' }).toString('base64'),
+  };
+};
+
+const k1 = pair();
+const k2 = pair();
+const keysK1: QrKeyConfig = {
+  kid: 'k1',
+  privateKey: k1.privateKey,
+  previousKid: '',
+  previousPublicKey: '',
+};
+/** After rotating k1 -> k2. */
+const keysK2: QrKeyConfig = {
+  kid: 'k2',
+  privateKey: k2.privateKey,
+  previousKid: 'k1',
+  previousPublicKey: k1.publicKey,
+};
+
+const NOW = new Date('2026-11-05T07:00:00Z');
+const nowS = NOW.getTime() / 1000;
+
+describe('QrKeyring (ADR-10 key rotation)', () => {
+  it('signs with the current key and trusts current + previous', () => {
+    const ring = new QrKeyring(keysK2);
+    expect(ring.kid).toBe('k2');
+    expect(Object.keys(ring.publicKeys())).toEqual(['k2', 'k1']);
+    expect(ring.edgePublicKeys()).toEqual([
+      { kid: 'k2', spki: k2.publicKey },
+      { kid: 'k1', spki: k1.publicKey },
+    ]);
+  });
+
+  it('trusts only the current key when there was no rotation', () => {
+    expect(new QrKeyring(keysK1).edgePublicKeys().map((k) => k.kid)).toEqual(['k1']);
+  });
+
+  it.each([
+    ['no key', { ...keysK1, privateKey: '' }, 'not configured'],
+    ['no kid', { ...keysK1, kid: '' }, 'not configured'],
+    ['the same kid twice', { ...keysK2, previousKid: 'k2' }, 'must differ'],
+    [
+      'a non-Ed25519 key',
+      {
+        ...keysK1,
+        privateKey: generateKeyPairSync('ec', { namedCurve: 'P-256' })
+          .privateKey.export({ type: 'pkcs8', format: 'der' })
+          .toString('base64'),
+      },
+      'Ed25519',
+    ],
+    [
+      'a non-Ed25519 previous key',
+      {
+        ...keysK2,
+        previousPublicKey: generateKeyPairSync('ec', { namedCurve: 'P-256' })
+          .publicKey.export({ type: 'spki', format: 'der' })
+          .toString('base64'),
+      },
+      'QR_PREVIOUS_PUBLIC_KEY must be an Ed25519',
+    ],
+    ['a previous kid without its key', { ...keysK2, previousPublicKey: '' }, 'both'],
+    ['a previous key without its kid', { ...keysK2, previousKid: '' }, 'both'],
+  ])('refuses %s', (_name, config, message) => {
+    expect(() => new QrKeyring(config)).toThrow(message);
+  });
+});
+
+describe('EmployeeQrService.issueToken (FR-1.2, ADR-10)', () => {
+  const issuer = (keys: QrKeyConfig) => new EmployeeQrService(store, audit, keys, () => NOW);
+
+  it('issues a token for the employee, signed with the current kid, valid for the TTL', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const token = await issuer(keysK1).issueToken(id);
+    const result = verifyQrToken(token, new QrKeyring(keysK1).publicKeys(), nowS);
+    expect(result).toEqual({
+      ok: true,
+      kid: 'k1',
+      claims: { sub: id, exp: nowS + QR_TOKEN_TTL_S, jti: expect.any(String) },
+    });
+  });
+
+  it('uses a new jti every time', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const svc = issuer(keysK1);
+    const jtis = new Set<string>();
+    for (let i = 0; i < 5; i++) {
+      const result = verifyQrToken(
+        await svc.issueToken(id),
+        new QrKeyring(keysK1).publicKeys(),
+        nowS,
+      );
+      if (result.ok) jtis.add(result.claims.jti);
+    }
+    expect(jtis.size).toBe(5);
+  });
+
+  it('keeps tokens from before a rotation valid, and signs new ones with the new kid', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const before = await issuer(keysK1).issueToken(id);
+    const after = await issuer(keysK2).issueToken(id);
+    const trusted = new QrKeyring(keysK2).publicKeys();
+    expect(verifyQrToken(before, trusted, nowS)).toMatchObject({ ok: true, kid: 'k1' });
+    expect(verifyQrToken(after, trusted, nowS)).toMatchObject({ ok: true, kid: 'k2' });
+  });
+
+  const states: [QrNotIssuableError['reason'], Partial<Employee> | null][] = [
+    ['UNKNOWN', null],
+    ['INACTIVE', { active: false }],
+    ['REVOKED', { qrRevoked: true }],
+  ];
+
+  it.each(states)('refuses an %s employee', async (reason, state) => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    if (state) Object.assign(store.rows.get(id)!, state);
+    const target = state ? id : 'nope';
+    const error = await issuer(keysK1)
+      .issueToken(target)
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(QrNotIssuableError);
+    expect(error).toMatchObject({ reason });
+  });
+
+  it('fails clearly when the keys are not configured', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    await expect(eqr.issueToken(id)).rejects.toThrow('QR signing key not configured');
+  });
+});
+
+describe('POST /api/qr/token', () => {
+  /** Stands in for the IAM auth middleware (FR-5.1). */
+  const signedInAs = (id?: string, role = 'EMP') =>
+    Router().use((_req, res, next) => {
+      if (id) res.locals.user = { id, role };
+      next();
+    });
+  const app = (id?: string, role?: string, keys = keysK1) =>
+    createApp([
+      signedInAs(id, role),
+      employeeQrRoutes(new EmployeeQrService(store, audit, keys, () => NOW)),
+    ]);
+
+  it('returns a fresh token for the signed-in employee, not cached', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const res = await request(app(id)).post('/api/qr/token');
+    expect(res.status).toBe(200);
+    expect(res.headers['cache-control']).toBe('no-store');
+    expect(res.body).toEqual({ token: expect.any(String), ttlSeconds: QR_TOKEN_TTL_S });
+    expect(verifyQrToken(res.body.token, new QrKeyring(keysK1).publicKeys(), nowS)).toMatchObject({
+      ok: true,
+      claims: { sub: id },
+    });
+  });
+
+  it('401 when not signed in, 403 with the reason when the employee may not get a QR', async () => {
+    expect((await request(app()).post('/api/qr/token')).status).toBe(401);
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    await eqr.deactivateEmployee('hr-1', id);
+    const res = await request(app(id)).post('/api/qr/token');
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({ reason: 'INACTIVE' });
+  });
+
+  it('403 for a signed-in user who is not an employee', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    expect((await request(app(id, 'HR')).post('/api/qr/token')).status).toBe(403);
+  });
+
+  it('ignores an employeeId in the query or body: the token is for the session user', async () => {
+    const me = await eqr.createEmployee('hr-1', lan);
+    const other = await eqr.createEmployee('hr-1', { ...lan, code: 'E2' });
+    const res = await request(app(me.id))
+      .post(`/api/qr/token?employeeId=${other.id}`)
+      .send({ employeeId: other.id });
+    expect(res.status).toBe(200);
+    expect(verifyQrToken(res.body.token, new QrKeyring(keysK1).publicKeys(), nowS)).toMatchObject({
+      claims: { sub: me.id },
+    });
+  });
+
+  it('503 without leaking the reason when the keys are misconfigured', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const res = await request(app(id, 'EMP', { ...keysK1, privateKey: '' })).post('/api/qr/token');
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: 'QR signing not configured' });
   });
 });

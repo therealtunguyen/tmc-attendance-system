@@ -1,6 +1,11 @@
 export { EmployeeQrRepo } from './employee-qr.repo.js';
 export { employeeQrRoutes } from './employee-qr.routes.js';
-export { DuplicateEmployeeCodeError, EmployeeQrService } from './employee-qr.service.js';
+export { QrKeyring } from './employee-qr.keys.js';
+export {
+  DuplicateEmployeeCodeError,
+  EmployeeQrService,
+  QrNotIssuableError,
+} from './employee-qr.service.js';
 export type {
   DenyReason,
   EdgeSnapshotSource,
