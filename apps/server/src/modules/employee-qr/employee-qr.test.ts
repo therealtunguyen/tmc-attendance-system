@@ -37,11 +37,13 @@ class InMemoryEmployees implements EmployeeStore {
 
   async list(scope?: Scope) {
     return [...this.rows.values()].filter(
-      (e) => !scope || e.factoryId === scope || e.teamId === scope,
+      (e) => scope === undefined || e.factoryId === scope || e.teamId === scope,
     );
   }
 
   async deactivate(id: string) {
+    const employee = this.rows.get(id);
+    if (!employee || (!employee.active && employee.qrRevoked)) return null;
     return this.write(id, { active: false, qrRevoked: true });
   }
 
@@ -126,6 +128,23 @@ describe('EmployeeQrService: employee CRUD (FR-1.1, FR-1.5)', () => {
     expect(await eqr.deactivateEmployee('hr-1', 'nope')).toBeNull();
   });
 
+  it('deactivating an inactive employee whose QR is not revoked still revokes it', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    store.rows.get(id)!.active = false;
+    expect(await eqr.deactivateEmployee('hr-1', id)).toMatchObject({ qrRevoked: true });
+    expect(audit.entries.map((e) => e.action)).toContain('EMPLOYEE_DEACTIVATE');
+  });
+
+  it('two concurrent deactivations audit once', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const both = await Promise.all([
+      eqr.deactivateEmployee('hr-1', id),
+      eqr.deactivateEmployee('hr-2', id),
+    ]);
+    expect(both.every((e) => e?.active === false)).toBe(true);
+    expect(audit.entries.filter((e) => e.action === 'EMPLOYEE_DEACTIVATE')).toHaveLength(1);
+  });
+
   it('lists by factory or team', async () => {
     await eqr.createEmployee('hr-1', lan);
     await eqr.createEmployee('hr-1', {
@@ -169,6 +188,41 @@ describe('employee routes', () => {
     const res = await request(app()).post('/api/employees').send(body);
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ error });
+  });
+
+  it('trims text fields before storing', async () => {
+    const res = await request(app())
+      .post('/api/employees')
+      .send({ ...lan, code: ' BD-0001 ', email: ' lan@tmc.vn ', teamId: ' bd-line-1 ' });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ code: 'BD-0001', email: 'lan@tmc.vn', teamId: 'bd-line-1' });
+    const patched = await request(app())
+      .patch(`/api/employees/${res.body.id}`)
+      .send({ lastName: ' Tran ' });
+    expect(patched.body).toMatchObject({ lastName: 'Tran' });
+  });
+
+  it.each(['a@b', 'a b@c.d', '@c.d'])('rejects email %j (400)', async (email) => {
+    expect(
+      (
+        await request(app())
+          .post('/api/employees')
+          .send({ ...lan, email })
+      ).status,
+    ).toBe(400);
+  });
+
+  it('rejects an array body and an empty PATCH without auditing (400)', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    expect((await request(app()).post('/api/employees').send([lan])).status).toBe(400);
+    expect((await request(app()).patch(`/api/employees/${id}`).send([lan])).status).toBe(400);
+    expect((await request(app()).patch(`/api/employees/${id}`).send({})).status).toBe(400);
+    expect((await request(app()).patch(`/api/employees/${id}`).send({ junk: 1 })).status).toBe(400);
+    expect(audit.entries).toHaveLength(1);
+  });
+
+  it('rejects an empty scope (400)', async () => {
+    expect((await request(app()).get('/api/employees?scope=')).status).toBe(400);
   });
 
   it('GET, PATCH and deactivate one employee', async () => {

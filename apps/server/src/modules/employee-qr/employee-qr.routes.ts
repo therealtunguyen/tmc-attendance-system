@@ -1,4 +1,4 @@
-import { Router, type Response } from 'express';
+import { Router, type Request, type Response } from 'express';
 import { notImplemented } from '../../shared/errors.js';
 import type { UserRef } from '../iam/index.js';
 import {
@@ -22,21 +22,35 @@ const invalid = (body: Record<string, unknown>): string | null => {
     if (key === 'teamId' && value === null) continue;
     if (!isText(value)) return `${key} must be a non-empty string`;
   }
-  if ('email' in body && !String(body.email).includes('@')) return 'email is not valid';
+  if ('email' in body && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((body.email as string).trim())) {
+    return 'email is not valid';
+  }
   return null;
 };
 
+const trimmed = (value: unknown) => (typeof value === 'string' ? value.trim() : value);
+
 const pick = (body: Record<string, unknown>): EmployeeChanges =>
-  Object.fromEntries(editable.filter((key) => key in body).map((key) => [key, body[key]]));
+  Object.fromEntries(editable.filter((key) => key in body).map((key) => [key, trimmed(body[key])]));
+
+/** The JSON body as a plain object, or null for an array or other non-object. */
+const bodyOf = (req: Request): Record<string, unknown> | null => {
+  const body: unknown = req.body ?? {};
+  return typeof body === 'object' && body !== null && !Array.isArray(body)
+    ? (body as Record<string, unknown>)
+    : null;
+};
 
 /** Set by the IAM auth middleware (FR-5.1). Until that lands, writes are audited as 'anonymous'. */
 const actorOf = (res: Response) => (res.locals.user as UserRef | undefined)?.id ?? 'anonymous';
 
 export const employeeQrRoutes = (eqr: EmployeeQrService) =>
   Router()
-    // ?scope=<factoryId or teamId>
+    // TODO(#44): RBAC guard
+    // ?scope=<factoryId or teamId>. TODO(#44): once RBAC lands, scope comes from the signed-in user, not the query.
     .get('/employees', async (req, res) => {
       const scope = typeof req.query.scope === 'string' ? req.query.scope : undefined;
+      if (scope === '') return void res.status(400).json({ error: 'scope must not be empty' });
       res.json(await eqr.listProfiles(scope));
     })
     .get('/employees/:id', async (req, res) => {
@@ -45,11 +59,12 @@ export const employeeQrRoutes = (eqr: EmployeeQrService) =>
       res.json(employee);
     })
     .post('/employees', async (req, res) => {
-      const body = (req.body ?? {}) as Record<string, unknown>;
+      const body = bodyOf(req);
+      if (!body) return void res.status(400).json({ error: 'body must be a JSON object' });
       const missing = required.find((key) => !isText(body[key]));
       const error = missing ? `${missing} is required` : invalid(body);
       if (error) return void res.status(400).json({ error });
-      const data = { teamId: null, ...pick(body), code: body.code } as NewEmployee;
+      const data = { teamId: null, ...pick(body), code: trimmed(body.code) } as NewEmployee;
       try {
         res.status(201).json(await eqr.createEmployee(actorOf(res), data));
       } catch (e) {
@@ -58,11 +73,16 @@ export const employeeQrRoutes = (eqr: EmployeeQrService) =>
       }
     })
     .patch('/employees/:id', async (req, res) => {
-      const body = (req.body ?? {}) as Record<string, unknown>;
+      const body = bodyOf(req);
+      if (!body) return void res.status(400).json({ error: 'body must be a JSON object' });
       if ('code' in body) return void res.status(400).json({ error: 'code cannot change' });
       const error = invalid(body);
       if (error) return void res.status(400).json({ error });
-      const employee = await eqr.updateEmployee(actorOf(res), req.params.id, pick(body));
+      const changes = pick(body);
+      if (Object.keys(changes).length === 0) {
+        return void res.status(400).json({ error: 'no editable fields given' });
+      }
+      const employee = await eqr.updateEmployee(actorOf(res), req.params.id, changes);
       if (!employee) return void res.status(404).json({ error: 'Employee not found' });
       res.json(employee);
     })

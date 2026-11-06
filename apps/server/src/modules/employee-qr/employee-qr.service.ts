@@ -49,7 +49,7 @@ export interface EmployeeStore {
   find(id: string): Promise<Employee | null>;
   /** All employees, or those in one factory or team. */
   list(scope?: Scope): Promise<Employee[]>;
-  /** Sets active = false and qrRevoked = true in one write (FR-1.5). */
+  /** Sets active = false and qrRevoked = true in one conditional write (FR-1.5). Null when there is nothing to change (unknown, or already deactivated and revoked). */
   deactivate(id: string): Promise<Employee | null>;
 }
 
@@ -111,6 +111,7 @@ export class EmployeeQrService
     changes: EmployeeChanges,
   ): Promise<Employee | null> {
     const employee = await this.repo.update(id, changes);
+    // TODO(#45): write the change and its audit entry in one transaction
     if (employee) await this.record(actorId, 'EMPLOYEE_UPDATE', id);
     return employee;
   }
@@ -127,9 +128,12 @@ export class EmployeeQrService
   async deactivateEmployee(actorId: string, id: string): Promise<Employee | null> {
     const before = await this.repo.find(id);
     if (!before) return null;
-    if (!before.active) return before;
+    if (!before.active && before.qrRevoked) return before;
     const employee = await this.repo.deactivate(id);
-    if (employee) await this.record(actorId, 'EMPLOYEE_DEACTIVATE', id);
+    // Null: a concurrent request got there first, and it audits.
+    if (!employee) return this.repo.find(id);
+    // TODO(#45): write the change and its audit entry in one transaction
+    await this.record(actorId, 'EMPLOYEE_DEACTIVATE', id);
     return employee;
   }
 

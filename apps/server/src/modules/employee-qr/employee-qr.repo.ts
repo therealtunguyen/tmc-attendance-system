@@ -46,14 +46,19 @@ export class EmployeeQrRepo implements EmployeeStore {
 
   list(scope?: Scope): Promise<Employee[]> {
     return this.db.employee.findMany({
-      where: scope ? { OR: [{ factoryId: scope }, { teamId: scope }] } : {},
+      where: scope !== undefined ? { OR: [{ factoryId: scope }, { teamId: scope }] } : {},
       orderBy: { code: 'asc' },
       select: columns,
     });
   }
 
-  deactivate(id: string): Promise<Employee | null> {
-    return this.write(id, { active: false, qrRevoked: true });
+  async deactivate(id: string): Promise<Employee | null> {
+    // Conditional, so of two concurrent deactivations only one changes the row.
+    const { count } = await this.db.employee.updateMany({
+      where: { id, OR: [{ active: true }, { qrRevoked: false }] },
+      data: { active: false, qrRevoked: true },
+    });
+    return count ? this.find(id) : null;
   }
 
   private async write(
