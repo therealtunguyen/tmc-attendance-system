@@ -87,13 +87,23 @@ model Gate {
   edge   Edge   @relation(fields: [edgeId], references: [id])
 }
 
-// Owned by the iam module. Append-only (FR-4.7).
+// Owned by the iam module. Append-only and hash-chained (FR-4.9): a trigger rejects UPDATE, DELETE
+// and TRUNCATE, and each row's hash covers the previous row's hash, so an edit or a gap is detectable.
 model AuditEntry {
-  id      String   @id @default(uuid())
-  actorId String
-  action  String
-  target  String
-  at      DateTime @default(now())
+  id       String   @id @default(uuid())
+  // Chain order. Assigned under an advisory lock, so there is one chain with no forks.
+  seq      Int      @unique @default(autoincrement())
+  actorId  String
+  action   String
+  target   String
+  // Values before and after a data change (FR-4.9). Null for actions that change nothing.
+  before   Json?
+  after    Json?
+  at       DateTime @default(now())
+  prevHash String
+  hash     String
 
   @@index([actorId, at])
+  @@index([target, at])
+  @@index([at])
 }
