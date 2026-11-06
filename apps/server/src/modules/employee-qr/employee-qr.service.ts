@@ -74,6 +74,9 @@ export interface QrKeyConfig {
 }
 
 /** issueToken refuses an employee who would be denied at the gate anyway. */
+/** The QR keys are missing or malformed (a deployment problem, not a caller one). */
+export class QrNotConfiguredError extends Error {}
+
 export class QrNotIssuableError extends Error {
   constructor(readonly reason: 'UNKNOWN' | 'INACTIVE' | 'REVOKED') {
     super(`No QR token: employee is ${reason.toLowerCase()}`);
@@ -114,7 +117,11 @@ export class EmployeeQrService
 
   /** Built on first use, so the server still starts (and serves everything else) without QR keys. */
   private get ring(): QrKeyring {
-    return (this.keyring ??= new QrKeyring(this.keys));
+    try {
+      return (this.keyring ??= new QrKeyring(this.keys));
+    } catch (e) {
+      throw new QrNotConfiguredError((e as Error).message);
+    }
   }
 
   async createEmployee(actorId: string, data: NewEmployee): Promise<Employee> {

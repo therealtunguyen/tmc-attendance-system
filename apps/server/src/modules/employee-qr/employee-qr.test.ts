@@ -316,6 +316,18 @@ describe('QrKeyring (ADR-10 key rotation)', () => {
       },
       'Ed25519',
     ],
+    [
+      'a non-Ed25519 previous key',
+      {
+        ...keysK2,
+        previousPublicKey: generateKeyPairSync('ec', { namedCurve: 'P-256' })
+          .publicKey.export({ type: 'spki', format: 'der' })
+          .toString('base64'),
+      },
+      'QR_PREVIOUS_PUBLIC_KEY must be an Ed25519',
+    ],
+    ['a previous kid without its key', { ...keysK2, previousPublicKey: '' }, 'both'],
+    ['a previous key without its kid', { ...keysK2, previousKid: '' }, 'both'],
   ])('refuses %s', (_name, config, message) => {
     expect(() => new QrKeyring(config)).toThrow(message);
   });
@@ -384,15 +396,15 @@ describe('EmployeeQrService.issueToken (FR-1.2, ADR-10)', () => {
 
 describe('POST /api/qr/token', () => {
   /** Stands in for the IAM auth middleware (FR-5.1). */
-  const signedInAs = (id?: string) =>
+  const signedInAs = (id?: string, role = 'EMP') =>
     Router().use((_req, res, next) => {
-      if (id) res.locals.user = { id, role: 'EMP' };
+      if (id) res.locals.user = { id, role };
       next();
     });
-  const app = (id?: string) =>
+  const app = (id?: string, role?: string, keys = keysK1) =>
     createApp([
-      signedInAs(id),
-      employeeQrRoutes(new EmployeeQrService(store, audit, keysK1, () => NOW)),
+      signedInAs(id, role),
+      employeeQrRoutes(new EmployeeQrService(store, audit, keys, () => NOW)),
     ]);
 
   it('returns a fresh token for the signed-in employee, not cached', async () => {
@@ -414,5 +426,29 @@ describe('POST /api/qr/token', () => {
     const res = await request(app(id)).post('/api/qr/token');
     expect(res.status).toBe(403);
     expect(res.body).toMatchObject({ reason: 'INACTIVE' });
+  });
+
+  it('403 for a signed-in user who is not an employee', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    expect((await request(app(id, 'HR')).post('/api/qr/token')).status).toBe(403);
+  });
+
+  it('ignores an employeeId in the query or body: the token is for the session user', async () => {
+    const me = await eqr.createEmployee('hr-1', lan);
+    const other = await eqr.createEmployee('hr-1', { ...lan, code: 'E2' });
+    const res = await request(app(me.id))
+      .post(`/api/qr/token?employeeId=${other.id}`)
+      .send({ employeeId: other.id });
+    expect(res.status).toBe(200);
+    expect(verifyQrToken(res.body.token, new QrKeyring(keysK1).publicKeys(), nowS)).toMatchObject({
+      claims: { sub: me.id },
+    });
+  });
+
+  it('503 without leaking the reason when the keys are misconfigured', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const res = await request(app(id, 'EMP', { ...keysK1, privateKey: '' })).post('/api/qr/token');
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: 'QR signing not configured' });
   });
 });

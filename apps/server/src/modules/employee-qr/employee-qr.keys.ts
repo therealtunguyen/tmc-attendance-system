@@ -21,6 +21,9 @@ export class QrKeyring {
     if (config.previousKid === config.kid) {
       throw new Error('QR_PREVIOUS_KID must differ from QR_SIGNING_KID');
     }
+    if (!config.previousKid !== !config.previousPublicKey) {
+      throw new Error('Set both QR_PREVIOUS_KID and QR_PREVIOUS_PUBLIC_KEY, or neither');
+    }
     this.kid = config.kid;
     this.signingKey = createPrivateKey({
       key: der(config.privateKey),
@@ -37,6 +40,9 @@ export class QrKeyring {
         format: 'der',
         type: 'spki',
       });
+      if (key.asymmetricKeyType !== 'ed25519') {
+        throw new Error('QR_PREVIOUS_PUBLIC_KEY must be an Ed25519 key');
+      }
       this.trusted.push({ kid: config.previousKid, key });
     }
   }
