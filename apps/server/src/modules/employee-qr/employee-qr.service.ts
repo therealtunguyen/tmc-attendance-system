@@ -1,17 +1,21 @@
 import { randomUUID } from 'node:crypto';
-import type { EdgeSnapshot } from '../../shared/contracts/edge.js';
+import type { EdgeSnapshot, SnapshotEmployee } from '../../shared/contracts/edge.js';
 import { QR_TOKEN_TTL_S, signQrToken } from '../../shared/contracts/qr-token.js';
+import {
+  checkQrToken,
+  type QrCheckResult,
+  type QrDenyReason,
+} from '../../shared/contracts/qr-validation.js';
 import { todo } from '../../shared/errors.js';
 import type { Scope } from '../../shared/types.js';
 import type { AuditLog } from '../iam/index.js';
 import { QrKeyring } from './employee-qr.keys.js';
 
-/** REPLAYED: a jti already seen (ADR-10). */
-export type DenyReason =
-  'INVALID_SIGNATURE' | 'EXPIRED' | 'REVOKED' | 'INACTIVE' | 'UNKNOWN' | 'REPLAYED';
+/** REPLAYED: a jti already seen (ADR-10); only the edge checks it. */
+export type DenyReason = QrDenyReason | 'REPLAYED';
 
-export type ValidationResult =
-  { ok: true; employeeId: string; firstName: string } | { ok: false; reason: DenyReason };
+/** Rules in shared/contracts/qr-validation.ts, so the edge decides exactly like the server. */
+export type ValidationResult = QrCheckResult | { ok: false; reason: 'REPLAYED'; jti: string };
 
 export interface EmployeeSummary {
   id: string;
@@ -162,16 +166,28 @@ export class EmployeeQrService
     return employee;
   }
 
-  async validate(): Promise<ValidationResult> {
-    return todo();
+  /**
+   * Server-side check (FR-2.2), e.g. for the kiosk route until it moves to the edge (#29).
+   * A repository error rejects (fail closed): the caller maps it to 5xx and the gate never opens.
+   * Does not check jti reuse: the edge does (#25), so no kiosk route may call this directly before #29.
+   */
+  async validate(token: string): Promise<ValidationResult> {
+    return checkQrToken(token, {
+      publicKeys: this.ring.publicKeys(),
+      findEmployee: async (id) => {
+        const employee = await this.repo.find(id);
+        return employee && admission(employee);
+      },
+      nowS: Math.floor(this.now().getTime() / 1000),
+    });
   }
 
   /** Signed with the current key; a fresh jti every call, so a screenshot is useless after TTL (ADR-10). */
   async issueToken(employeeId: string): Promise<string> {
     const employee = await this.repo.find(employeeId);
     if (!employee) throw new QrNotIssuableError('UNKNOWN');
-    if (!employee.active) throw new QrNotIssuableError('INACTIVE');
-    if (employee.qrRevoked) throw new QrNotIssuableError('REVOKED');
+    const { deny } = admission(employee);
+    if (deny) throw new QrNotIssuableError(deny);
     const exp = Math.floor(this.now().getTime() / 1000) + QR_TOKEN_TTL_S;
     const { kid, signingKey } = this.ring;
     return signQrToken({ sub: employee.id, exp, jti: randomUUID() }, kid, signingKey);
@@ -194,6 +210,13 @@ export class EmployeeQrService
     return this.audit.append({ actorId, action, target: `employee:${employeeId}`, at: new Date() });
   }
 }
+
+/** What a gate needs to know about an employee; also one entry of the edge snapshot (ADR-9). */
+const admission = ({ id, firstName, active, qrRevoked }: Employee): SnapshotEmployee => ({
+  id,
+  firstName,
+  deny: !active ? 'INACTIVE' : qrRevoked ? 'REVOKED' : null,
+});
 
 /** Drops contact and org fields before another module sees the employee. */
 const summary = ({ id, firstName, lastName, active }: Employee): EmployeeSummary => ({
