@@ -20,10 +20,19 @@ model Employee {
   code      String   @unique
   firstName String
   lastName  String
+  // Where the QR page link is sent (FR-1.3).
+  email     String
+  // Org IDs from the admin module (FR-5.3); plain strings, no relation. RBAC scopes by them (FR-5.2).
+  factoryId String
+  teamId    String?
+  // false = deactivated (FR-1.5). Rows are never deleted: attendance history refers to them.
   active    Boolean  @default(true)
   // HR revoked the QR (FR-1.4); the server stops issuing tokens and edges deny via the snapshot.
   qrRevoked Boolean  @default(false)
   createdAt DateTime @default(now())
+
+  @@index([factoryId])
+  @@index([teamId])
 }
 
 enum ScanMethod {
