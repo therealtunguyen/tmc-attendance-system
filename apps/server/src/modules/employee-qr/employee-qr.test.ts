@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../app.js';
 import { QR_TOKEN_TTL_S, signQrToken, verifyQrToken } from '../../shared/contracts/qr-token.js';
 import type { Scope } from '../../shared/types.js';
-import type { AuditEntry, AuditLog } from '../iam/index.js';
+import type { AuditEntry, AuditLog, UserRef } from '../iam/index.js';
 import { QrKeyring } from './employee-qr.keys.js';
 import { employeeQrRoutes } from './employee-qr.routes.js';
 import {
@@ -171,8 +171,17 @@ describe('EmployeeQrService: employee CRUD (FR-1.1, FR-1.5)', () => {
   });
 });
 
+/** Stands in for the IAM auth middleware (FR-5.1). */
+const signedIn = (user?: UserRef) =>
+  Router().use((_req, res, next) => {
+    if (user) res.locals.user = user;
+    next();
+  });
+
 describe('employee routes', () => {
-  const app = () => createApp([employeeQrRoutes(eqr)]);
+  const hrUser: UserRef = { id: 'hr-9', role: 'HR' };
+  const app = (user: UserRef | undefined = hrUser) =>
+    createApp([signedIn(user), employeeQrRoutes(eqr)]);
 
   it('POST /api/employees creates (201), then 409 on the same code', async () => {
     const created = await request(app())
@@ -243,7 +252,7 @@ describe('employee routes', () => {
     const off = await request(app()).post(`/api/employees/${id}/deactivate`);
     expect(off.body).toMatchObject({ active: false, qrRevoked: true });
     expect(audit.entries.at(-1)).toMatchObject({
-      actorId: 'anonymous',
+      actorId: 'hr-9',
       action: 'EMPLOYEE_DEACTIVATE',
     });
   });
@@ -256,6 +265,97 @@ describe('employee routes', () => {
     ]) {
       expect(res.status).toBe(404);
     }
+  });
+});
+
+describe('employee routes: RBAC (FR-5.3, BR-15)', () => {
+  const app = (user?: UserRef) => createApp([signedIn(user), employeeQrRoutes(eqr)]);
+  const hrIn = (...scopes: string[]): UserRef => ({ id: 'hr-f', role: 'HR', scopes });
+  const elsewhere = { ...lan, code: 'LA-1', factoryId: 'long-an', teamId: null };
+  const seed = async () => ({
+    mine: await eqr.createEmployee('hr-1', lan),
+    other: await eqr.createEmployee('hr-1', elsewhere),
+  });
+
+  it('401 when nobody is signed in', async () => {
+    expect((await request(app()).get('/api/employees')).status).toBe(401);
+    expect((await request(app()).post('/api/employees').send(lan)).status).toBe(401);
+  });
+
+  it('403 for an employee on writes and lists', async () => {
+    const emp: UserRef = { id: 'e-1', role: 'EMP' };
+    expect((await request(app(emp)).post('/api/employees').send(lan)).status).toBe(403);
+    expect((await request(app(emp)).get('/api/employees')).status).toBe(403);
+    expect(store.rows.size).toBe(0);
+  });
+
+  it('403 for a supervisor: profiles are HR/ADM only', async () => {
+    const { mine } = await seed();
+    const sup: UserRef = { id: 'sup-1', role: 'SUP', scopes: ['bd-line-1'] };
+    expect((await request(app(sup)).get('/api/employees')).status).toBe(403);
+    expect((await request(app(sup)).get(`/api/employees/${mine.id}`)).status).toBe(403);
+  });
+
+  it('factory-scoped HR lists their factory, defaulting to the single scope', async () => {
+    await seed();
+    const user = hrIn('binh-duong');
+    for (const url of ['/api/employees', '/api/employees?scope=binh-duong']) {
+      const res = await request(app(user)).get(url);
+      expect(res.body.map((e: Employee) => e.code)).toEqual(['BD-0001']);
+    }
+  });
+
+  it('400 without a scope when HR has several; 403 for a factory outside theirs', async () => {
+    await seed();
+    const user = hrIn('binh-duong', 'long-an');
+    const res = await request(app(user)).get('/api/employees');
+    expect([res.status, res.body]).toEqual([400, { error: 'scope is required' }]);
+    const ok = await request(app(user)).get('/api/employees?scope=long-an');
+    expect(ok.body.map((e: Employee) => e.code)).toEqual(['LA-1']);
+    expect(
+      (await request(app(hrIn('binh-duong'))).get('/api/employees?scope=long-an')).status,
+    ).toBe(403);
+  });
+
+  it('GET one employee: own factory 200, other factory 404 like a missing one', async () => {
+    const { mine, other } = await seed();
+    const user = hrIn('binh-duong');
+    expect((await request(app(user)).get(`/api/employees/${mine.id}`)).status).toBe(200);
+    expect((await request(app(user)).get(`/api/employees/${other.id}`)).status).toBe(404);
+  });
+
+  it('PATCH and deactivate in another factory are 404; create or move into one is 403', async () => {
+    const { mine, other } = await seed();
+    const user = hrIn('binh-duong');
+    const patch = (id: string, body: object) =>
+      request(app(user)).patch(`/api/employees/${id}`).send(body);
+    expect((await patch(other.id, { lastName: 'X' })).status).toBe(404);
+    expect((await request(app(user)).post(`/api/employees/${other.id}/deactivate`)).status).toBe(
+      404,
+    );
+    expect(
+      (
+        await request(app(user))
+          .post('/api/employees')
+          .send({ ...elsewhere, code: 'LA-2' })
+      ).status,
+    ).toBe(403);
+    expect((await patch(mine.id, { factoryId: 'long-an' })).status).toBe(403);
+    expect(store.rows.get(mine.id)!.factoryId).toBe('binh-duong');
+    expect(store.rows.get(other.id)).toMatchObject({ lastName: 'Nguyen', active: true });
+    expect(
+      (
+        await request(app(user))
+          .post('/api/employees')
+          .send({ ...lan, code: 'BD-3' })
+      ).status,
+    ).toBe(201);
+  });
+
+  it('an unscoped HR may list everything without a scope', async () => {
+    await seed();
+    const res = await request(app({ id: 'hr-1', role: 'HR' })).get('/api/employees');
+    expect(res.body).toHaveLength(2);
   });
 });
 
@@ -400,12 +500,8 @@ describe('EmployeeQrService.issueToken (FR-1.2, ADR-10)', () => {
 });
 
 describe('POST /api/qr/token', () => {
-  /** Stands in for the IAM auth middleware (FR-5.1). */
   const signedInAs = (id?: string, role = 'EMP') =>
-    Router().use((_req, res, next) => {
-      if (id) res.locals.user = { id, role };
-      next();
-    });
+    signedIn(id ? ({ id, role } as UserRef) : undefined);
   const app = (id?: string, role?: string, keys = keysK1) =>
     createApp([
       signedInAs(id, role),
@@ -433,9 +529,11 @@ describe('POST /api/qr/token', () => {
     expect(res.body).toMatchObject({ reason: 'INACTIVE' });
   });
 
-  it('403 for a signed-in user who is not an employee', async () => {
+  it('every role may view its own QR (self:read)', async () => {
     const { id } = await eqr.createEmployee('hr-1', lan);
-    expect((await request(app(id, 'HR')).post('/api/qr/token')).status).toBe(403);
+    for (const role of ['EMP', 'SUP', 'HR', 'GRD', 'ADM', 'EXE']) {
+      expect((await request(app(id, role)).post('/api/qr/token')).status).toBe(200);
+    }
   });
 
   it('ignores an employeeId in the query or body: the token is for the session user', async () => {

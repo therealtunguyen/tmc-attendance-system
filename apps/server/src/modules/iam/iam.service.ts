@@ -1,5 +1,5 @@
-import { todo } from '../../shared/errors.js';
 import type { Scope } from '../../shared/types.js';
+import { check, type Permission } from './iam.rbac.js';
 import { verifyChain, type ChainedEntry, type ChainVerdict } from './iam.audit-chain.js';
 
 export type { ChainedEntry, ChainVerdict } from './iam.audit-chain.js';
@@ -9,6 +9,12 @@ export type Role = 'EMP' | 'GRD' | 'SUP' | 'HR' | 'ADM' | 'EXE';
 export interface UserRef {
   id: string;
   role: Role;
+  /**
+   * Org unit IDs (factory or team) the user is limited to (FR-5.3, BR-15).
+   * undefined = not limited, except for SUP, which is always team-scoped:
+   * undefined or empty then means no team at all.
+   */
+  scopes?: Scope[];
 }
 
 export interface AuditEntry {
@@ -31,7 +37,7 @@ export interface AuditFilter {
 }
 
 export interface Authorizer {
-  check(user: UserRef, permission: string, scope?: Scope): boolean;
+  check(user: UserRef, permission: Permission, scope?: Scope): boolean;
 }
 
 export interface AuditLog {
@@ -62,8 +68,8 @@ export const MAX_AUDIT_LIMIT = 500;
 export class IamService implements Authorizer, AuditLog, AuditReader {
   constructor(private store: AuditStore) {}
 
-  check(): boolean {
-    return todo();
+  check(user: UserRef, permission: Permission, scope?: Scope): boolean {
+    return check(user, permission, scope);
   }
 
   append(entry: AuditEntry): Promise<void> {
