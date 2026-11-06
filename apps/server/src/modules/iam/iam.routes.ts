@@ -1,7 +1,27 @@
-import { Router, type Request } from 'express';
-import { notImplemented } from '../../shared/errors.js';
+import { Router, type Request, type RequestHandler } from 'express';
 import { requirePermission } from './iam.rbac.js';
-import type { AuditFilter, AuditReader } from './iam.service.js';
+import type { AuditFilter, AuditReader, Authenticator, UserRef } from './iam.service.js';
+
+/** The bearer token of the request, or undefined when the header is missing or malformed. */
+const bearer = (req: Request): string | undefined => {
+  const match = /^Bearer ([^\s]+)$/i.exec(req.headers.authorization ?? '');
+  return match?.[1];
+};
+
+/**
+ * Sets res.locals.user from a valid, fully authenticated session (FR-5.2). Never rejects:
+ * routes decide through requirePermission, which answers 401 without a user.
+ */
+export const authenticate =
+  (auth: Authenticator): RequestHandler =>
+  async (req, res, next) => {
+    const token = bearer(req);
+    if (token) {
+      const user = await auth.authenticate(token);
+      if (user) res.locals.user = user;
+    }
+    next();
+  };
 
 const text = ['actorId', 'action', 'target'] as const;
 
@@ -34,9 +54,42 @@ const parseFilter = (req: Request): AuditFilter | string => {
 };
 
 // Read-only on purpose: no route can change or delete an entry (FR-4.10).
-export const iamRoutes = (iam: AuditReader) =>
+export const iamRoutes = (iam: AuditReader & Authenticator) =>
   Router()
-    .post('/auth/login', notImplemented)
+    .post('/auth/login', async (req, res) => {
+      const { username, password } = (req.body ?? {}) as Record<string, unknown>;
+      if (typeof username !== 'string' || typeof password !== 'string' || !username || !password) {
+        return void res.status(400).json({ error: 'username and password are required' });
+      }
+      const result = await iam.login(username, password);
+      if (result.ok) {
+        const body = result.mfaRequired
+          ? { token: result.token, mfaRequired: true }
+          : { token: result.token, mfaRequired: false, expiresAt: result.expiresAt };
+        return void res.set('Cache-Control', 'no-store').json(body);
+      }
+      if (result.reason === 'LOCKED') return void res.status(423).json({ error: 'Account locked' });
+      if (result.reason === 'MFA_NOT_ENROLLED') {
+        return void res.status(403).json({ error: 'MFA not enrolled' });
+      }
+      res.status(401).json({ error: 'Invalid username or password' });
+    })
+    .post('/auth/mfa', async (req, res) => {
+      const token = bearer(req);
+      const { code } = (req.body ?? {}) as Record<string, unknown>;
+      if (typeof code !== 'string') return void res.status(400).json({ error: 'code is required' });
+      const result = token ? await iam.verifyMfa(token, code) : null;
+      if (!result?.ok) return void res.status(401).json({ error: 'Invalid or expired code' });
+      res.json({ expiresAt: result.expiresAt });
+    })
+    .post('/auth/logout', async (req, res) => {
+      const token = bearer(req);
+      if (token) await iam.logout(token);
+      res.status(204).end();
+    })
+    .get('/auth/me', requirePermission('self:read'), (_req, res) => {
+      res.json(res.locals.user as UserRef);
+    })
     .get('/audit', requirePermission('audit:read'), async (req, res) => {
       const filter = parseFilter(req);
       if (typeof filter === 'string') return void res.status(400).json({ error: filter });
