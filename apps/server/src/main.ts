@@ -25,7 +25,7 @@ const hrs = config.hrsMode === 'http' ? new HrsHttpClient(config.hrsBaseUrl) : n
 
 const iam = new IamService(new IamRepo(db));
 const admin = new AdminService(new AdminRepo(db));
-const eqr = new EmployeeQrService(new EmployeeQrRepo(db), iam, config.qrSigningSecret);
+const eqr = new EmployeeQrService(new EmployeeQrRepo(db), iam, config.qrKeys);
 const attendance = new AttendanceService(new AttendanceRepo(db));
 const reporting = new ReportingService(new ReportingRepo(db), attendance, admin, hrs, iam);
 const gate = new GateService(new GateRepo(db), eqr, attendance, turnstile, admin, reporting, iam);

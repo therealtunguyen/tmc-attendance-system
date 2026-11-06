@@ -1,4 +1,5 @@
 import type { TurnstileClient } from '../../adapters/tcs/turnstile-client.js';
+import type { EdgeHeartbeat } from '../../shared/contracts/edge.js';
 import { todo } from '../../shared/errors.js';
 import type { ConfigReader } from '../admin/index.js';
 import type { AttendanceRecorder } from '../attendance/index.js';
@@ -36,6 +37,11 @@ export class GateService {
   }
 
   async heartbeat(_gateId: string): Promise<void> {
+    return todo();
+  }
+
+  /** Marks the edge online; the edge is offline when these stop (ADR-9, FR-2.6). */
+  async edgeHeartbeat(_hb: EdgeHeartbeat): Promise<void> {
     return todo();
   }
 }

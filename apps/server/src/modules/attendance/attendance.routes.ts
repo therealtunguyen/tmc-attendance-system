@@ -5,4 +5,6 @@ import type { AttendanceService } from './attendance.service.js';
 export const attendanceRoutes = (_attendance: AttendanceService) =>
   Router()
     .get('/me/attendance', notImplemented)
-    .post('/attendance/:recordId/corrections', notImplemented);
+    .post('/attendance/:recordId/corrections', notImplemented)
+    // Edge outbox (ADR-9). Body: PushEventsRequest. Response: PushEventsResponse.
+    .post('/edge/events', notImplemented);

@@ -7,4 +7,6 @@ export const gateRoutes = (_gate: GateService) =>
     .post('/kiosk/scan', notImplemented)
     .post('/kiosk/heartbeat', notImplemented)
     .get('/gates', notImplemented)
-    .post('/gates/:gateId/override', notImplemented);
+    .post('/gates/:gateId/override', notImplemented)
+    // Edge agent (ADR-9). Body: EdgeHeartbeat. Response: 204.
+    .post('/edge/heartbeat', notImplemented);

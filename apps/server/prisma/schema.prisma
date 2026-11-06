@@ -1,4 +1,7 @@
-// Starter models only. Each module owns its own tables (see report, section Logical Architecture).
+// Skeleton: the columns the shared contracts need (ADR-9, ADR-10). Each model names its owning module;
+// owners add their own columns. A module never reads another module's tables, so there are no
+// relations across modules: IDs like AttendanceEvent.gateId are plain strings.
+// QR signing keys stay in env (QR_SIGNING_*), so they have no table.
 
 generator client {
   provider            = "prisma-client"
@@ -13,12 +16,14 @@ datasource db {
 
 // Owned by the employee-qr module.
 model Employee {
-  id         String   @id @default(uuid())
-  code       String   @unique
-  firstName  String
-  lastName   String
-  active     Boolean  @default(true)
-  createdAt  DateTime @default(now())
+  id        String   @id @default(uuid())
+  code      String   @unique
+  firstName String
+  lastName  String
+  active    Boolean  @default(true)
+  // HR revoked the QR (FR-1.4); the server stops issuing tokens and edges deny via the snapshot.
+  qrRevoked Boolean  @default(false)
+  createdAt DateTime @default(now())
 }
 
 enum ScanMethod {
@@ -38,8 +43,48 @@ model AttendanceEvent {
   eventId    String      @unique
   employeeId String?
   gateId     String
+  // Edge agent that pushed it (ADR-9). Null for events entered on the server (MANUAL fallback).
+  edgeId     String?
   method     ScanMethod
   outcome    ScanOutcome @default(PENDING)
+  // Token ID; not unique, so one jti used at two edges is stored and flagged (ADR-10).
+  jti        String?
+  // Decided from a snapshot older than 5 min; checked against revocations at sync (ADR-9).
+  stale      Boolean     @default(false)
+  // Edge clock.
   occurredAt DateTime
-  createdAt  DateTime    @default(now())
+  // Server clock, to expose a drifting edge clock.
+  receivedAt DateTime    @default(now())
+
+  @@index([jti])
+}
+
+// Owned by the gate module. One edge agent per factory (ADR-9).
+model Edge {
+  id              String    @id
+  name            String
+  // Heartbeats stop -> offline -> alert ADM (FR-2.6).
+  lastHeartbeatAt DateTime?
+  // Last successful push; the monthly export checks it (ADR-9, ADR-5).
+  lastSyncAt      DateTime?
+  gates           Gate[]
+}
+
+// Owned by the gate module.
+model Gate {
+  id     String @id
+  name   String
+  edgeId String
+  edge   Edge   @relation(fields: [edgeId], references: [id])
+}
+
+// Owned by the iam module. Append-only (FR-4.7).
+model AuditEntry {
+  id      String   @id @default(uuid())
+  actorId String
+  action  String
+  target  String
+  at      DateTime @default(now())
+
+  @@index([actorId, at])
 }

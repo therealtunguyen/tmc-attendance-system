@@ -5,6 +5,7 @@ export type {
   AttendanceQuery,
   AttendanceRecorder,
   DailyRecord,
+  EdgeIngest,
   ScanEvent,
   ScanOutcome,
 } from './attendance.service.js';

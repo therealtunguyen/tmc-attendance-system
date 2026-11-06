@@ -9,5 +9,11 @@ export const config = {
   tcsBaseUrl: process.env.TCS_BASE_URL ?? '',
   hrsMode: mode(process.env.HRS_MODE),
   hrsBaseUrl: process.env.HRS_BASE_URL ?? '',
-  qrSigningSecret: process.env.QR_SIGNING_SECRET ?? '',
+  /** Ed25519 keys as base64 DER, see .env.example. Empty until set. */
+  qrKeys: {
+    kid: process.env.QR_SIGNING_KID ?? '',
+    privateKey: process.env.QR_SIGNING_KEY ?? '',
+    previousKid: process.env.QR_PREVIOUS_KID ?? '',
+    previousPublicKey: process.env.QR_PREVIOUS_PUBLIC_KEY ?? '',
+  },
 };
