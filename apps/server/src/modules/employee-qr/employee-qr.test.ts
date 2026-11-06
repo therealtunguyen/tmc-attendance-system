@@ -1,9 +1,9 @@
-import { generateKeyPairSync, randomUUID } from 'node:crypto';
+import { createPrivateKey, generateKeyPairSync, randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../app.js';
-import { QR_TOKEN_TTL_S, verifyQrToken } from '../../shared/contracts/qr-token.js';
+import { QR_TOKEN_TTL_S, signQrToken, verifyQrToken } from '../../shared/contracts/qr-token.js';
 import type { Scope } from '../../shared/types.js';
 import type { AuditEntry, AuditLog } from '../iam/index.js';
 import { QrKeyring } from './employee-qr.keys.js';
@@ -269,6 +269,11 @@ const pair = () => {
 };
 
 const k1 = pair();
+const priv1 = createPrivateKey({
+  key: Buffer.from(k1.privateKey, 'base64'),
+  format: 'der',
+  type: 'pkcs8',
+});
 const k2 = pair();
 const keysK1: QrKeyConfig = {
   kid: 'k1',
@@ -476,6 +481,34 @@ describe('EmployeeQrService.validate (FR-2.2)', () => {
     store.rows.get(rev.id)!.qrRevoked = true;
     expect(await svc(keysK1).validate(offToken)).toMatchObject({ ok: false, reason: 'INACTIVE' });
     expect(await svc(keysK1).validate(revToken)).toMatchObject({ ok: false, reason: 'REVOKED' });
+  });
+
+  it('denies INACTIVE when the employee is both inactive and revoked', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const token = await svc(keysK1).issueToken(id);
+    Object.assign(store.rows.get(id)!, { active: false, qrRevoked: true });
+    expect(await svc(keysK1).validate(token)).toMatchObject({ ok: false, reason: 'INACTIVE' });
+  });
+
+  it('denies UNKNOWN for a deleted employee', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const token = await svc(keysK1).issueToken(id);
+    store.rows.delete(id);
+    expect(await svc(keysK1).validate(token)).toMatchObject({ ok: false, reason: 'UNKNOWN' });
+  });
+
+  it('denies INVALID_SIGNATURE for a token signed by a foreign key', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const foreign = generateKeyPairSync('ed25519').privateKey;
+    const token = signQrToken({ sub: id, exp: nowS + 60, jti: 'j' }, 'k1', foreign);
+    expect(await svc(keysK1).validate(token)).toEqual({ ok: false, reason: 'INVALID_SIGNATURE' });
+  });
+
+  it('accepts exp 10 s in the past and denies 11 s as EXPIRED', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const signed = (exp: number) => signQrToken({ sub: id, exp, jti: 'j' }, 'k1', priv1);
+    expect(await svc(keysK1).validate(signed(nowS - 10))).toMatchObject({ ok: true });
+    expect(await svc(keysK1).validate(signed(nowS - 11))).toEqual({ ok: false, reason: 'EXPIRED' });
   });
 
   it('admits a token from the previous key after a rotation', async () => {

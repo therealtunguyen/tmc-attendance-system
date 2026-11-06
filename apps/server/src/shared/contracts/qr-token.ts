@@ -40,11 +40,12 @@ export const signQrToken = (claims: QrTokenClaims, kid: string, privateKey: KeyO
 
 /** Checks format, signature and expiry only. Revocation, employee status and jti reuse are the caller's job. */
 export const verifyQrToken = (
-  token: string,
+  token: unknown,
   publicKeys: QrPublicKeys,
   nowS: number,
 ): QrTokenResult => {
   const invalid = { ok: false, reason: 'INVALID_SIGNATURE' } as const;
+  if (typeof token !== 'string') return invalid;
   const parts = token.split('.');
   if (parts.length !== 3) return invalid;
   const [h, c, s] = parts;
@@ -65,7 +66,7 @@ export const verifyQrToken = (
   }
   // Signed by us, but still check the shape: a bug in the issuer must not crash the edge.
   if (typeof claims?.sub !== 'string' || typeof claims.jti !== 'string') return invalid;
-  if (typeof claims.exp !== 'number') return invalid;
+  if (typeof claims.exp !== 'number' || !Number.isFinite(claims.exp)) return invalid;
   // ±tolerance: past exp, or further ahead than one fresh token can be (edge clock behind).
   if (nowS > claims.exp + QR_EXP_TOLERANCE_S) return { ok: false, reason: 'EXPIRED' };
   if (claims.exp > nowS + QR_TOKEN_TTL_S + QR_EXP_TOLERANCE_S)

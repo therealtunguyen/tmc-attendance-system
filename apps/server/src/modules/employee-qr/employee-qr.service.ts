@@ -166,7 +166,11 @@ export class EmployeeQrService
     return employee;
   }
 
-  /** Server-side check (FR-2.2), e.g. for the kiosk route until it moves to the edge (#29). */
+  /**
+   * Server-side check (FR-2.2), e.g. for the kiosk route until it moves to the edge (#29).
+   * A repository error rejects (fail closed): the caller maps it to 5xx and the gate never opens.
+   * Does not check jti reuse: the edge does (#25), so no kiosk route may call this directly before #29.
+   */
   async validate(token: string): Promise<ValidationResult> {
     return checkQrToken(token, {
       publicKeys: this.ring.publicKeys(),

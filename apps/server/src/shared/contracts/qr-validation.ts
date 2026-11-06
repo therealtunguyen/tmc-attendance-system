@@ -18,7 +18,10 @@ export interface QrCheckContext {
   nowS: number;
 }
 
-/** Signature and exp first (no lookup for a forged token), then the employee's deny state. Not jti reuse. */
+/**
+ * Signature and exp first (no lookup for a forged token), then the employee's deny state. Not jti reuse.
+ * A failing `findEmployee` rejects (fail closed): the caller maps it to 5xx and the gate never opens on an error.
+ */
 export const checkQrToken = async (token: string, ctx: QrCheckContext): Promise<QrCheckResult> => {
   const verified = verifyQrToken(token, ctx.publicKeys, ctx.nowS);
   if (!verified.ok) return verified;

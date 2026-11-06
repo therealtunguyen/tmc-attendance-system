@@ -38,6 +38,26 @@ describe('QR token', () => {
     });
   });
 
+  it('denies, not throws, on a non-string token', () => {
+    for (const token of [undefined, null, 42, {}]) {
+      expect(verifyQrToken(token, publicKeys, NOW)).toEqual({
+        ok: false,
+        reason: 'INVALID_SIGNATURE',
+      });
+    }
+  });
+
+  it.each([null, 'soon', Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects a signed token whose exp is %s',
+    (exp) => {
+      const token = signQrToken({ ...claims, exp } as never, current.kid, current.privateKey);
+      expect(verifyQrToken(token, publicKeys, NOW)).toEqual({
+        ok: false,
+        reason: 'INVALID_SIGNATURE',
+      });
+    },
+  );
+
   it('accepts a token signed with the previous key, so keys rotate without downtime', () => {
     const token = signQrToken(claims, previous.kid, previous.privateKey);
     expect(verifyQrToken(token, publicKeys, NOW)).toMatchObject({ ok: true, kid: 'k1' });

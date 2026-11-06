@@ -57,6 +57,24 @@ describe('checkQrToken (shared by server and edge)', () => {
     expect(lookups).toEqual([]);
   });
 
+  it('accepts exp 10 s in the past and denies 11 s as EXPIRED', async () => {
+    expect(await checkQrToken(tokenFor('emp-ok', NOW - 10), ctx)).toMatchObject({ ok: true });
+    expect(await checkQrToken(tokenFor('emp-ok', NOW - 11), ctx)).toEqual({
+      ok: false,
+      reason: 'EXPIRED',
+    });
+  });
+
+  it('rejects when the employee lookup throws, so the gate never opens on an error', async () => {
+    const failing = {
+      ...ctx,
+      findEmployee: async (): Promise<never> => {
+        throw new Error('db down');
+      },
+    };
+    await expect(checkQrToken(tokenFor('emp-ok'), failing)).rejects.toThrow('db down');
+  });
+
   it('accepts an async employee source (the server reads its database)', async () => {
     const async = { ...ctx, findEmployee: async (id: string) => snapshot.get(id) ?? null };
     expect(await checkQrToken(tokenFor('emp-rev'), async)).toMatchObject({ reason: 'REVOKED' });
