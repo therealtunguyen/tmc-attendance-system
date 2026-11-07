@@ -1,6 +1,6 @@
 // Cross-module flow (#13): portal token -> snapshot check -> sync -> daily record, as far as main has it.
-// Real services, routes, session check and Ed25519 keys, mounted the way main.ts mounts them (this does
-// not import main.ts). Only the Prisma repos are faked, so eventId dedupe here is the fake's, not Postgres.
+// Real services, routes, session check, notice gate and Ed25519 keys, mounted in main.ts's order (this does
+// not import main.ts; without admin, so no scope expansion or team check). Only the Prisma repos are faked, so eventId dedupe here is the fake's, not Postgres.
 // The edge is simulated (edgeScan): which events an edge stores and pushes is not tested here.
 import { createHash, createPublicKey, generateKeyPairSync, randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -25,8 +25,10 @@ import {
   hashPassword,
   IamService,
   iamRoutes,
+  requireNoticeAck,
   type AuditEntry,
   type AuditStore,
+  type NoticeStore,
   type UserRecord,
   type UserStore,
 } from './modules/iam/index.js';
@@ -117,7 +119,14 @@ const inMemoryIam = () => {
     append: async (entry: AuditEntry) => {
       audit.push(entry);
     },
-  } as unknown as AuditStore & UserStore;
+    // No notice is ever published, so the notice gate lets everyone through.
+    currentNotice: async () => null,
+    hasAcked: async () => true,
+    ack: async () => false,
+    publishNotice: async () => {
+      throw new Error('not used in this flow');
+    },
+  } as unknown as AuditStore & UserStore & NoticeStore;
   return { store, users, audit };
 };
 
@@ -149,6 +158,7 @@ const PASSWORD = 'correct-horse-42';
 const FAST_SCRYPT = { N: 2, r: 1, p: 1 };
 const IN_AT = '2026-11-07T00:58:00.000Z'; // 07:58 in Vietnam
 const OUT_AT = '2026-11-07T10:03:00.000Z'; // 17:03 in Vietnam
+// from === to is one whole day: dailyRecords reads localDayStart(from) up to nextDay(localDayStart(to)).
 const TODAY = { from: new Date('2026-11-07T05:00:00Z'), to: new Date('2026-11-07T05:00:00Z') };
 
 let nowMs: number;
@@ -180,7 +190,7 @@ beforeEach(() => {
       employeeQrRoutes(eqr),
       attendanceRoutes(attendance),
     ],
-    { before: [authenticate(iam)] },
+    { before: [authenticate(iam), requireNoticeAck(iam)] },
   );
 });
 
@@ -248,7 +258,7 @@ const edgeScan = async (token: string): Promise<{ event: EdgeEvent; reason?: str
     event: {
       eventId: randomUUID(),
       gateId: GATE,
-      employeeId: result.ok ? result.employeeId : null,
+      employeeId: result.employeeId ?? null,
       method: 'QR',
       outcome: result.ok ? 'GRANTED' : 'DENIED',
       occurredAt: new Date(nowMs).toISOString(),
@@ -337,7 +347,11 @@ describe('cross-module flow: real routes, in-memory stores, simulated edge', () 
 
     // Today's edge does not store this denial; it will once #24 lands. The server keeps it as sent.
     expect((await push(scan.event)).status).toBe(200);
-    expect(events.rows.get(scan.event.eventId)?.outcome).toBe('DENIED');
+    // A verified denial carries the employee (#71), and it still gives no attendance.
+    expect(events.rows.get(scan.event.eventId)).toMatchObject({
+      outcome: 'DENIED',
+      employeeId: lan.id,
+    });
     expect(await attendance.dailyRecords(TODAY, FACTORY)).toEqual([]);
 
     const refused = await issueQr(lan.session);
