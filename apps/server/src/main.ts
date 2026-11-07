@@ -12,7 +12,7 @@ import {
   employeeQrRoutes,
 } from './modules/employee-qr/index.js';
 import { GateRepo, GateService, gateRoutes } from './modules/gate/index.js';
-import { IamRepo, IamService, iamRoutes } from './modules/iam/index.js';
+import { authenticate, IamRepo, IamService, iamRoutes } from './modules/iam/index.js';
 import { ReportingRepo, ReportingService, reportingRoutes } from './modules/reporting/index.js';
 import { config } from './shared/config.js';
 import { createPrisma } from './shared/prisma.js';
@@ -30,14 +30,20 @@ const attendance = new AttendanceService(new AttendanceRepo(db));
 const reporting = new ReportingService(new ReportingRepo(db), attendance, admin, hrs, iam);
 const gate = new GateService(new GateRepo(db), eqr, attendance, turnstile, admin, reporting, iam);
 
-const app = createApp([
-  iamRoutes(iam),
-  adminRoutes(admin),
-  employeeQrRoutes(eqr),
-  attendanceRoutes(attendance),
-  reportingRoutes(reporting),
-  gateRoutes(gate),
-]);
+const app = createApp(
+  [
+    iamRoutes(iam, {
+      login: { max: config.authRateLimitPerMin },
+      mfa: { max: config.authRateLimitPerMin },
+    }),
+    adminRoutes(admin),
+    employeeQrRoutes(eqr),
+    attendanceRoutes(attendance),
+    reportingRoutes(reporting),
+    gateRoutes(gate),
+  ],
+  { before: [authenticate(iam)] },
+);
 
 app.listen(config.port, () => {
   console.log(

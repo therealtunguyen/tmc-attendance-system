@@ -501,7 +501,7 @@ describe('EmployeeQrService.issueToken (FR-1.2, ADR-10)', () => {
 
 describe('POST /api/qr/token', () => {
   const signedInAs = (id?: string, role = 'EMP') =>
-    signedIn(id ? ({ id, role } as UserRef) : undefined);
+    signedIn(id ? ({ id: 'user-1', role, employeeId: id } as UserRef) : undefined);
   const app = (id?: string, role?: string, keys = keysK1) =>
     createApp([
       signedInAs(id, role),
@@ -527,6 +527,14 @@ describe('POST /api/qr/token', () => {
     const res = await request(app(id)).post('/api/qr/token');
     expect(res.status).toBe(403);
     expect(res.body).toMatchObject({ reason: 'INACTIVE' });
+  });
+
+  it('403 when the account has no linked employee record', async () => {
+    const res = await request(
+      createApp([signedIn({ id: 'u-1', role: 'ADM' }), employeeQrRoutes(eqr)]),
+    ).post('/api/qr/token');
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'No employee record linked to this account' });
   });
 
   it('every role may view its own QR (self:read)', async () => {

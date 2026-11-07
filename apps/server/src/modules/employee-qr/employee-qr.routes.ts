@@ -129,11 +129,14 @@ export const employeeQrRoutes = (eqr: EmployeeQrService) =>
       res.json(employee);
     })
     // The signed-in employee's own token (FR-1.2, ADR-10). The portal asks again before it expires.
-    // Every role views its own QR (self:read). Identity comes from the verified session (#43), never a request field. TODO(#43): user->employee link is assumed to be user.id.
+    // Every role views its own QR (self:read). Identity comes from the verified session (#43), never a request field.
     .post('/qr/token', requirePermission('self:read'), async (_req, res) => {
-      const user = userOf(res);
+      const { employeeId } = userOf(res);
+      if (!employeeId) {
+        return void res.status(403).json({ error: 'No employee record linked to this account' });
+      }
       try {
-        const token = await eqr.issueToken(user.id);
+        const token = await eqr.issueToken(employeeId);
         res.set('Cache-Control', 'no-store').json({ token, ttlSeconds: QR_TOKEN_TTL_S });
       } catch (e) {
         if (e instanceof QrNotConfiguredError) {

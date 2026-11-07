@@ -3,6 +3,7 @@ import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import { createApp } from '../../app.js';
 import { canonicalJson, chainHash, GENESIS_HASH, verifyChain } from './iam.audit-chain.js';
+import { InMemoryUsers } from './iam.fakes.js';
 import { iamRoutes } from './iam.routes.js';
 import {
   IamService,
@@ -23,7 +24,7 @@ const entry = (n: number, extra: Partial<AuditEntry> = {}): AuditEntry => ({
 });
 
 /** Same linking as the Prisma repo, minus the database. */
-class InMemoryAudit implements AuditStore {
+class InMemoryAudit extends InMemoryUsers implements AuditStore {
   rows: ChainedEntry[] = [];
   lastFilter: AuditFilter | undefined;
 

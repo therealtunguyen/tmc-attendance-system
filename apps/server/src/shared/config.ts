@@ -16,4 +16,6 @@ export const config = {
     previousKid: process.env.QR_PREVIOUS_KID ?? '',
     previousPublicKey: process.env.QR_PREVIOUS_PUBLIC_KEY ?? '',
   },
+  // login and MFA attempts per IP per minute (FR-5.2)
+  authRateLimitPerMin: Number(process.env.AUTH_RATE_LIMIT_PER_MIN ?? 10),
 };

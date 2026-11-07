@@ -6,6 +6,7 @@
     "dev": "tsx watch --env-file-if-exists=../../.env src/main.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node --env-file-if-exists=../../.env dist/main.js",
+    "user:create": "tsx --env-file-if-exists=../../.env src/scripts/create-user.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "postinstall": "prisma generate"
