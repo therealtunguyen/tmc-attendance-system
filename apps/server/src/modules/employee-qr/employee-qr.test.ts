@@ -1,9 +1,11 @@
-import { createPrivateKey, generateKeyPairSync, randomUUID } from 'node:crypto';
+import { createPrivateKey, createPublicKey, generateKeyPairSync, randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../app.js';
+import type { EdgeSnapshot } from '../../shared/contracts/edge.js';
 import { QR_TOKEN_TTL_S, signQrToken, verifyQrToken } from '../../shared/contracts/qr-token.js';
+import { checkQrToken } from '../../shared/contracts/qr-validation.js';
 import type { Scope } from '../../shared/types.js';
 import type { AuditEntry, AuditLog, UserRef } from '../iam/index.js';
 import { QrKeyring } from './employee-qr.keys.js';
@@ -11,6 +13,7 @@ import { employeeQrRoutes } from './employee-qr.routes.js';
 import {
   DuplicateEmployeeCodeError,
   EmployeeQrService,
+  QrNotConfiguredError,
   QrNotIssuableError,
   type Employee,
   type EmployeeChanges,
@@ -553,6 +556,139 @@ describe('POST /api/qr/token', () => {
     const res = await request(app(id, 'EMP', { ...keysK1, privateKey: '' })).post('/api/qr/token');
     expect(res.status).toBe(503);
     expect(res.body).toEqual({ error: 'QR signing not configured' });
+  });
+});
+
+describe('EmployeeQrService.snapshot (ADR-9)', () => {
+  const svc = (keys = keysK2) => new EmployeeQrService(store, audit, keys, () => NOW);
+
+  it('gives the server time and the current and previous public keys', async () => {
+    const snapshot = await svc().snapshot();
+    expect(snapshot).toEqual({
+      generatedAt: NOW.toISOString(),
+      publicKeys: [
+        { kid: 'k2', spki: k2.publicKey },
+        { kid: 'k1', spki: k1.publicKey },
+      ],
+      employees: [],
+    });
+  });
+
+  it('lists every employee with the reason a gate must deny them', async () => {
+    const ok = await eqr.createEmployee('hr-1', lan);
+    const rev = await eqr.createEmployee('hr-1', { ...lan, code: 'E2', firstName: 'Hoa' });
+    const off = await eqr.createEmployee('hr-1', { ...lan, code: 'E3', firstName: 'Minh' });
+    const idle = await eqr.createEmployee('hr-1', { ...lan, code: 'E4', firstName: 'Tu' });
+    store.rows.get(rev.id)!.qrRevoked = true;
+    await eqr.deactivateEmployee('hr-1', off.id);
+    store.rows.get(idle.id)!.active = false;
+    expect((await svc().snapshot()).employees).toEqual([
+      { id: ok.id, firstName: 'Lan', deny: null },
+      { id: rev.id, firstName: 'Hoa', deny: 'REVOKED' },
+      { id: off.id, firstName: 'Minh', deny: 'INACTIVE' },
+      { id: idle.id, firstName: 'Tu', deny: 'INACTIVE' },
+    ]);
+  });
+
+  it('covers every factory: one snapshot for all edges', async () => {
+    await eqr.createEmployee('hr-1', lan);
+    await eqr.createEmployee('hr-1', { ...lan, code: 'LA-1', factoryId: 'long-an', teamId: null });
+    expect((await svc().snapshot()).employees).toHaveLength(2);
+  });
+
+  it('holds only id, first name and deny state, no other personal data (NFR-4)', async () => {
+    await eqr.createEmployee('hr-1', lan);
+    const { employees } = await svc().snapshot();
+    expect(Object.keys(employees[0]).sort()).toEqual(['deny', 'firstName', 'id']);
+    const wire = JSON.stringify(employees);
+    for (const value of [lan.lastName, lan.email, lan.code, lan.factoryId]) {
+      expect(wire).not.toContain(value);
+    }
+  });
+
+  it('never carries a private key', async () => {
+    expect(JSON.stringify(await svc().snapshot())).not.toContain(k2.privateKey);
+  });
+
+  it('takes generatedAt before reading employees, so age is never understated', async () => {
+    let t = NOW.getTime();
+    const list = store.list.bind(store);
+    store.list = async (scope) => {
+      t += 5_000;
+      return list(scope);
+    };
+    const snapshot = await new EmployeeQrService(
+      store,
+      audit,
+      keysK1,
+      () => new Date(t),
+    ).snapshot();
+    expect(snapshot.generatedAt).toBe(NOW.toISOString());
+  });
+
+  it('rejects when the keys are missing or storage fails, rather than a partial snapshot', async () => {
+    await expect(svc({ ...keysK1, privateKey: '' }).snapshot()).rejects.toBeInstanceOf(
+      QrNotConfiguredError,
+    );
+    store.list = async () => {
+      throw new Error('db down');
+    };
+    await expect(svc().snapshot()).rejects.toThrow('db down');
+  });
+
+  it('is all an edge needs: the same decision as the server, from the JSON alone', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const token = await svc().issueToken(id);
+    const decide = async () => {
+      const wire = JSON.parse(JSON.stringify(await svc().snapshot())) as EdgeSnapshot;
+      return checkQrToken(token, {
+        publicKeys: Object.fromEntries(
+          wire.publicKeys.map(({ kid, spki }) => [
+            kid,
+            createPublicKey({ key: Buffer.from(spki, 'base64'), format: 'der', type: 'spki' }),
+          ]),
+        ),
+        findEmployee: (sub) => wire.employees.find((e) => e.id === sub) ?? null,
+        nowS,
+      });
+    };
+    expect(await decide()).toMatchObject({ ok: true, employeeId: id, firstName: 'Lan' });
+    store.rows.get(id)!.qrRevoked = true;
+    expect(await decide()).toMatchObject({ ok: false, reason: 'REVOKED' });
+  });
+});
+
+describe('GET /api/edge/snapshot', () => {
+  const app = (keys = keysK1) =>
+    createApp([employeeQrRoutes(new EmployeeQrService(store, audit, keys, () => NOW))]);
+
+  it('needs no user session: the edge has none', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const res = await request(app()).get('/api/edge/snapshot?edgeId=edge-bd');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      generatedAt: NOW.toISOString(),
+      publicKeys: [{ kid: 'k1', spki: k1.publicKey }],
+      employees: [{ id, firstName: 'Lan', deny: null }],
+    });
+  });
+
+  it('is never cached: a revocation must reach the edge on its next pull', async () => {
+    const res = await request(app()).get('/api/edge/snapshot?edgeId=edge-bd');
+    expect(res.headers['cache-control']).toBe('no-store');
+  });
+
+  it('503 without details when the keys are misconfigured, so the edge keeps its last snapshot', async () => {
+    const res = await request(app({ ...keysK1, privateKey: '' })).get('/api/edge/snapshot');
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: 'QR signing not configured' });
+  });
+
+  it('500 when storage fails', async () => {
+    store.list = async () => {
+      throw new Error('db down');
+    };
+    expect((await request(app()).get('/api/edge/snapshot')).status).toBe(500);
   });
 });
 
