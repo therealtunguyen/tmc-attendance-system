@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../app.js';
 import type { EdgeSnapshot } from '../../shared/contracts/edge.js';
 import { QR_TOKEN_TTL_S, signQrToken, verifyQrToken } from '../../shared/contracts/qr-token.js';
-import { checkQrToken } from '../../shared/contracts/qr-validation.js';
+import { checkQrToken, type QrCheckResult } from '../../shared/contracts/qr-validation.js';
 import type { Scope } from '../../shared/types.js';
 import type { AuditEntry, AuditLog, UserRef } from '../iam/index.js';
 import { QrKeyring } from './employee-qr.keys.js';
@@ -20,6 +20,7 @@ import {
   type EmployeeStore,
   type NewEmployee,
   type QrKeyConfig,
+  type ValidationResult,
 } from './employee-qr.service.js';
 
 class InMemoryEmployees implements EmployeeStore {
@@ -936,17 +937,11 @@ describe('EmployeeQrService.validate (FR-2.2)', () => {
 });
 
 describe('employee routes: who, edge cases, failures (#15)', () => {
-  const signedIn = (user?: { id: string; role: string }) =>
-    createApp([
-      Router().use((_req, res, next) => {
-        if (user) res.locals.user = user;
-        next();
-      }),
-      employeeQrRoutes(eqr),
-    ]);
+  const app = (user: UserRef = { id: 'hr-9', role: 'HR' }) =>
+    createApp([signedIn(user), employeeQrRoutes(eqr)]);
 
   it('audits the signed-in user as the actor of every write', async () => {
-    const hr = signedIn({ id: 'hr-7', role: 'HR' });
+    const hr = app({ id: 'hr-7', role: 'HR' });
     const { body } = await request(hr).post('/api/employees').send(lan);
     await request(hr).patch(`/api/employees/${body.id}`).send({ lastName: 'Tran' });
     await request(hr).post(`/api/employees/${body.id}/deactivate`);
@@ -960,23 +955,23 @@ describe('employee routes: who, edge cases, failures (#15)', () => {
   it('GET /api/employees without a scope lists everyone', async () => {
     await eqr.createEmployee('hr-1', lan);
     await eqr.createEmployee('hr-1', { ...lan, code: 'LA-0001', factoryId: 'long-an' });
-    expect((await request(signedIn()).get('/api/employees')).body).toHaveLength(2);
+    expect((await request(app()).get('/api/employees')).body).toHaveLength(2);
   });
 
   it('accepts teamId null on create and clears it on PATCH', async () => {
-    const created = await request(signedIn())
+    const created = await request(app())
       .post('/api/employees')
       .send({ ...lan, teamId: null });
     expect(created.body).toMatchObject({ teamId: null });
     const { id } = await eqr.createEmployee('hr-1', { ...lan, code: 'BD-0002' });
-    const cleared = await request(signedIn()).patch(`/api/employees/${id}`).send({ teamId: null });
+    const cleared = await request(app()).patch(`/api/employees/${id}`).send({ teamId: null });
     expect(cleared.body).toMatchObject({ teamId: null });
   });
 
   it('rejects a blank or non-string value on PATCH (400) and changes nothing', async () => {
     const { id } = await eqr.createEmployee('hr-1', lan);
     for (const body of [{ firstName: '  ' }, { email: 5 }, { teamId: '' }, { email: 'bad' }]) {
-      expect((await request(signedIn()).patch(`/api/employees/${id}`).send(body)).status).toBe(400);
+      expect((await request(app()).patch(`/api/employees/${id}`).send(body)).status).toBe(400);
     }
     expect(await eqr.getProfile(id)).toMatchObject({ firstName: 'Lan', email: 'lan@tmc.vn' });
   });
@@ -984,7 +979,7 @@ describe('employee routes: who, edge cases, failures (#15)', () => {
   it('deactivating twice is a 200 both times', async () => {
     const { id } = await eqr.createEmployee('hr-1', lan);
     for (let i = 0; i < 2; i++) {
-      const res = await request(signedIn()).post(`/api/employees/${id}/deactivate`);
+      const res = await request(app()).post(`/api/employees/${id}/deactivate`);
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({ active: false, qrRevoked: true });
     }
@@ -994,7 +989,7 @@ describe('employee routes: who, edge cases, failures (#15)', () => {
     store.create = async () => {
       throw new Error('db down');
     };
-    expect((await request(signedIn()).post('/api/employees').send(lan)).status).toBe(500);
+    expect((await request(app()).post('/api/employees').send(lan)).status).toBe(500);
     expect(audit.entries).toEqual([]);
   });
 });
@@ -1095,7 +1090,8 @@ describe('QR token lifecycle (#22)', () => {
     it('denies a live token right after deactivation through the API', async () => {
       const { id } = await eqr.createEmployee('hr-1', lan);
       const token = await at(keysK1).issueToken(id);
-      const off = await request(createApp([employeeQrRoutes(eqr)])).post(
+      const hr = signedIn({ id: 'hr-9', role: 'HR' });
+      const off = await request(createApp([hr, employeeQrRoutes(eqr)])).post(
         `/api/employees/${id}/deactivate`,
       );
       expect(off.status).toBe(200);
@@ -1138,15 +1134,119 @@ describe('QR token lifecycle (#22)', () => {
     });
 
     it('POST /api/qr/token is a 500, not a 403, when storage fails', async () => {
-      const withUser = Router().use((_req, res, next) => {
-        res.locals.user = { id: 'e-1', role: 'EMP' };
-        next();
-      });
+      const withUser = signedIn({ id: 'u-1', role: 'EMP', employeeId: 'e-1' });
       store.find = async () => {
         throw new Error('db down');
       };
       const app = createApp([withUser, employeeQrRoutes(at(keysK1))]);
       expect((await request(app).post('/api/qr/token')).status).toBe(500);
+    });
+  });
+
+  describe('across revoke, snapshot and validate (#18, #19)', () => {
+    const snapshotOf = async (keys: QrKeyConfig) =>
+      JSON.parse(JSON.stringify(await at(keys).snapshot())) as EdgeSnapshot;
+
+    /** What an edge decides from a snapshot it already pulled, with no server. */
+    const edge = (wire: EdgeSnapshot, token: string, seconds = 0) =>
+      checkQrToken(token, {
+        publicKeys: Object.fromEntries(
+          wire.publicKeys.map(({ kid, spki }) => [
+            kid,
+            createPublicKey({ key: Buffer.from(spki, 'base64'), format: 'der', type: 'spki' }),
+          ]),
+        ),
+        findEmployee: (id) => wire.employees.find((e) => e.id === id) ?? null,
+        nowS: nowS + seconds,
+      });
+    const verdict = (result: QrCheckResult | ValidationResult) =>
+      result.ok ? 'ADMIT' : result.reason;
+
+    it.each([
+      [{ active: true, qrRevoked: false }, 'ADMIT'],
+      [{ active: true, qrRevoked: true }, 'REVOKED'],
+      [{ active: false, qrRevoked: false }, 'INACTIVE'],
+      [{ active: false, qrRevoked: true }, 'INACTIVE'],
+    ])('server and edge agree for %j: %s', async (state, expected) => {
+      const { id } = await eqr.createEmployee('hr-1', lan);
+      const token = await at(keysK1).issueToken(id);
+      Object.assign(store.rows.get(id)!, state);
+      expect(verdict(await at(keysK1).validate(token))).toBe(expected);
+      expect(verdict(await edge(await snapshotOf(keysK1), token))).toBe(expected);
+    });
+
+    it('agrees for an employee who is not in the snapshot', async () => {
+      const { id } = await eqr.createEmployee('hr-1', lan);
+      const token = await at(keysK1).issueToken(id);
+      store.rows.delete(id);
+      expect(verdict(await at(keysK1).validate(token))).toBe('UNKNOWN');
+      expect(verdict(await edge(await snapshotOf(keysK1), token))).toBe('UNKNOWN');
+    });
+
+    it('a revoke reaches an edge on its next pull, and a reissue undoes it', async () => {
+      const { id } = await eqr.createEmployee('hr-1', lan);
+      const token = await at(keysK1).issueToken(id);
+      const before = await snapshotOf(keysK1);
+
+      await eqr.revokeQr('hr-1', id);
+      expect(verdict(await edge(before, token))).toBe('ADMIT'); // ADR-9: the edge has not pulled yet.
+      expect(verdict(await edge(await snapshotOf(keysK1), token))).toBe('REVOKED');
+
+      await eqr.reissueQr('hr-1', id);
+      const fresh = await at(keysK1).issueToken(id);
+      expect(verdict(await edge(await snapshotOf(keysK1), fresh))).toBe('ADMIT');
+    });
+
+    it('a deactivation reaches an edge on its next pull, and cannot be reissued away', async () => {
+      const { id } = await eqr.createEmployee('hr-1', lan);
+      const token = await at(keysK1).issueToken(id);
+      await eqr.deactivateEmployee('hr-1', id);
+      await expect(eqr.reissueQr('hr-1', id)).rejects.toMatchObject({ reason: 'INACTIVE' });
+      expect(verdict(await edge(await snapshotOf(keysK1), token))).toBe('INACTIVE');
+    });
+
+    it('the wait for a pull is bounded: a leaked token dies at TTL + 10 s anyway', async () => {
+      const { id } = await eqr.createEmployee('hr-1', lan);
+      const token = await at(keysK1).issueToken(id);
+      const stale = await snapshotOf(keysK1);
+      await eqr.revokeQr('hr-1', id);
+      expect(verdict(await edge(stale, token, QR_TOKEN_TTL_S + 10))).toBe('ADMIT');
+      expect(verdict(await edge(stale, token, QR_TOKEN_TTL_S + 11))).toBe('EXPIRED');
+    });
+
+    it('a token from before a revoke is good again after a reissue, until it expires', async () => {
+      // Known limit (#18): closing it needs a change to the token or snapshot contract.
+      const { id } = await eqr.createEmployee('hr-1', lan);
+      const old = await at(keysK1).issueToken(id);
+      await eqr.revokeQr('hr-1', id);
+      await eqr.reissueQr('hr-1', id);
+      expect(verdict(await at(keysK1).validate(old))).toBe('ADMIT');
+      expect(verdict(await at(keysK1, 71).validate(old))).toBe('EXPIRED');
+    });
+
+    it('after a rotation, an edge needs the new snapshot to admit the new key', async () => {
+      const { id } = await eqr.createEmployee('hr-1', lan);
+      const token = await at(keysK2).issueToken(id);
+      const old = await snapshotOf(keysK1);
+      expect(verdict(await edge(old, token))).toBe('INVALID_SIGNATURE');
+      expect(verdict(await edge(await snapshotOf(keysK2), token))).toBe('ADMIT');
+    });
+
+    it('a key two rotations old is gone from the snapshot too', async () => {
+      const { id } = await eqr.createEmployee('hr-1', lan);
+      const token = await at(keysK1).issueToken(id);
+      const wire = await snapshotOf(keysK3);
+      expect(wire.publicKeys.map((k) => k.kid)).toEqual(['k3', 'k2']);
+      expect(verdict(await edge(wire, token))).toBe('INVALID_SIGNATURE');
+    });
+
+    it('revoking changes the snapshot for that employee only', async () => {
+      const lanRow = await eqr.createEmployee('hr-1', lan);
+      const minh = await eqr.createEmployee('hr-1', { ...lan, code: 'E2', firstName: 'Minh' });
+      await eqr.revokeQr('hr-1', lanRow.id);
+      const { employees } = await snapshotOf(keysK1);
+      expect(employees.find((e) => e.id === lanRow.id)?.deny).toBe('REVOKED');
+      expect(employees.find((e) => e.id === minh.id)?.deny).toBeNull();
     });
   });
 
