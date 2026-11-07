@@ -84,8 +84,13 @@ describe('audit chain', () => {
   });
 
   it('accepts an empty chain and a valid chain', async () => {
-    expect(verifyChain([])).toEqual({ ok: true });
-    expect(verifyChain(await (await build(4)).store.chain())).toEqual({ ok: true });
+    expect(verifyChain([])).toEqual({ ok: true, head: null });
+    const { store } = await build(4);
+    const chain = await store.chain();
+    expect(verifyChain(chain)).toEqual({
+      ok: true,
+      head: { seq: chain[chain.length - 1]!.seq, hash: chain[chain.length - 1]!.hash },
+    });
   });
 
   it('detects an edited field at that row', async () => {
@@ -115,8 +120,12 @@ describe('audit chain', () => {
 
 describe('IamService audit', () => {
   it('verifies after appends', async () => {
-    const { iam } = await build(3);
-    expect(await iam.verify()).toEqual({ ok: true });
+    const { iam, store } = await build(3);
+    const chain = await store.chain();
+    expect(await iam.verify()).toEqual({
+      ok: true,
+      head: { seq: chain[chain.length - 1]!.seq, hash: chain[chain.length - 1]!.hash },
+    });
   });
 
   it('reports tampering', async () => {
@@ -224,7 +233,14 @@ describe('/api/audit', () => {
 
   it('verify reports ok, then the broken row', async () => {
     const { app, store } = await setup('ADM');
-    expect((await request(app).get('/api/audit/verify')).body).toEqual({ ok: true });
+    const verifyOk = await request(app).get('/api/audit/verify');
+    expect(verifyOk.body).toEqual({
+      ok: true,
+      head: {
+        seq: store.rows[store.rows.length - 1]!.seq,
+        hash: store.rows[store.rows.length - 1]!.hash,
+      },
+    });
     store.rows[1]!.action = 'tampered';
     expect((await request(app).get('/api/audit/verify')).body).toEqual({
       ok: false,

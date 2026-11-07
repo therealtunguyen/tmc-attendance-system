@@ -43,16 +43,23 @@ export const chainHash = (prevHash: string, entry: ChainInput): string =>
     )
     .digest('hex');
 
-export type ChainVerdict = { ok: true } | { ok: false; brokenAtSeq: number };
+export type ChainVerdict =
+  { ok: true; head: { seq: number; hash: string } | null } | { ok: false; brokenAtSeq: number };
 
-/** Rows ordered by seq. No gap check: SERIAL skips numbers on rollback; a deleted row breaks prevHash linkage instead. */
+/**
+ * Rows ordered by seq. No gap check: SERIAL skips numbers on rollback; a deleted row breaks prevHash linkage instead.
+ * Returns the last row (head) on success, or null for an empty chain.
+ * Note: dropping the newest rows (tail truncation) is only detectable by comparing head with a copy recorded outside the DB.
+ */
 export const verifyChain = (rows: ChainedEntry[]): ChainVerdict => {
   let prev = GENESIS_HASH;
+  let head: { seq: number; hash: string } | null = null;
   for (const row of rows) {
     if (row.prevHash !== prev || row.hash !== chainHash(row.prevHash, row)) {
       return { ok: false, brokenAtSeq: row.seq };
     }
     prev = row.hash;
+    head = { seq: row.seq, hash: row.hash };
   }
-  return { ok: true };
+  return { ok: true, head };
 };

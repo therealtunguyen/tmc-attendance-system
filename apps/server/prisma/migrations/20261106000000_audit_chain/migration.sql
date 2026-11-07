@@ -14,7 +14,7 @@ CREATE INDEX "AuditEntry_target_at_idx" ON "AuditEntry"("target", "at");
 -- CreateIndex
 CREATE INDEX "AuditEntry_at_idx" ON "AuditEntry"("at");
 
--- Append-only (FR-4.9): no row is ever changed or removed, not even by the app's own DB user.
+-- Append-only (FR-4.9): rejects UPDATE, DELETE and TRUNCATE from the app. The table owner can still disable the trigger; a separate owner role with INSERT/SELECT-only grants for the app is future work.
 CREATE FUNCTION audit_entry_append_only() RETURNS trigger AS $$
 BEGIN
   RAISE EXCEPTION 'AuditEntry is append-only';
