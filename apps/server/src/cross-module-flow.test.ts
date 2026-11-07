@@ -1,17 +1,15 @@
-// E2E demo (#13): scan -> record -> sync -> report, as far as main has it today.
-// Real services, routes, session check and Ed25519 keys, wired like main.ts. Only the Prisma repos
-// are faked, so eventId dedupe here is the fake's copy of ON CONFLICT DO NOTHING, not Postgres.
+// Cross-module flow (#13): portal token -> snapshot check -> sync -> daily record, as far as main has it.
+// Real services, routes, session check and Ed25519 keys, mounted the way main.ts mounts them (this does
+// not import main.ts). Only the Prisma repos are faked, so eventId dedupe here is the fake's, not Postgres.
+// The edge is simulated (edgeScan): which events an edge stores and pushes is not tested here.
 import { createHash, createPublicKey, generateKeyPairSync, randomUUID } from 'node:crypto';
 import request from 'supertest';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { MockTurnstile } from './adapters/tcs/mock.js';
-import type { TurnstileClient } from './adapters/tcs/turnstile-client.js';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from './app.js';
 import {
   AttendanceService,
   attendanceRoutes,
   type AttendanceStore,
-  type ScanOutcome,
   type StoredEvent,
 } from './modules/attendance/index.js';
 import {
@@ -19,7 +17,6 @@ import {
   EmployeeQrService,
   employeeQrRoutes,
   type Employee,
-  type EmployeeChanges,
   type EmployeeStore,
   type NewEmployee,
 } from './modules/employee-qr/index.js';
@@ -37,7 +34,11 @@ import type { EdgeEvent, EdgeSnapshot } from './shared/contracts/edge.js';
 import { checkQrToken } from './shared/contracts/qr-validation.js';
 import type { Scope } from './shared/types.js';
 
-class InMemoryEmployees implements EmployeeStore {
+/** Only the methods this flow calls; the service gets it through one cast below. */
+class InMemoryEmployees implements Pick<
+  EmployeeStore,
+  'create' | 'find' | 'list' | 'setQrRevoked'
+> {
   rows = new Map<string, Employee>();
 
   async create(data: NewEmployee) {
@@ -49,10 +50,6 @@ class InMemoryEmployees implements EmployeeStore {
     return { ...employee };
   }
 
-  async update(id: string, changes: EmployeeChanges) {
-    return this.write(id, changes);
-  }
-
   async find(id: string) {
     const employee = this.rows.get(id);
     return employee ? { ...employee } : null;
@@ -62,10 +59,6 @@ class InMemoryEmployees implements EmployeeStore {
     return [...this.rows.values()].filter(
       (e) => scope === undefined || e.factoryId === scope || e.teamId === scope,
     );
-  }
-
-  async deactivate(id: string) {
-    return this.write(id, { active: false, qrRevoked: true });
   }
 
   async setQrRevoked(id: string, revoked: boolean) {
@@ -80,8 +73,8 @@ class InMemoryEmployees implements EmployeeStore {
   }
 }
 
-/** Same contract as AttendanceRepo: a known eventId is skipped, decide only moves from PENDING. */
-class InMemoryEvents implements AttendanceStore {
+/** Same contract as AttendanceRepo for what ingest and dailyRecords call: a known eventId is skipped. */
+class InMemoryEvents implements Pick<AttendanceStore, 'insert' | 'insertMany' | 'grantedEvents'> {
   rows = new Map<string, StoredEvent>();
 
   async insert(event: StoredEvent) {
@@ -92,17 +85,6 @@ class InMemoryEvents implements AttendanceStore {
 
   async insertMany(events: StoredEvent[]) {
     for (const event of events) await this.insert(event);
-  }
-
-  async decide(eventId: string, outcome: ScanOutcome) {
-    const row = this.rows.get(eventId);
-    if (!row || (row.outcome !== 'PENDING' && row.outcome !== outcome)) return false;
-    row.outcome = outcome;
-    return true;
-  }
-
-  async outcomeOf(eventId: string) {
-    return this.rows.get(eventId)?.outcome ?? null;
   }
 
   async grantedEvents(from: Date, to: Date, employeeIds?: string[]) {
@@ -175,7 +157,6 @@ let events: InMemoryEvents;
 let iamStore: ReturnType<typeof inMemoryIam>;
 let eqr: EmployeeQrService;
 let attendance: AttendanceService;
-let turnstile: TurnstileClient;
 let app: ReturnType<typeof createApp>;
 const HR_SESSION = 'hr-session-token';
 
@@ -184,11 +165,15 @@ beforeEach(() => {
   employees = new InMemoryEmployees();
   events = new InMemoryEvents();
   iamStore = inMemoryIam();
-  turnstile = new MockTurnstile('open');
   // Same order and same before-handler as main.ts. Random 1 skips the login's session purge.
   const iam = new IamService(iamStore.store, Date.now, () => 1);
-  eqr = new EmployeeQrService(employees, iam, qrKeys, () => new Date(nowMs));
-  attendance = new AttendanceService(events, eqr);
+  eqr = new EmployeeQrService(
+    employees as unknown as EmployeeStore,
+    iam,
+    qrKeys,
+    () => new Date(nowMs),
+  );
+  attendance = new AttendanceService(events as unknown as AttendanceStore, eqr);
   app = createApp(
     [
       iamRoutes(iam, { login: false, mfa: false }),
@@ -242,8 +227,9 @@ const issueQr = (session: string) =>
   request(app).post('/api/qr/token').set('Authorization', `Bearer ${session}`).send();
 
 /**
- * shortcut: stands in for apps/edge's scan (#24, unmerged), replace with the real agent once merged.
- * Uses only the contract an edge has: the snapshot route, the shared check, TCS, then an EdgeEvent.
+ * shortcut: stands in for apps/edge's scan (#24, unmerged), replace with scan() + flushOutbox once merged.
+ * Checks the token against the snapshot route with the shared check. The returned event is the test's
+ * own input for the push; nothing here asserts what a real edge would store, or whether it opens TCS.
  */
 const edgeScan = async (token: string): Promise<{ event: EdgeEvent; reason?: string }> => {
   const snapshot = (await request(app).get('/api/edge/snapshot')).body as EdgeSnapshot;
@@ -257,7 +243,6 @@ const edgeScan = async (token: string): Promise<{ event: EdgeEvent; reason?: str
     findEmployee: (id) => snapshot.employees.find((e) => e.id === id) ?? null,
     nowS: Math.floor(nowMs / 1000),
   });
-  const opened = result.ok && (await turnstile.open(GATE)) === 'OPENED';
   return {
     reason: result.ok ? undefined : result.reason,
     event: {
@@ -265,7 +250,7 @@ const edgeScan = async (token: string): Promise<{ event: EdgeEvent; reason?: str
       gateId: GATE,
       employeeId: result.ok ? result.employeeId : null,
       method: 'QR',
-      outcome: opened ? 'GRANTED' : 'DENIED',
+      outcome: result.ok ? 'GRANTED' : 'DENIED',
       occurredAt: new Date(nowMs).toISOString(),
       jti: result.jti ?? null,
       stale: false,
@@ -276,8 +261,8 @@ const edgeScan = async (token: string): Promise<{ event: EdgeEvent; reason?: str
 const push = (...batch: EdgeEvent[]) =>
   request(app).post('/api/edge/events').send({ edgeId: EDGE, events: batch });
 
-describe('E2E: scan -> record -> sync -> daily record (#13)', () => {
-  it('a real token opens the gate, syncs once, and shows up in the daily record', async () => {
+describe('cross-module flow: real routes, in-memory stores, simulated edge', () => {
+  it('a portal token passes the snapshot check, and its pushed event shows up in the daily record', async () => {
     const lan = await onboard('BD-0001');
 
     const inQr = await issueQr(lan.session);
@@ -288,14 +273,13 @@ describe('E2E: scan -> record -> sync -> daily record (#13)', () => {
       firstName: 'Lan',
     });
     const scanIn = await edgeScan(inQr.body.token);
-    expect(scanIn.event).toMatchObject({ employeeId: lan.id, outcome: 'GRANTED' });
-    expect(scanIn.event.jti).toEqual(expect.any(String));
+    expect(scanIn.reason).toBeUndefined();
 
     const pushed = await push(scanIn.event);
     expect(pushed.status).toBe(200);
     expect(pushed.body).toEqual({ accepted: [scanIn.event.eventId] });
 
-    // The outbox retries until confirmed, so the same event arrives again, here with a changed outcome.
+    // The outbox retries until confirmed, so the same event arrives again. First write wins (in the fake).
     const again = await push({ ...scanIn.event, outcome: 'DENIED' });
     expect(again.status).toBe(200);
     expect(again.body).toEqual({ accepted: [scanIn.event.eventId] });
@@ -334,7 +318,7 @@ describe('E2E: scan -> record -> sync -> daily record (#13)', () => {
     ]);
   });
 
-  it('a revoked employee is denied at both sides and gets no attendance', async () => {
+  it('a revoked employee is denied by the server check and the snapshot, and a DENIED event gives no attendance', async () => {
     const lan = await onboard('BD-0002');
     const qr = await issueQr(lan.session);
     expect((await eqr.validate(qr.body.token)).ok).toBe(true);
@@ -346,14 +330,12 @@ describe('E2E: scan -> record -> sync -> daily record (#13)', () => {
     expect(revoked.status).toBe(200);
     expect(iamStore.audit.map((e) => e.action)).toContain('QR_REVOKE');
 
-    const open = vi.spyOn(turnstile, 'open');
     // The token was issued before the revocation and has not expired: only the deny state stops it.
     expect(await eqr.validate(qr.body.token)).toMatchObject({ ok: false, reason: 'REVOKED' });
     const scan = await edgeScan(qr.body.token);
     expect(scan.reason).toBe('REVOKED');
-    expect(scan.event.outcome).toBe('DENIED');
-    expect(open).not.toHaveBeenCalled();
 
+    // Today's edge does not store this denial; it will once #24 lands. The server keeps it as sent.
     expect((await push(scan.event)).status).toBe(200);
     expect(events.rows.get(scan.event.eventId)?.outcome).toBe('DENIED');
     expect(await attendance.dailyRecords(TODAY, FACTORY)).toEqual([]);
@@ -363,24 +345,14 @@ describe('E2E: scan -> record -> sync -> daily record (#13)', () => {
     expect(refused.body.reason).toBe('REVOKED');
   });
 
-  it('a token past its window is denied at both sides and gets no attendance', async () => {
+  it('a token past its window is denied by the server check and the snapshot', async () => {
     const lan = await onboard('BD-0003');
     const qr = await issueQr(lan.session);
-    const open = vi.spyOn(turnstile, 'open');
 
-    // TTL 60 s + tolerance 10 s: the last second it still works, so the denial below is the clock's.
-    nowMs += 70_000;
-    expect((await eqr.validate(qr.body.token)).ok).toBe(true);
-
-    nowMs += 1_000;
+    // Past TTL 60 s + tolerance 10 s; the exact boundary is in qr-token.test.ts.
+    nowMs += 71_000;
     expect(await eqr.validate(qr.body.token)).toEqual({ ok: false, reason: 'EXPIRED' });
-    const scan = await edgeScan(qr.body.token);
-    expect(scan.reason).toBe('EXPIRED');
-    expect(scan.event).toMatchObject({ outcome: 'DENIED', employeeId: null, jti: null });
-    expect(open).not.toHaveBeenCalled();
-
-    expect((await push(scan.event)).status).toBe(200);
-    expect(await attendance.dailyRecords(TODAY, FACTORY)).toEqual([]);
+    expect((await edgeScan(qr.body.token)).reason).toBe('EXPIRED');
   });
 
   it('the user-session check does not block /api/edge/*, and user routes still need a session', async () => {
@@ -392,6 +364,9 @@ describe('E2E: scan -> record -> sync -> daily record (#13)', () => {
 
   // Blocked on unmerged work. apps/edge is only on feat/Task3 (no PR); edgeScan above stands in for it.
   it.todo('edge agent: POST /kiosk/scan validates, commits to SQLite, opens mock TCS (#24, #29)');
+  it.todo(
+    'edge agent: stores REVOKED, INACTIVE, UNKNOWN and the first replay of a jti as DENIED (#24)',
+  );
   it.todo('edge agent: a replayed jti is denied within its TTL (#25)');
   it.todo('edge agent: pulls the snapshot and flags events stale after 5 min (#26)');
   it.todo('edge outbox: a network drop then recovery loses and duplicates nothing (#27, #30)');
@@ -399,7 +374,7 @@ describe('E2E: scan -> record -> sync -> daily record (#13)', () => {
   it.todo('POST /api/edge/heartbeat marks the edge online; silence raises GATE_OFFLINE (#28, #39)');
   it.todo('/api/edge/* rejects a request without a valid edge credential (#69)');
   it.todo('sync flags a stale event for a revoked person, and one jti at two edges (#33)');
-  it.todo('an event pushed PENDING, then GRANTED, counts as attendance (#33, ingest skips it)');
+  it.todo('edge outbox: does not push a PENDING event while its TCS call is still running (#27)');
   // Reporting (reporting.routes.ts, reporting.service.ts) is all stubs and has no issue or owner yet.
   it.todo('GET /api/reports/monthly reads these daily records (FR-4.1, no issue yet)');
   it.todo('monthly export sends them to MockHrs, retries, audits (FR-4.5, FR-4.6, no issue yet)');
