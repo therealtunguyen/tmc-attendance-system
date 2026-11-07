@@ -190,6 +190,8 @@ const unknownActor = (username: string) =>
 /** Users, login, roles, audit log (FR-1.7, FR-4.7, FR-4.8, FR-5.1, FR-5.2). */
 export class IamService implements Authorizer, AuditLog, AuditReader, Authenticator {
   private noticeCache: { notice: Notice | null; until: number } | undefined;
+  /** Bumped on every invalidation, so a refill that started before it does not store its result. */
+  private noticeGeneration = 0;
 
   constructor(
     private store: AuditStore & UserStore & NoticeStore,
@@ -328,9 +330,17 @@ export class IamService implements Authorizer, AuditLog, AuditReader, Authentica
   private async cachedNotice(): Promise<Notice | null> {
     const now = this.clock();
     if (this.noticeCache && this.noticeCache.until > now) return this.noticeCache.notice;
+    const generation = this.noticeGeneration;
     const notice = await this.store.currentNotice();
-    this.noticeCache = { notice, until: now + NOTICE_CACHE_TTL_MS };
+    if (generation === this.noticeGeneration) {
+      this.noticeCache = { notice, until: now + NOTICE_CACHE_TTL_MS };
+    }
     return notice;
+  }
+
+  private invalidateNotice(): void {
+    this.noticeCache = undefined;
+    this.noticeGeneration++;
   }
 
   currentNotice(): Promise<Notice | null> {
@@ -343,9 +353,11 @@ export class IamService implements Authorizer, AuditLog, AuditReader, Authentica
     if (trimmed.length < 1 || trimmed.length > MAX_NOTICE_LENGTH) {
       throw new NoticeError('INVALID_TEXT', `text must be 1 to ${MAX_NOTICE_LENGTH} characters`);
     }
-    this.noticeCache = undefined;
+    this.invalidateNotice();
     const notice = await this.store.publishNotice(trimmed, actorId);
-    this.noticeCache = undefined;
+    this.invalidateNotice();
+    // TODO(#45): write the change and its audit entry in one transaction
+    // Until then a retry after a failed append publishes another version.
     // The text is in the notice table; the log keeps only the version.
     await this.store.append({
       actorId,
@@ -365,6 +377,7 @@ export class IamService implements Authorizer, AuditLog, AuditReader, Authentica
       throw new NoticeError('STALE_VERSION', 'Not the current version', current.version);
     }
     // Only the call that inserted the row audits, so concurrent first acks log once.
+    // TODO(#45): write the change and its audit entry in one transaction
     if (await this.store.ack(userId, version))
       await this.audit(userId, 'NOTICE_ACK', `notice:${version}`);
   }

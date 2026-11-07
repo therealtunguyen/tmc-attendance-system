@@ -47,8 +47,12 @@ const NOTICE_EXEMPT = new Set([
   '/auth/me',
   '/privacy-notice',
   '/privacy-notice/ack',
-  // Gate access and attendance are needed to perform the labour contract (Decree 13/2023 Art. 17).
+  // Gate access and attendance are needed to perform the labour contract (Decree 13/2023 Art. 17):
+  // the QR token and the live QR page the email link opens.
+  // When gate monitor/override/emergency routes land, exempt them by permission rather than by
+  // path, so that an unacknowledged notice never blocks an emergency action.
   '/qr/token',
+  '/me/qr',
 ]);
 
 /**

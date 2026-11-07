@@ -60,6 +60,7 @@ beforeEach(async () => {
   iam = new IamService(store, () => now);
   const normal = Router()
     .get('/qr/token', requirePermission('self:read'), (_req, res) => void res.json({ qr: true }))
+    .get('/me/qr', requirePermission('self:read'), (_req, res) => void res.json({ qr: true }))
     .get('/things', requirePermission('self:read'), (_req, res) => {
       res.json({ ok: true });
     });
@@ -203,5 +204,35 @@ describe('first-login privacy notice (NFR-20)', () => {
     const qr = await request(app).get('/api/qr/token').set(as('emp'));
     expect([qr.status, qr.body]).toEqual([200, { qr: true }]);
     expect((await things('emp')).body.code).toBe('NOTICE_REQUIRED');
+  });
+
+  it('does not block /me/qr while the notice is pending', async () => {
+    await publish('hr');
+    const qr = await request(app).get('/api/me/qr').set(as('emp'));
+    expect([qr.status, qr.body]).toEqual([200, { qr: true }]);
+  });
+
+  it('does not cache a read that started before a publish', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    class SlowOnce extends Store {
+      slow = true;
+      override async currentNotice() {
+        const notice = await super.currentNotice();
+        if (this.slow) {
+          this.slow = false;
+          await held;
+        }
+        return notice;
+      }
+    }
+    const slowStore = new SlowOnce();
+    await slowStore.publishNotice('v1', 'hr');
+    const service = new IamService(slowStore, () => now);
+    const stale = service.currentNotice();
+    await service.publishNotice('hr', 'v2');
+    release();
+    expect((await stale)?.version).toBe(1);
+    expect((await service.currentNotice())?.version).toBe(2);
   });
 });
