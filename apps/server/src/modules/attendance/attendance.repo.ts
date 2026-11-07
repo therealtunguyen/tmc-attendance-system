@@ -1,4 +1,5 @@
 import type { PrismaClient } from '../../shared/prisma.js';
+import type { DailyInput } from './attendance.daily.js';
 import type { AttendanceStore, ScanOutcome, StoredEvent } from './attendance.service.js';
 
 /** Owns: AttendanceEvent, DailyRecord, Correction. */
@@ -18,6 +19,17 @@ export class AttendanceRepo implements AttendanceStore {
     if (events.length === 0) return;
     // One INSERT ... ON CONFLICT DO NOTHING: all new rows land together, duplicates are skipped.
     await this.db.attendanceEvent.createMany({ data: events, skipDuplicates: true });
+  }
+
+  grantedEvents(from: Date, to: Date, employeeIds?: string[]): Promise<DailyInput[]> {
+    return this.db.attendanceEvent.findMany({
+      where: {
+        outcome: 'GRANTED',
+        employeeId: employeeIds ? { in: employeeIds } : { not: null },
+        occurredAt: { gte: from, lt: to },
+      },
+      select: { employeeId: true, occurredAt: true, outcome: true },
+    });
   }
 
   async decide(eventId: string, outcome: ScanOutcome): Promise<boolean> {

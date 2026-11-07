@@ -1,3 +1,4 @@
+export { buildDailyRecords } from './attendance.daily.js';
 export { AttendanceRepo } from './attendance.repo.js';
 export { attendanceRoutes } from './attendance.routes.js';
 export {

@@ -1,6 +1,8 @@
 import type { PushEventsRequest, PushEventsResponse } from '../../shared/contracts/edge.js';
 import { todo } from '../../shared/errors.js';
 import type { DateRange, Scope } from '../../shared/types.js';
+import type { EmployeeDirectory } from '../employee-qr/index.js';
+import { buildDailyRecords, localDayStart, nextDay, type DailyInput } from './attendance.daily.js';
 
 export type ScanOutcome = 'GRANTED' | 'DENIED';
 
@@ -58,6 +60,8 @@ export interface AttendanceStore {
   insert(event: StoredEvent): Promise<boolean>;
   /** Inserts every event whose eventId is new, in one atomic write; existing ones are skipped. */
   insertMany(events: StoredEvent[]): Promise<void>;
+  /** GRANTED events with an employee, occurredAt in [from, to); only these employees if given. */
+  grantedEvents(from: Date, to: Date, employeeIds?: string[]): Promise<DailyInput[]>;
   /** Sets the outcome only while it is PENDING or already equal; true if the row now has it. */
   decide(eventId: string, outcome: ScanOutcome): Promise<boolean>;
   /** Null when there is no such event. */
@@ -93,7 +97,10 @@ export interface AttendanceQuery {
 
 /** Event store, daily records, missing punches, HR corrections (FR-1.6, FR-3.x). */
 export class AttendanceService implements AttendanceRecorder, EdgeIngest, AttendanceQuery {
-  constructor(private repo: AttendanceStore) {}
+  constructor(
+    private repo: AttendanceStore,
+    private directory: EmployeeDirectory,
+  ) {}
 
   /**
    * Commits the scan before the turnstile is called (ADR-3, Figure 5.2): PENDING, or DENIED
@@ -150,8 +157,17 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
     return { accepted: [...new Set(events.map((e) => e.eventId))] };
   }
 
-  async dailyRecords(): Promise<DailyRecord[]> {
-    return todo();
+  /**
+   * Daily records of the employees in `scope` (factory or team, via EmployeeDirectory) for every
+   * Vietnam local day from range.from to range.to, both included. Computed from the granted
+   * events on each read, so a late edge push is always reflected (FR-3.4, FR-3.5).
+   */
+  async dailyRecords(range: DateRange, scope: Scope): Promise<DailyRecord[]> {
+    const employeeIds = (await this.directory.list(scope)).map((e) => e.id);
+    if (employeeIds.length === 0) return [];
+    const from = localDayStart(range.from);
+    const to = nextDay(localDayStart(range.to));
+    return buildDailyRecords(await this.repo.grantedEvents(from, to, employeeIds));
   }
 
   async history(): Promise<DailyRecord[]> {
