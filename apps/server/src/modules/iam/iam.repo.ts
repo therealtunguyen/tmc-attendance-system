@@ -8,6 +8,8 @@ import type {
   AuditStore,
   ChainedEntry,
   NewUser,
+  Notice,
+  NoticeStore,
   Role,
   SessionRecord,
   UserRecord,
@@ -57,8 +59,8 @@ const toUser = (row: {
   lockedUntil: Date | null;
 }): UserRecord => ({ ...row, role: row.role as Role });
 
-/** Owns: User, Session, Role, AuditEntry, NoticeAck. */
-export class IamRepo implements AuditStore, UserStore {
+/** Owns: User, Session, Role, AuditEntry, PrivacyNotice, NoticeAck. */
+export class IamRepo implements AuditStore, UserStore, NoticeStore {
   constructor(private db: PrismaClient) {}
 
   async append(entry: AuditEntry): Promise<void> {
@@ -173,5 +175,44 @@ export class IamRepo implements AuditStore, UserStore {
     await this.db.session.deleteMany({
       where: { OR: [{ expiresAt: { lt: before } }, { revokedAt: { lt: before } }] },
     });
+  }
+
+  async currentNotice(): Promise<Notice | null> {
+    const row = await this.db.privacyNotice.findFirst({ orderBy: { version: 'desc' } });
+    return row && { version: row.version, text: row.text, publishedAt: row.publishedAt };
+  }
+
+  async publishNotice(text: string, by: string): Promise<Notice> {
+    // Two publishers can pick the same version; the primary key rejects one, which retries once.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.db.$transaction(async (tx) => {
+          const last = await tx.privacyNotice.findFirst({
+            orderBy: { version: 'desc' },
+            select: { version: true },
+          });
+          const row = await tx.privacyNotice.create({
+            data: { version: (last?.version ?? 0) + 1, text, publishedBy: by },
+          });
+          return { version: row.version, text: row.text, publishedAt: row.publishedAt };
+        });
+      } catch (err) {
+        const conflict =
+          err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
+        if (!conflict || attempt >= 1) throw err;
+      }
+    }
+  }
+
+  async hasAcked(userId: string, version: number): Promise<boolean> {
+    return (await this.db.noticeAck.count({ where: { userId, version } })) > 0;
+  }
+
+  async ack(userId: string, version: number): Promise<boolean> {
+    const { count } = await this.db.noticeAck.createMany({
+      data: [{ userId, version }],
+      skipDuplicates: true,
+    });
+    return count === 1;
   }
 }

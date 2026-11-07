@@ -35,11 +35,12 @@ describe('checkQrToken (shared by server and edge)', () => {
     ['emp-off', 'INACTIVE'],
     ['emp-rev', 'REVOKED'],
     ['emp-new', 'UNKNOWN'],
-  ])('denies %s as %s, keeping the jti for the event', async (sub, reason) => {
+  ])('denies %s as %s, keeping the jti and employee for the event', async (sub, reason) => {
     expect(await checkQrToken(tokenFor(sub), ctx)).toEqual({
       ok: false,
       reason,
       jti: `jti-${sub}`,
+      employeeId: sub,
     });
   });
 
