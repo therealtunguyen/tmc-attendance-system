@@ -54,6 +54,8 @@ apps/web/               React + Vite single app
   src/pages/staff/      HR, supervisors, guards, admins, executives
 ```
 
+Gate registry data and CRUD rules (FR-2.1): [docs/gate-registry.md](docs/gate-registry.md).
+
 ## Team rules
 
 - `main` is protected. Work on a branch: `feat/<short-name>` or `fix/<short-name>`.
