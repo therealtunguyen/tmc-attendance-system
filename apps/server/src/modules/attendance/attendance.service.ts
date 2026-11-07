@@ -56,6 +56,8 @@ export class OutcomeConflictError extends Error {
 export interface AttendanceStore {
   /** Inserts unless the eventId exists; true if inserted. Must be atomic (two racing inserts -> one true). */
   insert(event: StoredEvent): Promise<boolean>;
+  /** Inserts every event whose eventId is new, in one atomic write; existing ones are skipped. */
+  insertMany(events: StoredEvent[]): Promise<void>;
   /** Sets the outcome only while it is PENDING or already equal; true if the row now has it. */
   decide(eventId: string, outcome: ScanOutcome): Promise<boolean>;
   /** Null when there is no such event. */
@@ -124,8 +126,26 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
     throw new OutcomeConflictError(eventId, current as ScanOutcome);
   }
 
-  async ingest(): Promise<PushEventsResponse> {
-    return todo();
+  /**
+   * The edge decided these scans locally (ADR-9), so each is stored as sent: outcome, jti and
+   * stale included. A known eventId is skipped, never updated (contract: shared/contracts/edge.ts).
+   */
+  async ingest({ edgeId, events }: PushEventsRequest): Promise<PushEventsResponse> {
+    await this.repo.insertMany(
+      events.map((e) => ({
+        eventId: e.eventId,
+        employeeId: e.employeeId,
+        gateId: e.gateId,
+        method: e.method,
+        occurredAt: new Date(e.occurredAt),
+        outcome: e.outcome,
+        edgeId,
+        jti: e.jti,
+        stale: e.stale,
+      })),
+    );
+    // New and duplicate alike: the server now holds every one, so the edge drops them all.
+    return { accepted: [...new Set(events.map((e) => e.eventId))] };
   }
 
   async dailyRecords(): Promise<DailyRecord[]> {
