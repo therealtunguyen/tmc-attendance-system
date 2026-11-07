@@ -24,6 +24,10 @@ const baseUrl = (raw: string) => {
   }
 };
 
+/**
+ * The system parameters. Keys are stored and validated; consumers (gate, QR, attendance, reporting,
+ * adapters) read them via ConfigReader.config() once those modules are wired. Nothing reads them yet.
+ */
 export const CONFIG = {
   'qr.ttlSeconds': def({
     default: '60',

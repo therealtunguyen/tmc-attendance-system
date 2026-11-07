@@ -16,8 +16,9 @@ const bearer = (req: Request): string | undefined => {
 };
 
 /**
- * Sets res.locals.user from a valid, fully authenticated session (FR-5.2). Never rejects:
- * routes decide through requirePermission, which answers 401 without a user.
+ * Sets res.locals.user from a valid, fully authenticated session (FR-5.2). Never answers 401 or 403
+ * itself: routes decide through requirePermission, which answers 401 without a user.
+ * Store errors from the authenticator or resolver propagate to the error handler.
  * A resolver, when given, expands the user's scopes down the org tree first (BR-15).
  */
 export const authenticate =

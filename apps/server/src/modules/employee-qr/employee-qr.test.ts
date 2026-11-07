@@ -982,4 +982,89 @@ describe('employee routes: team scope through the org tree (#47, BR-15)', () => 
     const cleared = await request(app()).patch(`/api/employees/${id}`).send({ teamId: null });
     expect(cleared.status).toBe(200);
   });
+
+  describe('with a team directory', () => {
+    const directedApp = () => createApp([resolved(hr), employeeQrRoutes(eqr, orgs)]);
+    const hrAll: UserRef = { id: 'hr-all', role: 'HR' };
+    const wide = () =>
+      createApp([
+        Router().use((_req, res, next) => {
+          res.locals.user = hrAll;
+          next();
+        }),
+        employeeQrRoutes(eqr, orgs),
+      ]);
+
+    it('accepts a team of the same factory', async () => {
+      const res = await request(directedApp())
+        .post('/api/employees')
+        .send({ ...lan, teamId: 'bd-line-1' });
+      expect(res.status).toBe(201);
+    });
+
+    it.each([
+      ['an unknown team', 'nope', 'teamId is not a known team'],
+      ['a department', 'bd-sew', 'teamId is not a known team'],
+      ['a team of another factory', 'la-line-1', 'teamId belongs to another factory'],
+    ])('POST rejects %s (400)', async (_name, teamId, error) => {
+      const res = await request(wide())
+        .post('/api/employees')
+        .send({ ...lan, teamId });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error });
+    });
+
+    it.each([
+      ['an unknown team', 'nope', 'teamId is not a known team'],
+      ['a team of another factory', 'la-line-1', 'teamId belongs to another factory'],
+    ])('PATCH rejects %s (400)', async (_name, teamId, error) => {
+      const { id } = await eqr.createEmployee('hr-1', { ...lan, code: 'BD-2', teamId: null });
+      const res = await request(wide()).patch(`/api/employees/${id}`).send({ teamId });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error });
+      expect(store.rows.get(id)!.teamId).toBeNull();
+    });
+
+    it('PATCH rejects a factory change that strands the employee in the old factory team', async () => {
+      const { id } = await eqr.createEmployee('hr-1', {
+        ...lan,
+        code: 'BD-2',
+        teamId: 'bd-line-1',
+      });
+      const res = await request(wide())
+        .patch(`/api/employees/${id}`)
+        .send({ factoryId: 'long-an' });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: 'teamId belongs to another factory' });
+      const both = await request(wide())
+        .patch(`/api/employees/${id}`)
+        .send({ factoryId: 'long-an', teamId: 'la-line-1' });
+      expect(both.status).toBe(200);
+      const cleared = await request(wide())
+        .patch(`/api/employees/${id}`)
+        .send({ factoryId: 'binh-duong', teamId: null });
+      expect(cleared.status).toBe(200);
+    });
+
+    it('rejects a whitespace-only teamId on POST and PATCH (400)', async () => {
+      const post = await request(wide())
+        .post('/api/employees')
+        .send({ ...lan, teamId: '  ' });
+      expect(post.status).toBe(400);
+      expect(post.body).toEqual({ error: 'teamId must be a non-empty string' });
+      const { id } = await eqr.createEmployee('hr-1', { ...lan, code: 'BD-2', teamId: null });
+      const patch = await request(wide()).patch(`/api/employees/${id}`).send({ teamId: '  ' });
+      expect(patch.status).toBe(400);
+      expect(patch.body).toEqual({ error: 'teamId must be a non-empty string' });
+    });
+  });
+
+  it('without a directory, team and factory are not cross-checked', async () => {
+    const res = await request(
+      createApp([resolved({ id: 'hr-all', role: 'HR' }), employeeQrRoutes(eqr)]),
+    )
+      .post('/api/employees')
+      .send({ ...lan, teamId: 'la-line-1' });
+    expect(res.status).toBe(201);
+  });
 });

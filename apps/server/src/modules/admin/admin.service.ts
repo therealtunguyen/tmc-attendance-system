@@ -9,6 +9,7 @@ import {
 } from './admin.config.js';
 import {
   descendants,
+  factoryOf,
   ORG_KINDS,
   parentProblem,
   SLUG,
@@ -101,6 +102,13 @@ export class AdminService implements ConfigReader, ScopeResolver {
     }));
   }
 
+  /** The factory a team belongs to; null for an unknown ID or one that is not a TEAM. */
+  async factoryOf(teamId: string): Promise<string | null> {
+    const units = await this.orgUnits();
+    if (units.find((u) => u.id === teamId)?.kind !== 'TEAM') return null;
+    return factoryOf(units, teamId)?.id ?? null;
+  }
+
   async orgUnits(): Promise<OrgUnit[]> {
     if (!this.cache) {
       const version = this.version;
@@ -136,6 +144,7 @@ export class AdminService implements ConfigReader, ScopeResolver {
         supervisorIds: [],
       }),
     );
+    // TODO(#45): write the change and its audit entry in one transaction
     await this.record(actorId, 'ORG_UNIT_CREATE', `org:${unit.id}`, undefined, unit);
     return unit;
   }
@@ -147,6 +156,7 @@ export class AdminService implements ConfigReader, ScopeResolver {
     const before = await this.find(id);
     const unit = await this.write(() => this.store.updateOrgUnit(id, { name: trimmed }));
     if (!unit) throw new OrgUnitNotFoundError(id);
+    // TODO(#45): write the change and its audit entry in one transaction
     await this.record(
       actorId,
       'ORG_UNIT_RENAME',
@@ -166,6 +176,7 @@ export class AdminService implements ConfigReader, ScopeResolver {
     const supervisorIds = [...new Set(userIds)];
     const unit = await this.write(() => this.store.updateOrgUnit(teamId, { supervisorIds }));
     if (!unit) throw new OrgUnitNotFoundError(teamId);
+    // TODO(#45): write the change and its audit entry in one transaction
     await this.record(
       actorId,
       'TEAM_SUPERVISORS_SET',
@@ -184,6 +195,7 @@ export class AdminService implements ConfigReader, ScopeResolver {
     }
     const before = (await this.get(key)) as string;
     await this.store.setConfig(key, value, actorId);
+    // TODO(#45): write the change and its audit entry in one transaction
     await this.record(actorId, 'CONFIG_CHANGE', `config:${key}`, { value: before }, { value });
     return {
       key,

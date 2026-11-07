@@ -37,7 +37,7 @@ const app = createApp(
       mfa: { max: config.authRateLimitPerMin },
     }),
     adminRoutes(admin),
-    employeeQrRoutes(eqr),
+    employeeQrRoutes(eqr, admin),
     attendanceRoutes(attendance),
     reportingRoutes(reporting),
     gateRoutes(gate),

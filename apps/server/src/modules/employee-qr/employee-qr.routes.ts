@@ -17,6 +17,12 @@ import {
   type NewEmployee,
 } from './employee-qr.service.js';
 
+/** Looks up the org tree for team checks; implemented by the admin module. */
+export interface TeamDirectory {
+  /** The factory a team belongs to; null for an unknown ID or one that is not a TEAM. */
+  factoryOf(teamId: string): Promise<string | null>;
+}
+
 const required = ['code', 'firstName', 'lastName', 'email', 'factoryId'] as const;
 const editable = ['firstName', 'lastName', 'email', 'factoryId', 'teamId'] as const;
 
@@ -56,7 +62,18 @@ const idOf = (req: Request) => req.params.id as string;
 /** The signed-in user; requirePermission has already rejected requests without one. */
 const userOf = (res: Response) => res.locals.user as UserRef;
 
-export const employeeQrRoutes = (eqr: EmployeeQrService) =>
+/** A 400 message when the team is unknown or sits in another factory, else null. */
+const teamProblem = async (
+  teams: TeamDirectory,
+  teamId: string,
+  factoryId: string,
+): Promise<string | null> => {
+  const owner = await teams.factoryOf(teamId);
+  if (owner === null) return 'teamId is not a known team';
+  return owner === factoryId ? null : 'teamId belongs to another factory';
+};
+
+export const employeeQrRoutes = (eqr: EmployeeQrService, teams?: TeamDirectory) =>
   Router()
     // ?scope=<factoryId or teamId>. Unrestricted users may omit it; restricted ones are held to their own scopes (BR-15).
     .get('/employees', requirePermission('employee:read'), async (req, res) => {
@@ -90,6 +107,14 @@ export const employeeQrRoutes = (eqr: EmployeeQrService) =>
       if (body.teamId && !inScope(userOf(res), trimmed(body.teamId) as string)) {
         return void res.status(403).json({ error: 'Forbidden' });
       }
+      if (teams && typeof body.teamId === 'string') {
+        const problem = await teamProblem(
+          teams,
+          trimmed(body.teamId) as string,
+          trimmed(body.factoryId) as string,
+        );
+        if (problem) return void res.status(400).json({ error: problem });
+      }
       const data = { teamId: null, ...pick(body), code: trimmed(body.code) } as NewEmployee;
       try {
         res.status(201).json(await eqr.createEmployee(userOf(res).id, data));
@@ -119,6 +144,15 @@ export const employeeQrRoutes = (eqr: EmployeeQrService) =>
       }
       if (changes.teamId && !inScope(userOf(res), changes.teamId)) {
         return void res.status(403).json({ error: 'Forbidden' });
+      }
+      if (teams) {
+        // A factory change alone must not leave the employee in a team of the old factory.
+        const teamId = 'teamId' in changes ? changes.teamId : current.teamId;
+        const factoryId = changes.factoryId ?? current.factoryId;
+        if (teamId && (changes.factoryId !== undefined || 'teamId' in changes)) {
+          const problem = await teamProblem(teams, teamId, factoryId);
+          if (problem) return void res.status(400).json({ error: problem });
+        }
       }
       const employee = await eqr.updateEmployee(userOf(res).id, idOf(req), changes);
       if (!employee) return void res.status(404).json({ error: 'Employee not found' });
