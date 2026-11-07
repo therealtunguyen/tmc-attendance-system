@@ -2,6 +2,8 @@ import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../app.js';
 import { MAX_EDGE_BATCH, type EdgeEvent } from '../../shared/contracts/edge.js';
+import type { Scope } from '../../shared/types.js';
+import type { EmployeeDirectory } from '../employee-qr/index.js';
 import { attendanceRoutes } from './attendance.routes.js';
 import {
   AttendanceService,
@@ -37,6 +39,35 @@ class InMemoryEvents implements AttendanceStore {
   async outcomeOf(eventId: string) {
     return this.rows.get(eventId)?.outcome ?? null;
   }
+
+  async grantedEvents(from: Date, to: Date, employeeIds?: string[]) {
+    return [...this.rows.values()].filter(
+      (e) =>
+        e.outcome === 'GRANTED' &&
+        e.employeeId !== null &&
+        (!employeeIds || employeeIds.includes(e.employeeId)) &&
+        e.occurredAt >= from &&
+        e.occurredAt < to,
+    );
+  }
+}
+
+/** Stands in for EQR's EmployeeDirectory: scope is a factory ID. */
+class FakeDirectory implements EmployeeDirectory {
+  constructor(private byFactory: Record<string, string[]>) {}
+
+  async find(id: string) {
+    return { id, firstName: id, lastName: 'X', active: true };
+  }
+
+  async list(scope: Scope) {
+    return (this.byFactory[scope] ?? []).map((id) => ({
+      id,
+      firstName: id,
+      lastName: 'X',
+      active: true,
+    }));
+  }
 }
 
 const scan: ScanEvent = {
@@ -52,7 +83,10 @@ let attendance: AttendanceService;
 
 beforeEach(() => {
   store = new InMemoryEvents();
-  attendance = new AttendanceService(store);
+  attendance = new AttendanceService(
+    store,
+    new FakeDirectory({ 'binh-duong': ['emp-1', 'emp-2'], 'long-an': ['emp-3'] }),
+  );
 });
 
 describe('AttendanceService.record (FR-3.1, FR-3.2)', () => {
@@ -305,5 +339,88 @@ describe('POST /api/edge/events', () => {
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ error });
     expect(store.rows.size).toBe(0);
+  });
+});
+
+describe('AttendanceService.dailyRecords (FR-3.4, FR-3.5)', () => {
+  /** Edge-pushed scans; times are UTC, Vietnam is UTC+7. */
+  const push = (...events: [string, string, string, EdgeEvent['outcome']?][]) =>
+    attendance.ingest({
+      edgeId: 'edge-bd',
+      events: events.map(([eventId, employeeId, occurredAt, outcome = 'GRANTED']) =>
+        edgeEvent(eventId, { employeeId, occurredAt, outcome }),
+      ),
+    });
+  const range = (from: string, to: string) => ({ from: new Date(from), to: new Date(to) });
+
+  it('builds first in, last out and hours for each employee in the scope', async () => {
+    await push(
+      ['a', 'emp-1', '2026-11-07T00:58:00Z'], // 07:58 local
+      ['b', 'emp-1', '2026-11-07T10:03:00Z'], // 17:03 local
+      ['c', 'emp-2', '2026-11-07T01:00:00Z'], // single scan: missing punch
+      ['d', 'emp-3', '2026-11-07T01:00:00Z'], // Long An: outside the scope
+      ['e', 'emp-3', '2026-11-07T09:00:00Z'],
+    );
+    const records = await attendance.dailyRecords(
+      range('2026-11-07T05:00:00Z', '2026-11-07T05:00:00Z'),
+      'binh-duong',
+    );
+    expect(records).toEqual([
+      {
+        employeeId: 'emp-1',
+        day: new Date('2026-11-06T17:00:00Z'),
+        firstIn: new Date('2026-11-07T00:58:00Z'),
+        lastOut: new Date('2026-11-07T10:03:00Z'),
+        hours: 9.08,
+        missingPunch: false,
+      },
+      {
+        employeeId: 'emp-2',
+        day: new Date('2026-11-06T17:00:00Z'),
+        firstIn: new Date('2026-11-07T01:00:00Z'),
+        lastOut: null,
+        hours: 0,
+        missingPunch: true,
+      },
+    ]);
+  });
+
+  it('includes every local day of the range, the last one too', async () => {
+    await push(
+      ['a', 'emp-1', '2026-11-05T16:59:00Z'], // 23:59 on 05/11: before the range
+      ['b', 'emp-1', '2026-11-05T17:00:00Z'], // 00:00 on 06/11: first day
+      ['c', 'emp-1', '2026-11-07T16:59:00Z'], // 23:59 on 07/11: last day
+      ['d', 'emp-1', '2026-11-07T17:00:00Z'], // 00:00 on 08/11: after the range
+    );
+    const records = await attendance.dailyRecords(
+      range('2026-11-06T03:00:00Z', '2026-11-07T03:00:00Z'),
+      'binh-duong',
+    );
+    expect(records.map((r) => [r.day.toISOString(), r.firstIn?.toISOString()])).toEqual([
+      ['2026-11-05T17:00:00.000Z', '2026-11-05T17:00:00.000Z'],
+      ['2026-11-06T17:00:00.000Z', '2026-11-07T16:59:00.000Z'],
+    ]);
+  });
+
+  it('counts only GRANTED events (PENDING and DENIED are not attendance)', async () => {
+    await push(
+      ['a', 'emp-1', '2026-11-07T01:00:00Z'],
+      ['b', 'emp-1', '2026-11-07T09:00:00Z', 'DENIED'],
+      ['c', 'emp-1', '2026-11-07T10:00:00Z', 'PENDING'],
+    );
+    const [record] = await attendance.dailyRecords(
+      range('2026-11-07T05:00:00Z', '2026-11-07T05:00:00Z'),
+      'binh-duong',
+    );
+    expect(record).toMatchObject({ missingPunch: true, lastOut: null });
+  });
+
+  it('a scope with no employees gives no records', async () => {
+    await push(['a', 'emp-1', '2026-11-07T01:00:00Z']);
+    const records = await attendance.dailyRecords(
+      range('2026-11-07T05:00:00Z', '2026-11-07T05:00:00Z'),
+      'nowhere',
+    );
+    expect(records).toEqual([]);
   });
 });
