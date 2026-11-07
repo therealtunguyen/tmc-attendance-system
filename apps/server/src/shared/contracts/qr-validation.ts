@@ -5,10 +5,13 @@ import { verifyQrToken, type QrPublicKeys } from './qr-token.js';
 
 export type QrDenyReason = 'INVALID_SIGNATURE' | 'EXPIRED' | 'UNKNOWN' | 'INACTIVE' | 'REVOKED';
 
-/** jti is returned whenever the token verified, so the edge can check reuse and record it. */
+/**
+ * jti and employeeId are returned whenever the token verified (signature and exp), so the edge can
+ * check reuse and record the denial against the employee. Never for EXPIRED: an old token can be replayed.
+ */
 export type QrCheckResult =
   | { ok: true; employeeId: string; firstName: string; jti: string }
-  | { ok: false; reason: QrDenyReason; jti?: string };
+  | { ok: false; reason: QrDenyReason; jti?: string; employeeId?: string };
 
 export interface QrCheckContext {
   publicKeys: QrPublicKeys;
@@ -27,7 +30,7 @@ export const checkQrToken = async (token: string, ctx: QrCheckContext): Promise<
   if (!verified.ok) return verified;
   const { sub, jti } = verified.claims;
   const employee = await ctx.findEmployee(sub);
-  if (!employee) return { ok: false, reason: 'UNKNOWN', jti };
-  if (employee.deny) return { ok: false, reason: employee.deny, jti };
+  if (!employee) return { ok: false, reason: 'UNKNOWN', jti, employeeId: sub };
+  if (employee.deny) return { ok: false, reason: employee.deny, jti, employeeId: sub };
   return { ok: true, employeeId: employee.id, firstName: employee.firstName, jti };
 };
