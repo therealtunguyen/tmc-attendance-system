@@ -98,6 +98,11 @@ export interface Authenticator {
   logout(token: string): Promise<void>;
 }
 
+/** Widens a user's scopes to what they cover in the org tree (BR-15). Implemented by the admin module. */
+export interface ScopeResolver {
+  expandScopes(user: UserRef): Promise<UserRef>;
+}
+
 export interface AuditEntry {
   actorId: string;
   action: string;

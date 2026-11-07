@@ -1,7 +1,13 @@
 import { Router, type Request, type RequestHandler } from 'express';
 import { createRateLimiter, type RateLimitOptions } from './iam.ratelimit.js';
 import { requirePermission } from './iam.rbac.js';
-import type { AuditFilter, AuditReader, Authenticator, UserRef } from './iam.service.js';
+import type {
+  AuditFilter,
+  AuditReader,
+  Authenticator,
+  ScopeResolver,
+  UserRef,
+} from './iam.service.js';
 
 /** The bearer token of the request, or undefined when the header is missing or malformed. */
 const bearer = (req: Request): string | undefined => {
@@ -10,16 +16,18 @@ const bearer = (req: Request): string | undefined => {
 };
 
 /**
- * Sets res.locals.user from a valid, fully authenticated session (FR-5.2). Never rejects:
- * routes decide through requirePermission, which answers 401 without a user.
+ * Sets res.locals.user from a valid, fully authenticated session (FR-5.2). Never answers 401 or 403
+ * itself: routes decide through requirePermission, which answers 401 without a user.
+ * Store errors from the authenticator or resolver propagate to the error handler.
+ * A resolver, when given, expands the user's scopes down the org tree first (BR-15).
  */
 export const authenticate =
-  (auth: Authenticator): RequestHandler =>
+  (auth: Authenticator, resolver?: ScopeResolver): RequestHandler =>
   async (req, res, next) => {
     const token = bearer(req);
     if (token) {
       const user = await auth.authenticate(token);
-      if (user) res.locals.user = user;
+      if (user) res.locals.user = resolver ? await resolver.expandScopes(user) : user;
     }
     next();
   };
