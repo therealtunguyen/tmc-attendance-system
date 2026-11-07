@@ -1,4 +1,5 @@
 import { Router, type Request, type RequestHandler } from 'express';
+import { createRateLimiter, type RateLimitOptions } from './iam.ratelimit.js';
 import { requirePermission } from './iam.rbac.js';
 import type { AuditFilter, AuditReader, Authenticator, UserRef } from './iam.service.js';
 
@@ -53,13 +54,27 @@ const parseFilter = (req: Request): AuditFilter | string => {
   return filter;
 };
 
+const MAX_USERNAME_LENGTH = 64;
+const MAX_PASSWORD_LENGTH = 256;
+
+const passThrough: RequestHandler = (_req, _res, next) => next();
+
 // Read-only on purpose: no route can change or delete an entry (FR-4.10).
-export const iamRoutes = (iam: AuditReader & Authenticator) =>
-  Router()
-    .post('/auth/login', async (req, res) => {
+/** `limits.login` / `limits.mfa` override the default 10 requests per minute per IP; false disables. */
+export const iamRoutes = (
+  iam: AuditReader & Authenticator,
+  limits: { login?: RateLimitOptions | false; mfa?: RateLimitOptions | false } = {},
+) => {
+  const limiter = (options: RateLimitOptions | false | undefined) =>
+    options === false ? passThrough : createRateLimiter(options);
+  return Router()
+    .post('/auth/login', limiter(limits.login), async (req, res) => {
       const { username, password } = (req.body ?? {}) as Record<string, unknown>;
       if (typeof username !== 'string' || typeof password !== 'string' || !username || !password) {
         return void res.status(400).json({ error: 'username and password are required' });
+      }
+      if (username.length > MAX_USERNAME_LENGTH || password.length > MAX_PASSWORD_LENGTH) {
+        return void res.status(400).json({ error: 'username or password is too long' });
       }
       const result = await iam.login(username, password);
       if (result.ok) {
@@ -74,7 +89,7 @@ export const iamRoutes = (iam: AuditReader & Authenticator) =>
       }
       res.status(401).json({ error: 'Invalid username or password' });
     })
-    .post('/auth/mfa', async (req, res) => {
+    .post('/auth/mfa', limiter(limits.mfa), async (req, res) => {
       const token = bearer(req);
       const { code } = (req.body ?? {}) as Record<string, unknown>;
       if (typeof code !== 'string') return void res.status(400).json({ error: 'code is required' });
@@ -98,3 +113,4 @@ export const iamRoutes = (iam: AuditReader & Authenticator) =>
     .get('/audit/verify', requirePermission('audit:read'), async (_req, res) => {
       res.json(await iam.verify());
     });
+};

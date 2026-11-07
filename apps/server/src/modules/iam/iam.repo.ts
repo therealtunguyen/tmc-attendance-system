@@ -168,4 +168,10 @@ export class IamRepo implements AuditStore, UserStore {
   async revokeSession(id: string, at: Date): Promise<void> {
     await this.db.session.update({ where: { id }, data: { revokedAt: at } });
   }
+
+  async purgeSessions(before: Date): Promise<void> {
+    await this.db.session.deleteMany({
+      where: { OR: [{ expiresAt: { lt: before } }, { revokedAt: { lt: before } }] },
+    });
+  }
 }

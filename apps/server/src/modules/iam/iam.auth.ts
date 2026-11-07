@@ -10,28 +10,61 @@ export const LOCKOUT_MS = 15 * 60 * 1000;
 /** Privileged roles that must pass MFA (FR-5.2). */
 export const MFA_ROLES: readonly Role[] = ['ADM', 'HR'];
 
-const SCRYPT = { N: 16384, r: 8, p: 1 } as const;
+export interface ScryptParams {
+  N: number;
+  r: number;
+  p: number;
+}
+
+/** OWASP: N=2^17, r=8, p=1. */
+export const SCRYPT_PARAMS: ScryptParams = { N: 2 ** 17, r: 8, p: 1 };
+const MAX_N = 2 ** 20;
+const MAX_R = 32;
+const MAX_P = 16;
+const SCRYPT_MAXMEM = 256 * 1024 * 1024;
 const KEY_LEN = 64;
 const SALT_LEN = 16;
 
-const derive = (password: string, salt: Buffer): Promise<Buffer> =>
+const derive = (password: string, salt: Buffer, { N, r, p }: ScryptParams): Promise<Buffer> =>
   new Promise((resolve, reject) => {
-    scrypt(password, salt, KEY_LEN, SCRYPT, (err, key) => (err ? reject(err) : resolve(key)));
+    scrypt(password, salt, KEY_LEN, { N, r, p, maxmem: SCRYPT_MAXMEM }, (err, key) =>
+      err ? reject(err) : resolve(key),
+    );
   });
 
-/** Stored as scrypt$<saltB64>$<hashB64>. */
-export const hashPassword = async (password: string): Promise<string> => {
+/** Stored as scrypt$<N>$<r>$<p>$<saltB64>$<hashB64>. Pass params only to make tests fast. */
+export const hashPassword = async (
+  password: string,
+  params: ScryptParams = SCRYPT_PARAMS,
+): Promise<string> => {
   const salt = randomBytes(SALT_LEN);
-  const key = await derive(password, salt);
-  return `scrypt$${salt.toString('base64')}$${key.toString('base64')}`;
+  const key = await derive(password, salt, params);
+  const { N, r, p } = params;
+  return `scrypt$${N}$${r}$${p}$${salt.toString('base64')}$${key.toString('base64')}`;
+};
+
+const parseParam = (text: string | undefined, max: number): number | null => {
+  if (!text || !/^[1-9]\d*$/.test(text)) return null;
+  const value = Number(text);
+  return value <= max ? value : null;
 };
 
 export const verifyPassword = async (password: string, stored: string): Promise<boolean> => {
-  const [scheme, salt, hash] = stored.split('$');
-  if (scheme !== 'scrypt' || !salt || !hash) return false;
+  const parts = stored.split('$');
+  if (parts.length !== 6 || parts[0] !== 'scrypt') return false;
+  const [, n, r, p, salt, hash] = parts;
+  const N = parseParam(n, MAX_N);
+  const R = parseParam(r, MAX_R);
+  const P = parseParam(p, MAX_P);
+  // N must be a power of 2 greater than 1.
+  if (!N || !R || !P || N < 2 || (N & (N - 1)) !== 0 || !salt || !hash) return false;
   const expected = Buffer.from(hash, 'base64');
-  const actual = await derive(password, Buffer.from(salt, 'base64'));
-  return expected.length === actual.length && timingSafeEqual(expected, actual);
+  try {
+    const actual = await derive(password, Buffer.from(salt, 'base64'), { N, r: R, p: P });
+    return expected.length === actual.length && timingSafeEqual(expected, actual);
+  } catch {
+    return false;
+  }
 };
 
 /** Password policy (FR-5.2): returns a message, or null when acceptable. */

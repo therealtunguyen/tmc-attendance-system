@@ -32,7 +32,10 @@ const gate = new GateService(new GateRepo(db), eqr, attendance, turnstile, admin
 
 const app = createApp(
   [
-    iamRoutes(iam),
+    iamRoutes(iam, {
+      login: { max: config.authRateLimitPerMin },
+      mfa: { max: config.authRateLimitPerMin },
+    }),
     adminRoutes(admin),
     employeeQrRoutes(eqr),
     attendanceRoutes(attendance),

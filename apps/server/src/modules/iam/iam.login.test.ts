@@ -1,5 +1,6 @@
 import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import { createApp } from '../../app.js';
 import {
   hashPassword,
@@ -35,6 +36,7 @@ class Store extends InMemoryUsers implements AuditStore {
   }
 }
 
+const FAST = { N: 1024, r: 8, p: 1 };
 const PASSWORD = 'correct horse 42';
 const SECRET = newTotpSecret();
 
@@ -46,7 +48,7 @@ let app: ReturnType<typeof createApp>;
 const addUser = async (username: string, role: Role, extra: object = {}) =>
   store.createUser({
     username,
-    passwordHash: await hashPassword(PASSWORD),
+    passwordHash: await hashPassword(PASSWORD, FAST),
     role,
     ...extra,
   });
@@ -63,7 +65,7 @@ beforeEach(async () => {
   now = Date.UTC(2026, 10, 6, 8, 0, 0);
   store = new Store();
   iam = new IamService(store, () => now);
-  app = createApp([iamRoutes(iam)], { before: [authenticate(iam)] });
+  app = createApp([iamRoutes(iam, { login: false, mfa: false })], { before: [authenticate(iam)] });
   await addUser('emp', 'EMP', { employeeId: 'e-1' });
   await addUser('adm', 'ADM', { mfaSecret: SECRET });
   await addUser('hr-nomfa', 'HR');
@@ -142,6 +144,63 @@ describe('POST /api/auth/login', () => {
   });
 });
 
+describe('input limits and rate limiting', () => {
+  it('400 for an over-long username or password', async () => {
+    expect((await login('a'.repeat(65))).status).toBe(400);
+    expect((await login('emp', 'p'.repeat(257))).status).toBe(400);
+    expect((await login('a'.repeat(64))).status).toBe(401);
+    expect((await login('emp', 'p'.repeat(256))).status).toBe(401);
+    expect(actions()).toEqual(['LOGIN_FAIL', 'LOGIN_FAIL']);
+  });
+
+  it('never stores a raw unknown username in the audit actor', async () => {
+    const typed = 'my secret password 123';
+    await login(typed);
+    const digest = createHash('sha256').update(typed).digest('hex').slice(0, 16);
+    expect(store.rows[0]!.actorId).toBe(`username-sha256:${digest}`);
+    expect(JSON.stringify(store.rows)).not.toContain(typed);
+  });
+
+  it('429 with Retry-After on the 11th request in a window; a new window allows again', async () => {
+    let t = 0;
+    const limited = createApp([
+      iamRoutes(iam, { login: { clock: () => t }, mfa: { clock: () => t } }),
+    ]);
+    const attempt = () =>
+      request(limited).post('/api/auth/login').send({ username: 'emp', password: PASSWORD });
+    for (let i = 0; i < 10; i++) expect((await attempt()).status).toBe(200);
+    const blocked = await attempt();
+    expect(blocked.status).toBe(429);
+    expect(blocked.body).toEqual({ error: 'Too many attempts, try again later' });
+    expect(blocked.headers['retry-after']).toBe('60');
+    t += 60_000;
+    expect((await attempt()).status).toBe(200);
+    // /auth/mfa has its own budget.
+    const mfaAttempt = () => request(limited).post('/api/auth/mfa').send({ code: '1' });
+    for (let i = 0; i < 10; i++) expect((await mfaAttempt()).status).toBe(401);
+    expect((await mfaAttempt()).status).toBe(429);
+  });
+
+  it('purges dead sessions on about 1% of logins', async () => {
+    const { token } = (await login('emp')).body;
+    await request(app).post('/api/auth/logout').set('Authorization', `Bearer ${token}`);
+    expect(store.sessions.size).toBe(1);
+    now += 1000;
+    const calls = [0.5, 0.005];
+    const purging = new IamService(
+      store,
+      () => now,
+      () => calls.shift()!,
+    );
+    await purging.login('emp', PASSWORD);
+    expect(store.sessions.size).toBe(2);
+    await purging.login('emp', PASSWORD);
+    // The revoked session is gone; the first new one and the latest remain.
+    expect(store.sessions.size).toBe(2);
+    expect([...store.sessions.values()].every((s) => s.revokedAt === null)).toBe(true);
+  });
+});
+
 describe('MFA (FR-5.2)', () => {
   it('a pending ADM token is rejected until the right code is given', async () => {
     const res = await login('adm');
@@ -172,6 +231,48 @@ describe('MFA (FR-5.2)', () => {
     const { token } = (await login('adm')).body;
     now += MFA_PENDING_TTL_MS;
     expect((await mfa(token, totp(SECRET, now))).status).toBe(401);
+  });
+
+  it('a correct password alone does not reset the counter: login + 4 wrong codes cannot loop forever', async () => {
+    let lockedAt = -1;
+    for (let cycle = 0; cycle < 10 && lockedAt < 0; cycle++) {
+      const res = await login('adm');
+      if (res.status === 423) {
+        lockedAt = cycle;
+        break;
+      }
+      for (let i = 0; i < 4; i++) await mfa(res.body.token, '000000');
+    }
+    expect(lockedAt).toBeGreaterThanOrEqual(0);
+    expect(lockedAt).toBeLessThanOrEqual(2);
+    const adm = (await store.findUserByUsername('adm'))!;
+    expect(adm.lockedUntil).not.toBeNull();
+    expect((await login('adm')).status).toBe(423);
+  });
+
+  it('the 10-cycle loop never gets a valid session', async () => {
+    for (let cycle = 0; cycle < 10; cycle++) {
+      const res = await login('adm');
+      if (res.status === 200) for (let i = 0; i < 4; i++) await mfa(res.body.token, '000000');
+    }
+    expect((await store.findUserByUsername('adm'))!.lockedUntil).not.toBeNull();
+    expect((await login('adm')).status).toBe(423);
+  });
+
+  it('a successful MFA resets the counter', async () => {
+    const first = (await login('adm')).body.token;
+    for (let i = 0; i < 4; i++) await mfa(first, '000000');
+    expect((await store.findUserByUsername('adm'))!.failedLogins).toBe(4);
+    expect((await mfa(first, totp(SECRET, now))).status).toBe(200);
+    expect((await store.findUserByUsername('adm'))!.failedLogins).toBe(0);
+  });
+
+  it('a corrupt stored secret is a failed code, not a 500', async () => {
+    const { token } = (await login('adm')).body;
+    (await store.findUserByUsername('adm'))!.mfaSecret = '!!not base32!!';
+    const res = await mfa(token, '123456');
+    expect(res.status).toBe(401);
+    expect(actions().at(-1)).toBe('MFA_FAIL');
   });
 
   it('wrong codes count toward the lockout', async () => {
@@ -248,7 +349,10 @@ describe('audit (FR-4.9)', () => {
     await request(app).post('/api/auth/logout').set('Authorization', `Bearer ${token}`);
     expect(actions()).toEqual(['LOGIN_OK', 'LOGIN_FAIL', 'LOGIN_FAIL', 'LOGOUT']);
     expect(store.rows[0]).toMatchObject({ actorId: emp.id, target: `user:${emp.id}` });
-    expect(store.rows[2]).toMatchObject({ actorId: 'username:nobody', target: 'user:?' });
+    expect(store.rows[2]).toMatchObject({
+      actorId: expect.stringMatching(/^username-sha256:[0-9a-f]{16}$/),
+      target: 'user:?',
+    });
   });
 
   it('records locked attempts and MFA outcomes', async () => {

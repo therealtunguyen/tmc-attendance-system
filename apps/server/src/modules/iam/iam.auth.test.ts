@@ -13,19 +13,42 @@ import {
   verifyTotp,
 } from './iam.auth.js';
 
+const FAST = { N: 1024, r: 8, p: 1 };
 const RFC_SECRET = base32Encode(Buffer.from('12345678901234567890'));
 
 describe('passwords (FR-5.2)', () => {
   it('round-trips and rejects a wrong password', async () => {
-    const stored = await hashPassword('correct horse 42');
-    expect(stored).toMatch(/^scrypt\$[^$]+\$[^$]+$/);
+    const stored = await hashPassword('correct horse 42', FAST);
+    expect(stored).toMatch(/^scrypt\$1024\$8\$1\$[^$]+\$[^$]+$/);
     expect(await verifyPassword('correct horse 42', stored)).toBe(true);
     expect(await verifyPassword('correct horse 43', stored)).toBe(false);
   });
 
   it('salts each hash and rejects a malformed stored value', async () => {
-    expect(await hashPassword('same password 1')).not.toBe(await hashPassword('same password 1'));
+    expect(await hashPassword('same password 1', FAST)).not.toBe(
+      await hashPassword('same password 1', FAST),
+    );
     expect(await verifyPassword('x', 'plain')).toBe(false);
+  });
+
+  it('uses the production parameters by default', async () => {
+    expect(await hashPassword('correct horse 42')).toMatch(/^scrypt\$131072\$8\$1\$/);
+  });
+
+  it('rejects malformed or absurd stored parameters', async () => {
+    const [, , , , salt, hash] = (await hashPassword('x', FAST)).split('$');
+    for (const bad of [
+      `scrypt$${2 ** 21}$8$1$${salt}$${hash}`,
+      `scrypt$1000$8$1$${salt}$${hash}`,
+      `scrypt$1$8$1$${salt}$${hash}`,
+      `scrypt$1024$0$1$${salt}$${hash}`,
+      `scrypt$1024$8$x$${salt}$${hash}`,
+      `scrypt$1024$8$1$${salt}`,
+      `scrypt$${salt}$${hash}`,
+      `bcrypt$1024$8$1$${salt}$${hash}`,
+    ]) {
+      expect(await verifyPassword('x', bad)).toBe(false);
+    }
   });
 
   it('enforces the policy', () => {

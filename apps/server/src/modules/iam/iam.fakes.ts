@@ -72,4 +72,10 @@ export class InMemoryUsers implements UserStore {
   async revokeSession(id: string, at: Date) {
     this.sessions.get(id)!.revokedAt = at;
   }
+
+  async purgeSessions(before: Date) {
+    for (const [id, s] of this.sessions) {
+      if (s.expiresAt < before || (s.revokedAt && s.revokedAt < before)) this.sessions.delete(id);
+    }
+  }
 }

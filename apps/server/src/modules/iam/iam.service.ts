@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Scope } from '../../shared/types.js';
 import {
   hashPassword,
@@ -77,6 +78,8 @@ export interface UserStore {
   findSessionByTokenHash(tokenHash: string): Promise<SessionRecord | null>;
   markSessionMfaPassed(id: string, expiresAt: Date): Promise<void>;
   revokeSession(id: string, at: Date): Promise<void>;
+  /** Deletes sessions that expired or were revoked before the given time. */
+  purgeSessions(before: Date): Promise<void>;
 }
 
 export type LoginResult =
@@ -146,11 +149,19 @@ export const MAX_AUDIT_LIMIT = 500;
 /** Checked against when the username is unknown, so response time does not reveal which usernames exist. */
 const DUMMY_HASH_PROMISE = hashPassword('dummy-password-for-timing');
 
+/** Share of logins that also purge dead sessions. */
+const PURGE_PROBABILITY = 0.01;
+
+/** Unknown usernames are attacker input (it may be a password), so only a short digest is logged. */
+const unknownActor = (username: string) =>
+  `username-sha256:${createHash('sha256').update(username).digest('hex').slice(0, 16)}`;
+
 /** Users, login, roles, audit log (FR-1.7, FR-4.7, FR-4.8, FR-5.1, FR-5.2). */
 export class IamService implements Authorizer, AuditLog, AuditReader, Authenticator {
   constructor(
     private store: AuditStore & UserStore,
     private clock: () => number = Date.now,
+    private random: () => number = Math.random,
   ) {}
 
   check(user: UserRef, permission: Permission, scope?: Scope): boolean {
@@ -177,15 +188,18 @@ export class IamService implements Authorizer, AuditLog, AuditReader, Authentica
 
   async login(username: string, password: string): Promise<LoginResult> {
     const now = this.clock();
+    if (this.random() < PURGE_PROBABILITY) await this.store.purgeSessions(new Date(now));
     const user = await this.store.findUserByUsername(username);
     // Always hash, so unknown users cost the same as wrong passwords.
     const passwordOk = await verifyPassword(
       password,
       user?.passwordHash ?? (await DUMMY_HASH_PROMISE),
     );
-    const actor = user?.id ?? `username:${username}`;
+    const actor = user?.id ?? unknownActor(username);
     const target = `user:${user?.id ?? '?'}`;
 
+    // 423 reveals that the account exists, and anyone can lock out an ADM by failing logins. Accepted
+    // trade-off for FR-5.2 (lockout); IP rate limiting on /auth/login mitigates it.
     if (user?.active && user.lockedUntil && user.lockedUntil.getTime() > now) {
       await this.audit(actor, 'LOGIN_LOCKED', target);
       return { ok: false, reason: 'LOCKED' };
@@ -196,7 +210,6 @@ export class IamService implements Authorizer, AuditLog, AuditReader, Authentica
       return { ok: false, reason: 'INVALID_CREDENTIALS' };
     }
 
-    await this.store.resetFailedLogins(user.id);
     const token = newSessionToken();
     // TODO: self-service MFA enrollment; for now the seed script or an admin sets the secret.
     if (MFA_ROLES.includes(user.role)) {
@@ -213,6 +226,8 @@ export class IamService implements Authorizer, AuditLog, AuditReader, Authentica
       await this.audit(actor, 'LOGIN_MFA_PENDING', target);
       return { ok: true, token, mfaRequired: true };
     }
+    // For MFA roles the counter is reset only after the code is verified, so wrong codes accumulate.
+    await this.store.resetFailedLogins(user.id);
     const expiresAt = new Date(now + SESSION_TTL_MS);
     await this.store.createSession({
       tokenHash: hashToken(token),
@@ -239,13 +254,20 @@ export class IamService implements Authorizer, AuditLog, AuditReader, Authentica
     const target = `user:${session.userId}`;
     if (!user?.active || !user.mfaSecret) return { ok: false };
     if (user.lockedUntil && user.lockedUntil.getTime() > now) return { ok: false };
-    const step = verifyTotp(user.mfaSecret, code, now);
+    let step: number | null;
+    try {
+      step = verifyTotp(user.mfaSecret, code, now);
+    } catch {
+      // A corrupt stored secret fails the code instead of a 500.
+      step = null;
+    }
     // A replayed code counts as a failure.
     if (step === null || !(await this.store.useTotpStep(user.id, step))) {
       await this.store.recordFailedLogin(user.id, new Date(now));
       await this.audit(user.id, 'MFA_FAIL', target);
       return { ok: false };
     }
+    await this.store.resetFailedLogins(user.id);
     const expiresAt = new Date(now + SESSION_TTL_MS);
     await this.store.markSessionMfaPassed(session.id, expiresAt);
     await this.audit(user.id, 'MFA_OK', target);
