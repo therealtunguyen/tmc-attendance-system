@@ -153,6 +153,36 @@ export const employeeQrRoutes = (eqr: EmployeeQrService) =>
       }
     })
     .get('/me/qr', notImplemented)
-    .post('/employees/:id/qr/revoke', notImplemented)
+    .post('/employees/:id/qr/revoke', requirePermission('qr:revoke'), async (req, res) => {
+      const current = await eqr.getProfile(idOf(req));
+      if (!current || !canSeeEmployee(userOf(res), current)) {
+        return void res.status(404).json({ error: 'Employee not found' });
+      }
+      const employee = await eqr.revokeQr(userOf(res).id, idOf(req));
+      if (!employee) return void res.status(404).json({ error: 'Employee not found' });
+      res.json(employee);
+    })
+    .post('/employees/:id/qr/reissue', requirePermission('qr:revoke'), async (req, res) => {
+      const current = await eqr.getProfile(idOf(req));
+      if (!current || !canSeeEmployee(userOf(res), current)) {
+        return void res.status(404).json({ error: 'Employee not found' });
+      }
+      try {
+        const employee = await eqr.reissueQr(userOf(res).id, idOf(req));
+        if (!employee) return void res.status(404).json({ error: 'Employee not found' });
+        res.json(employee);
+      } catch (e) {
+        if (!(e instanceof QrNotIssuableError)) throw e;
+        res.status(409).json({ error: e.message, reason: e.reason });
+      }
+    })
     // Edge agent (ADR-9). Response: EdgeSnapshot.
-    .get('/edge/snapshot', notImplemented);
+    // An edge has no user session, so no requirePermission. TODO(#44): authenticate the edge agent.
+    .get('/edge/snapshot', async (_req, res) => {
+      try {
+        res.set('Cache-Control', 'no-store').json(await eqr.snapshot());
+      } catch (e) {
+        if (!(e instanceof QrNotConfiguredError)) throw e;
+        res.status(503).json({ error: 'QR signing not configured' });
+      }
+    });
