@@ -129,6 +129,8 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
   /**
    * The edge decided these scans locally (ADR-9), so each is stored as sent: outcome, jti and
    * stale included. A known eventId is skipped, never updated (contract: shared/contracts/edge.ts).
+   * TODO(#33): a skipped duplicate drops the edge's jti and stale, so a row first written PENDING by
+   * record() never gets them; reconciliation must decide whether to merge them in.
    */
   async ingest({ edgeId, events }: PushEventsRequest): Promise<PushEventsResponse> {
     await this.repo.insertMany(

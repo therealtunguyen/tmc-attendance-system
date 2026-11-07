@@ -1,5 +1,9 @@
 import { Router, type Request } from 'express';
-import type { EdgeEvent, PushEventsRequest } from '../../shared/contracts/edge.js';
+import {
+  MAX_EDGE_BATCH,
+  type EdgeEvent,
+  type PushEventsRequest,
+} from '../../shared/contracts/edge.js';
 import { notImplemented } from '../../shared/errors.js';
 import type { AttendanceService } from './attendance.service.js';
 
@@ -9,11 +13,21 @@ const isText = (value: unknown): value is string =>
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-/** ISO 8601 with a date and time, e.g. 2026-11-07T07:58:00.000Z (contract: dates are ISO strings). */
-const isIsoDate = (value: unknown): value is string =>
-  typeof value === 'string' &&
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(value) &&
-  !Number.isNaN(Date.parse(value));
+/**
+ * ISO 8601 date and time with an explicit offset, e.g. 2026-11-07T00:58:00.000Z or
+ * 2026-11-07T07:58:00+07:00. Without the offset the server would read it in its own time zone,
+ * a silent shift of hours, so it is refused. A date that does not exist (02-31) is refused too,
+ * where Date.parse would roll it over into the next month.
+ */
+const ISO_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
+
+const isIsoDate = (value: unknown): value is string => {
+  if (typeof value !== 'string') return false;
+  const match = ISO_DATE_TIME.exec(value);
+  if (!match || Number.isNaN(Date.parse(value))) return false;
+  const [year, month, day] = match.slice(1, 4).map(Number) as [number, number, number];
+  return new Date(Date.UTC(year, month - 1, day)).getUTCDate() === day;
+};
 
 const METHODS = ['QR', 'MANUAL'];
 const OUTCOMES = ['PENDING', 'GRANTED', 'DENIED'];
@@ -42,6 +56,9 @@ const parseBatch = (req: Request): PushEventsRequest | string => {
   if (!isObject(body)) return 'body must be a JSON object';
   if (!isText(body.edgeId)) return 'edgeId must be a non-empty string';
   if (!Array.isArray(body.events)) return 'events must be an array';
+  if (body.events.length > MAX_EDGE_BATCH) {
+    return `events must hold at most ${MAX_EDGE_BATCH} events; split the outbox into batches`;
+  }
   for (const [i, e] of body.events.entries()) {
     const error = invalidEvent(e);
     if (error) return `events[${i}]${error.startsWith('.') ? '' : ' '}${error}`;

@@ -1,7 +1,7 @@
 import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../app.js';
-import type { EdgeEvent } from '../../shared/contracts/edge.js';
+import { MAX_EDGE_BATCH, type EdgeEvent } from '../../shared/contracts/edge.js';
 import { attendanceRoutes } from './attendance.routes.js';
 import {
   AttendanceService,
@@ -218,6 +218,27 @@ describe('POST /api/edge/events', () => {
     expect(store.rows.get('x-2')?.occurredAt).toEqual(new Date('2026-11-07T00:58:00.000Z'));
   });
 
+  it('reads an explicit +07:00 offset as the same instant in UTC', async () => {
+    const local = edgeEvent('x-1', { occurredAt: '2026-11-07T07:58:00+07:00' });
+    const res = await request(app())
+      .post('/api/edge/events')
+      .send({ edgeId: 'edge-bd', events: [local] });
+    expect(res.status).toBe(200);
+    expect(store.rows.get('x-1')?.occurredAt).toEqual(new Date('2026-11-07T00:58:00Z'));
+  });
+
+  it('a full batch of MAX_EDGE_BATCH UUID-sized events fits the JSON body limit (200)', async () => {
+    const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+    const events = Array.from({ length: MAX_EDGE_BATCH }, (_, i) =>
+      edgeEvent(uuid(i), { employeeId: uuid(1e6 + i), gateId: uuid(2e6), jti: uuid(3e6 + i) }),
+    );
+    const res = await request(app())
+      .post('/api/edge/events')
+      .send({ edgeId: uuid(4e6), events });
+    expect(res.status).toBe(200);
+    expect(res.body.accepted).toHaveLength(MAX_EDGE_BATCH);
+  });
+
   it('accepts a MANUAL event with no employee and no jti', async () => {
     const manual = edgeEvent('m-1', { method: 'MANUAL', employeeId: null, jti: null });
     const res = await request(app())
@@ -245,6 +266,29 @@ describe('POST /api/edge/events', () => {
       'a bad date',
       { edgeId: 'e', events: [edgeEvent('x-1', { occurredAt: '07/11/2026' })] },
       'events[0].occurredAt must be an ISO date',
+    ],
+    [
+      'a date with no offset (server would read it in its own zone)',
+      { edgeId: 'e', events: [edgeEvent('x-1', { occurredAt: '2026-11-07T07:58' })] },
+      'events[0].occurredAt must be an ISO date',
+    ],
+    [
+      'a date that does not exist (Date.parse rolls 02-31 into March)',
+      { edgeId: 'e', events: [edgeEvent('x-1', { occurredAt: '2026-02-31T07:58:00Z' })] },
+      'events[0].occurredAt must be an ISO date',
+    ],
+    [
+      'an hour out of range',
+      { edgeId: 'e', events: [edgeEvent('x-1', { occurredAt: '2026-11-07T25:00:00Z' })] },
+      'events[0].occurredAt must be an ISO date',
+    ],
+    [
+      `more than MAX_EDGE_BATCH (${MAX_EDGE_BATCH}) events`,
+      {
+        edgeId: 'e',
+        events: Array.from({ length: MAX_EDGE_BATCH + 1 }, (_, i) => edgeEvent(`x-${i}`)),
+      },
+      `events must hold at most ${MAX_EDGE_BATCH} events; split the outbox into batches`,
     ],
     [
       'a missing eventId',
