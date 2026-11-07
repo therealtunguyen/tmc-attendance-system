@@ -10,10 +10,16 @@ export interface ScanEvent {
   gateId: string;
   method: 'QR' | 'MANUAL';
   occurredAt: Date;
+  /**
+   * Outcome at commit time (ADR-3): PENDING (default) before the TCS call, or DENIED when the
+   * QR failed validation, so the TCS call is skipped (report Figure 5.2). GRANTED only comes
+   * from setOutcome(), after the gate opened.
+   */
+  outcome?: 'PENDING' | 'DENIED';
 }
 
 /** A row in AttendanceEvent. Edge ingest (#32) fills the extra fields; record() leaves the defaults. */
-export interface StoredEvent extends ScanEvent {
+export interface StoredEvent extends Omit<ScanEvent, 'outcome'> {
   outcome: ScanOutcome | 'PENDING';
   edgeId: string | null;
   jti: string | null;
@@ -57,7 +63,10 @@ export interface AttendanceStore {
 }
 
 export interface AttendanceRecorder {
-  /** Idempotent by eventId (FR-3.2). Returns false if the event already exists. */
+  /**
+   * Idempotent by eventId (FR-3.2). Returns false if the event already exists.
+   * Stored as PENDING, or DENIED if event.outcome says validation failed (ADR-3).
+   */
   record(event: ScanEvent): Promise<boolean>;
   /**
    * PENDING -> GRANTED/DENIED once the turnstile answered. Repeating the same outcome is a no-op.
@@ -84,16 +93,23 @@ export interface AttendanceQuery {
 export class AttendanceService implements AttendanceRecorder, EdgeIngest, AttendanceQuery {
   constructor(private repo: AttendanceStore) {}
 
-  /** Commits the scan as PENDING before the turnstile is called (gate scan sequence). */
+  /**
+   * Commits the scan before the turnstile is called (ADR-3, Figure 5.2): PENDING, or DENIED
+   * straight away when validation failed.
+   */
   async record(event: ScanEvent): Promise<boolean> {
-    const { eventId, employeeId, gateId, method, occurredAt } = event;
+    const { eventId, employeeId, gateId, method, occurredAt, outcome = 'PENDING' } = event;
+    // A runtime guard: GRANTED at commit time would count an entry before the gate opened.
+    if (outcome !== 'PENDING' && outcome !== 'DENIED') {
+      throw new TypeError(`record() takes outcome PENDING or DENIED, got ${String(outcome)}`);
+    }
     return this.repo.insert({
       eventId,
       employeeId,
       gateId,
       method,
       occurredAt,
-      outcome: 'PENDING',
+      outcome,
       edgeId: null,
       jti: null,
       stale: false,

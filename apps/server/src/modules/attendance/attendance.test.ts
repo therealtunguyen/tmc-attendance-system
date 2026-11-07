@@ -81,9 +81,25 @@ describe('AttendanceService.record (FR-3.1, FR-3.2)', () => {
     expect(store.rows.get('e-2')).toMatchObject({ employeeId: null, method: 'MANUAL' });
   });
 
+  it('stores a scan that failed validation as DENIED straight away (ADR-3, Figure 5.2)', async () => {
+    expect(await attendance.record({ ...scan, outcome: 'DENIED' })).toBe(true);
+    expect(store.rows.get('e-1')?.outcome).toBe('DENIED');
+    // Already decided: the gate does not call TCS, and the outcome cannot be flipped later.
+    await expect(attendance.setOutcome('e-1', 'DENIED')).resolves.toBeUndefined();
+    await expect(attendance.setOutcome('e-1', 'GRANTED')).rejects.toBeInstanceOf(
+      OutcomeConflictError,
+    );
+  });
+
+  it('refuses GRANTED at commit time: the gate has not opened yet (ADR-3)', async () => {
+    const granted = { ...scan, outcome: 'GRANTED' } as unknown as ScanEvent;
+    await expect(attendance.record(granted)).rejects.toThrow(TypeError);
+    expect(store.rows.size).toBe(0);
+  });
+
   it('ignores fields outside ScanEvent passed by a caller', async () => {
-    await attendance.record({ ...scan, outcome: 'GRANTED', stale: true } as ScanEvent);
-    expect(store.rows.get('e-1')).toMatchObject({ outcome: 'PENDING', stale: false });
+    await attendance.record({ ...scan, stale: true, edgeId: 'x' } as ScanEvent);
+    expect(store.rows.get('e-1')).toMatchObject({ stale: false, edgeId: null });
   });
 });
 
