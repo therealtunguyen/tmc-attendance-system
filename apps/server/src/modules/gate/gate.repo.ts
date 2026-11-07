@@ -1,4 +1,5 @@
 import type { PrismaClient } from '../../shared/prisma.js';
+import type { EdgeState, OfflineEdge } from './gate.heartbeat.js';
 import {
   DuplicateTurnstileError,
   InvalidGateEdgeError,
@@ -63,5 +64,31 @@ export class GateRepo implements GateStore {
 
   findEdge(id: string) {
     return this.db.edge.findUnique({ where: { id }, select: { id: true, factoryId: true } });
+  }
+
+  heartbeats(edgeIds: string[]): Promise<EdgeState[]> {
+    return this.db.edge.findMany({
+      where: { id: { in: edgeIds } },
+      select: { id: true, lastHeartbeatAt: true },
+    });
+  }
+
+  async recordHeartbeat(edgeId: string, receivedAt: Date): Promise<boolean> {
+    const count = await this.db.$executeRaw`
+      UPDATE "Edge" SET "lastHeartbeatAt" = GREATEST("lastHeartbeatAt", ${receivedAt}) WHERE "id" = ${edgeId}
+    `;
+    return count > 0;
+  }
+
+  offlineEdges(cutoff: Date): Promise<OfflineEdge[]> {
+    return this.db.edge.findMany({
+      where: { lastHeartbeatAt: { lt: cutoff }, gates: { some: { active: true } } },
+      select: {
+        id: true,
+        factoryId: true,
+        lastHeartbeatAt: true,
+        gates: { where: { active: true }, select: { id: true, name: true } },
+      },
+    });
   }
 }

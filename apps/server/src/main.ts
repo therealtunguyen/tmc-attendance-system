@@ -11,7 +11,7 @@ import {
   EmployeeQrService,
   employeeQrRoutes,
 } from './modules/employee-qr/index.js';
-import { GateRepo, GateService, gateRoutes } from './modules/gate/index.js';
+import { GateRepo, GateService, gateRoutes, startGateMonitor } from './modules/gate/index.js';
 import { authenticate, IamRepo, IamService, iamRoutes } from './modules/iam/index.js';
 import { ReportingRepo, ReportingService, reportingRoutes } from './modules/reporting/index.js';
 import { config } from './shared/config.js';
@@ -28,7 +28,9 @@ const admin = new AdminService(new AdminRepo(db));
 const eqr = new EmployeeQrService(new EmployeeQrRepo(db), iam, config.qrKeys);
 const attendance = new AttendanceService(new AttendanceRepo(db), eqr);
 const reporting = new ReportingService(new ReportingRepo(db), attendance, admin, hrs, iam);
-const gate = new GateService(new GateRepo(db), eqr, attendance, turnstile, admin, reporting, iam);
+const gate = new GateService(new GateRepo(db), eqr, attendance, turnstile, admin, reporting, iam, {
+  heartbeatTimeoutMs: config.heartbeatTimeoutMs,
+});
 
 const app = createApp(
   [
@@ -45,8 +47,19 @@ const app = createApp(
   { before: [authenticate(iam)] },
 );
 
-app.listen(config.port, () => {
+const server = app.listen(config.port, () => {
   console.log(
     `server listening on http://localhost:${config.port} (TCS ${config.tcsMode}, HRS ${config.hrsMode})`,
   );
 });
+
+const stopMonitor = startGateMonitor(() => gate.checkOffline(), config.heartbeatCheckMs);
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.once(
+    signal,
+    () =>
+      void stopMonitor().then(() => {
+        server.close(() => void db.$disconnect());
+      }),
+  );
+}

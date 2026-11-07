@@ -1,5 +1,6 @@
 import { Router, type Request, type RequestHandler, type Response } from 'express';
 import { notImplemented } from '../../shared/errors.js';
+import { parseHeartbeat, UnknownEdgeError } from './gate.heartbeat.js';
 import {
   hasPermission,
   inScope,
@@ -103,14 +104,16 @@ export const gateRoutes = (gate: GateService) =>
       if (filters.factoryId !== undefined && !inScope(user, filters.factoryId)) {
         return void res.status(403).json({ error: 'Forbidden' });
       }
-      res.json(await gate.listGates(filters, isRestricted(user) ? (user.scopes ?? []) : undefined));
+      res
+        .set('Cache-Control', 'no-store')
+        .json(await gate.listGates(filters, isRestricted(user) ? (user.scopes ?? []) : undefined));
     })
     .get('/gates/:gateId', requireGateRead, async (req, res) => {
       const current = await gate.getGate(idOf(req));
       if (!current || !inScope(userOf(res), current.factoryId)) {
         return void res.status(404).json({ error: 'Gate not found' });
       }
-      res.json(current);
+      res.set('Cache-Control', 'no-store').json(current);
     })
     .post('/gates', requirePermission('gate:manage'), async (req, res) => {
       const data = parseBody(req.body, true);
@@ -157,4 +160,15 @@ export const gateRoutes = (gate: GateService) =>
     })
     .post('/gates/:gateId/override', notImplemented)
     // Edge agent (ADR-9). Body: EdgeHeartbeat. Response: 204.
-    .post('/edge/heartbeat', notImplemented);
+    // Edge authentication is shared integration work (#44), like /edge/events and /edge/snapshot.
+    .post('/edge/heartbeat', async (req, res) => {
+      const hb = parseHeartbeat(req.body);
+      if (!hb) return void res.status(400).json({ error: 'Invalid edge heartbeat' });
+      try {
+        await gate.edgeHeartbeat(hb);
+        res.sendStatus(204);
+      } catch (error) {
+        if (!(error instanceof UnknownEdgeError)) throw error;
+        res.status(404).json({ error: error.message });
+      }
+    });

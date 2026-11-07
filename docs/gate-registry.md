@@ -11,8 +11,9 @@ Các quyết định bên dưới hoàn thiện những chi tiết mà đoạn s
 thay đổi; cần đối chiếu lại nếu nhóm có quy định khác.
 
 Thay đổi hiện tại gồm schema, migration, Gate CRUD trong repo/service/API và
-test. Quét QR, điều khiển TCS và heartbeat thuộc các chức năng riêng và vẫn là
-stub. Gate CRUD sử dụng cấu hình Edge đã được đăng ký trước.
+test. Quét QR và điều khiển TCS thuộc các chức năng riêng, hiện vẫn là stub.
+Heartbeat và thông báo được mô tả trong [gate-heartbeat.md](gate-heartbeat.md).
+Gate CRUD sử dụng cấu hình Edge đã được đăng ký trước.
 
 ## Cấu trúc dữ liệu
 

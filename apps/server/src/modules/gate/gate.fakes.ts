@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { AuditEntry, AuditLog } from '../iam/index.js';
+import type { Notifier } from '../reporting/index.js';
 import {
   DuplicateTurnstileError,
   GateService,
@@ -7,6 +8,7 @@ import {
   type Gate,
   type GateChanges,
   type GateFilters,
+  type GateOptions,
   type GateStore,
   type NewGate,
 } from './gate.service.js';
@@ -14,8 +16,8 @@ import {
 export class InMemoryGates implements GateStore {
   rows = new Map<string, Gate>();
   edges = new Map([
-    ['edge-bd', { id: 'edge-bd', factoryId: 'binh-duong' }],
-    ['edge-la', { id: 'edge-la', factoryId: 'long-an' }],
+    ['edge-bd', { id: 'edge-bd', factoryId: 'binh-duong', lastHeartbeatAt: null as Date | null }],
+    ['edge-la', { id: 'edge-la', factoryId: 'long-an', lastHeartbeatAt: null as Date | null }],
   ]);
 
   async create(data: NewGate) {
@@ -69,6 +71,28 @@ export class InMemoryGates implements GateStore {
     return this.edges.get(id) ?? null;
   }
 
+  async heartbeats(edgeIds: string[]) {
+    return [...this.edges.values()].filter((edge) => edgeIds.includes(edge.id));
+  }
+
+  async recordHeartbeat(id: string, at: Date) {
+    const edge = this.edges.get(id);
+    if (!edge) return false;
+    if (!edge.lastHeartbeatAt || edge.lastHeartbeatAt < at) edge.lastHeartbeatAt = at;
+    return true;
+  }
+
+  async offlineEdges(cutoff: Date) {
+    return [...this.edges.values()].flatMap((edge) => {
+      const gates = [...this.rows.values()].filter(
+        (gate) => gate.edgeId === edge.id && gate.active,
+      );
+      return edge.lastHeartbeatAt && edge.lastHeartbeatAt < cutoff && gates.length
+        ? [{ ...edge, gates }]
+        : [];
+    });
+  }
+
   private check(data: NewGate, exceptId?: string) {
     if (this.edges.get(data.edgeId)?.factoryId !== data.factoryId) throw new InvalidGateEdgeError();
     if (
@@ -98,15 +122,21 @@ const outsideCrud = async (): Promise<never> => {
   throw new Error('Unexpected dependency call outside Gate CRUD');
 };
 
-export const registryService = (store: GateStore, audit: AuditLog) =>
+export const registryService = (
+  store: GateStore,
+  audit: AuditLog,
+  options: GateOptions = {},
+  notifier: Notifier = { alert: outsideCrud },
+) =>
   new GateService(
     store,
     { validate: outsideCrud },
     { record: outsideCrud, setOutcome: outsideCrud },
     { open: outsideCrud },
     { get: outsideCrud, orgUnits: outsideCrud },
-    { alert: outsideCrud },
+    notifier,
     audit,
+    options,
   );
 
 export const entrance: NewGate = {

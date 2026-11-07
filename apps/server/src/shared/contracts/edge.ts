@@ -6,6 +6,11 @@ export const SNAPSHOT_PULL_INTERVAL_MS = 60_000;
 /** An event decided from a snapshot older than this is sent with `stale: true`. */
 export const SNAPSHOT_STALE_AFTER_MS = 5 * 60_000;
 
+/** FR-2.6 defaults. The edge sends every 30 s; the server tolerates 90 s without a receipt. */
+export const HEARTBEAT_INTERVAL_MS = 30_000;
+export const HEARTBEAT_TIMEOUT_MS = 90_000;
+export const HEARTBEAT_CHECK_INTERVAL_MS = 15_000;
+
 /**
  * Most events in one POST /api/edge/events. A bigger batch gets 400, so the edge outbox must send
  * at most this many per push. 200 events of UUID-sized ids are about 60 KB, under the server's
