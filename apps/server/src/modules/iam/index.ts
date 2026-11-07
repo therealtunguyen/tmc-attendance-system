@@ -26,6 +26,7 @@ export type {
   ChainedEntry,
   ChainVerdict,
   Role,
+  ScopeResolver,
   UserRecord,
   UserRef,
   UserStore,

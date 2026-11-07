@@ -162,3 +162,27 @@ model NoticeAck {
 
   @@id([userId, version])
 }
+
+// Owned by the admin module. One org tree (FR-5.5): FACTORY > DEPARTMENT > TEAM. The id is a slug chosen
+// by the client because Employee.factoryId/teamId and User.scopes already hold such IDs. kind is validated in
+// code. Never deleted: employees reference these IDs.
+model OrgUnit {
+  id            String   @id
+  kind          String
+  name          String
+  parentId      String?
+  // IAM user IDs supervising this unit; only used on TEAM (BR-15).
+  supervisorIds String[] @default([])
+  createdAt     DateTime @default(now())
+
+  @@index([parentId])
+}
+
+// Owned by the admin module. System parameters as strings (FR-5.4); the catalogue in admin.config.ts
+// validates keys and values and supplies defaults, so a missing row means "use the default".
+model ConfigValue {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+  updatedBy String
+}
