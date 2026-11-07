@@ -3,9 +3,11 @@ import { Router } from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../app.js';
+import type { EdgeSnapshot } from '../../shared/contracts/edge.js';
 import { QR_TOKEN_TTL_S, signQrToken, verifyQrToken } from '../../shared/contracts/qr-token.js';
+import { checkQrToken } from '../../shared/contracts/qr-validation.js';
 import type { Scope } from '../../shared/types.js';
-import type { AuditEntry, AuditLog } from '../iam/index.js';
+import type { AuditEntry, AuditLog, UserRef } from '../iam/index.js';
 import { QrKeyring } from './employee-qr.keys.js';
 import { employeeQrRoutes } from './employee-qr.routes.js';
 import {
@@ -51,6 +53,13 @@ class InMemoryEmployees implements EmployeeStore {
     const employee = this.rows.get(id);
     if (!employee || (!employee.active && employee.qrRevoked)) return null;
     return this.write(id, { active: false, qrRevoked: true });
+  }
+
+  async setQrRevoked(id: string, revoked: boolean) {
+    const employee = this.rows.get(id);
+    if (!employee || employee.qrRevoked === revoked) return null;
+    if (!revoked && !employee.active) return null;
+    return this.write(id, { qrRevoked: revoked });
   }
 
   private write(id: string, changes: Partial<Employee>) {
@@ -172,8 +181,17 @@ describe('EmployeeQrService: employee CRUD (FR-1.1, FR-1.5)', () => {
   });
 });
 
+/** Stands in for the IAM auth middleware (FR-5.1). */
+const signedIn = (user?: UserRef) =>
+  Router().use((_req, res, next) => {
+    if (user) res.locals.user = user;
+    next();
+  });
+
 describe('employee routes', () => {
-  const app = () => createApp([employeeQrRoutes(eqr)]);
+  const hrUser: UserRef = { id: 'hr-9', role: 'HR' };
+  const app = (user: UserRef | undefined = hrUser) =>
+    createApp([signedIn(user), employeeQrRoutes(eqr)]);
 
   it('POST /api/employees creates (201), then 409 on the same code', async () => {
     const created = await request(app())
@@ -244,7 +262,7 @@ describe('employee routes', () => {
     const off = await request(app()).post(`/api/employees/${id}/deactivate`);
     expect(off.body).toMatchObject({ active: false, qrRevoked: true });
     expect(audit.entries.at(-1)).toMatchObject({
-      actorId: 'anonymous',
+      actorId: 'hr-9',
       action: 'EMPLOYEE_DEACTIVATE',
     });
   });
@@ -257,6 +275,97 @@ describe('employee routes', () => {
     ]) {
       expect(res.status).toBe(404);
     }
+  });
+});
+
+describe('employee routes: RBAC (FR-5.3, BR-15)', () => {
+  const app = (user?: UserRef) => createApp([signedIn(user), employeeQrRoutes(eqr)]);
+  const hrIn = (...scopes: string[]): UserRef => ({ id: 'hr-f', role: 'HR', scopes });
+  const elsewhere = { ...lan, code: 'LA-1', factoryId: 'long-an', teamId: null };
+  const seed = async () => ({
+    mine: await eqr.createEmployee('hr-1', lan),
+    other: await eqr.createEmployee('hr-1', elsewhere),
+  });
+
+  it('401 when nobody is signed in', async () => {
+    expect((await request(app()).get('/api/employees')).status).toBe(401);
+    expect((await request(app()).post('/api/employees').send(lan)).status).toBe(401);
+  });
+
+  it('403 for an employee on writes and lists', async () => {
+    const emp: UserRef = { id: 'e-1', role: 'EMP' };
+    expect((await request(app(emp)).post('/api/employees').send(lan)).status).toBe(403);
+    expect((await request(app(emp)).get('/api/employees')).status).toBe(403);
+    expect(store.rows.size).toBe(0);
+  });
+
+  it('403 for a supervisor: profiles are HR/ADM only', async () => {
+    const { mine } = await seed();
+    const sup: UserRef = { id: 'sup-1', role: 'SUP', scopes: ['bd-line-1'] };
+    expect((await request(app(sup)).get('/api/employees')).status).toBe(403);
+    expect((await request(app(sup)).get(`/api/employees/${mine.id}`)).status).toBe(403);
+  });
+
+  it('factory-scoped HR lists their factory, defaulting to the single scope', async () => {
+    await seed();
+    const user = hrIn('binh-duong');
+    for (const url of ['/api/employees', '/api/employees?scope=binh-duong']) {
+      const res = await request(app(user)).get(url);
+      expect(res.body.map((e: Employee) => e.code)).toEqual(['BD-0001']);
+    }
+  });
+
+  it('400 without a scope when HR has several; 403 for a factory outside theirs', async () => {
+    await seed();
+    const user = hrIn('binh-duong', 'long-an');
+    const res = await request(app(user)).get('/api/employees');
+    expect([res.status, res.body]).toEqual([400, { error: 'scope is required' }]);
+    const ok = await request(app(user)).get('/api/employees?scope=long-an');
+    expect(ok.body.map((e: Employee) => e.code)).toEqual(['LA-1']);
+    expect(
+      (await request(app(hrIn('binh-duong'))).get('/api/employees?scope=long-an')).status,
+    ).toBe(403);
+  });
+
+  it('GET one employee: own factory 200, other factory 404 like a missing one', async () => {
+    const { mine, other } = await seed();
+    const user = hrIn('binh-duong');
+    expect((await request(app(user)).get(`/api/employees/${mine.id}`)).status).toBe(200);
+    expect((await request(app(user)).get(`/api/employees/${other.id}`)).status).toBe(404);
+  });
+
+  it('PATCH and deactivate in another factory are 404; create or move into one is 403', async () => {
+    const { mine, other } = await seed();
+    const user = hrIn('binh-duong');
+    const patch = (id: string, body: object) =>
+      request(app(user)).patch(`/api/employees/${id}`).send(body);
+    expect((await patch(other.id, { lastName: 'X' })).status).toBe(404);
+    expect((await request(app(user)).post(`/api/employees/${other.id}/deactivate`)).status).toBe(
+      404,
+    );
+    expect(
+      (
+        await request(app(user))
+          .post('/api/employees')
+          .send({ ...elsewhere, code: 'LA-2' })
+      ).status,
+    ).toBe(403);
+    expect((await patch(mine.id, { factoryId: 'long-an' })).status).toBe(403);
+    expect(store.rows.get(mine.id)!.factoryId).toBe('binh-duong');
+    expect(store.rows.get(other.id)).toMatchObject({ lastName: 'Nguyen', active: true });
+    expect(
+      (
+        await request(app(user))
+          .post('/api/employees')
+          .send({ ...lan, code: 'BD-3' })
+      ).status,
+    ).toBe(201);
+  });
+
+  it('an unscoped HR may list everything without a scope', async () => {
+    await seed();
+    const res = await request(app({ id: 'hr-1', role: 'HR' })).get('/api/employees');
+    expect(res.body).toHaveLength(2);
   });
 });
 
@@ -400,13 +509,177 @@ describe('EmployeeQrService.issueToken (FR-1.2, ADR-10)', () => {
   });
 });
 
-describe('POST /api/qr/token', () => {
-  /** Stands in for the IAM auth middleware (FR-5.1). */
-  const signedInAs = (id?: string, role = 'EMP') =>
-    Router().use((_req, res, next) => {
-      if (id) res.locals.user = { id, role };
-      next();
+describe('EmployeeQrService: revoke and reissue (FR-1.4)', () => {
+  const qrActions = () => audit.entries.filter((e) => e.action.startsWith('QR_'));
+  const svc = () => new EmployeeQrService(store, audit, keysK1, () => NOW);
+
+  it('revoking keeps the employee active and audits who, what and the change', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    expect(await eqr.revokeQr('hr-2', id)).toMatchObject({ active: true, qrRevoked: true });
+    expect(qrActions()).toEqual([
+      {
+        actorId: 'hr-2',
+        action: 'QR_REVOKE',
+        target: `employee:${id}`,
+        at: expect.any(Date),
+        before: { qrRevoked: false },
+        after: { qrRevoked: true },
+      },
+    ]);
+  });
+
+  it('reissuing clears the flag and audits the change', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    await eqr.revokeQr('hr-1', id);
+    expect(await eqr.reissueQr('hr-2', id)).toMatchObject({ qrRevoked: false });
+    expect(qrActions().at(-1)).toMatchObject({
+      actorId: 'hr-2',
+      action: 'QR_REISSUE',
+      before: { qrRevoked: true },
+      after: { qrRevoked: false },
     });
+  });
+
+  it('repeating either one changes nothing and audits nothing', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    expect(await eqr.reissueQr('hr-1', id)).toMatchObject({ qrRevoked: false });
+    expect(qrActions()).toEqual([]);
+    await eqr.revokeQr('hr-1', id);
+    expect(await eqr.revokeQr('hr-1', id)).toMatchObject({ qrRevoked: true });
+    expect(qrActions()).toHaveLength(1);
+  });
+
+  it('two concurrent revocations audit once', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const both = await Promise.all([eqr.revokeQr('hr-1', id), eqr.revokeQr('hr-2', id)]);
+    expect(both.every((e) => e?.qrRevoked)).toBe(true);
+    expect(qrActions()).toHaveLength(1);
+  });
+
+  it('returns null for an unknown employee and audits nothing', async () => {
+    expect(await eqr.revokeQr('hr-1', 'nope')).toBeNull();
+    expect(await eqr.reissueQr('hr-1', 'nope')).toBeNull();
+    expect(audit.entries).toEqual([]);
+  });
+
+  it('refuses to reissue a deactivated employee (FR-1.5)', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    await eqr.deactivateEmployee('hr-1', id);
+    await expect(eqr.reissueQr('hr-1', id)).rejects.toMatchObject({ reason: 'INACTIVE' });
+    expect(store.rows.get(id)).toMatchObject({ active: false, qrRevoked: true });
+    expect(qrActions()).toEqual([]);
+  });
+
+  it('keeps a deactivated employee revoked even when deactivation wins the race', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    await eqr.revokeQr('hr-1', id);
+    const find = store.find.bind(store);
+    // Reissue reads an active employee, then the deactivation lands before its write.
+    store.find = async (employeeId) => {
+      const seen = await find(employeeId);
+      store.find = find;
+      await eqr.deactivateEmployee('hr-1', id);
+      return seen;
+    };
+    expect(await eqr.reissueQr('hr-2', id)).toMatchObject({ active: false, qrRevoked: true });
+    expect(qrActions().map((e) => e.action)).toEqual(['QR_REVOKE']);
+  });
+
+  it('a revoked employee gets no token and a live token is denied; reissue restores both', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const live = await svc().issueToken(id);
+    await eqr.revokeQr('hr-1', id);
+    await expect(svc().issueToken(id)).rejects.toMatchObject({ reason: 'REVOKED' });
+    expect(await svc().validate(live)).toMatchObject({ ok: false, reason: 'REVOKED' });
+    await eqr.reissueQr('hr-1', id);
+    const fresh = await svc().issueToken(id);
+    expect(await svc().validate(fresh)).toMatchObject({ ok: true, employeeId: id });
+  });
+
+  it('a failed revoke stays an error: it must never look done', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    store.setQrRevoked = async () => {
+      throw new Error('db down');
+    };
+    await expect(eqr.revokeQr('hr-1', id)).rejects.toThrow('db down');
+    expect(audit.entries.map((e) => e.action)).toEqual(['EMPLOYEE_CREATE']);
+  });
+});
+
+describe('POST /api/employees/:id/qr/revoke and /reissue', () => {
+  const app = (user?: UserRef) => createApp([signedIn(user), employeeQrRoutes(eqr)]);
+  const hr: UserRef = { id: 'hr-9', role: 'HR' };
+  const revoke = (user: UserRef | undefined, id: string) =>
+    request(app(user)).post(`/api/employees/${id}/qr/revoke`);
+  const reissue = (user: UserRef | undefined, id: string) =>
+    request(app(user)).post(`/api/employees/${id}/qr/reissue`);
+
+  it('revokes and reissues, audited as the signed-in user', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const off = await revoke(hr, id);
+    expect([off.status, off.body.qrRevoked]).toEqual([200, true]);
+    const on = await reissue(hr, id);
+    expect([on.status, on.body.qrRevoked]).toEqual([200, false]);
+    expect(audit.entries.slice(-2).map((e) => [e.actorId, e.action])).toEqual([
+      ['hr-9', 'QR_REVOKE'],
+      ['hr-9', 'QR_REISSUE'],
+    ]);
+  });
+
+  it('allows ADM too', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    expect((await revoke({ id: 'adm-1', role: 'ADM' }, id)).status).toBe(200);
+  });
+
+  it('401 when nobody is signed in', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    expect((await revoke(undefined, id)).status).toBe(401);
+    expect((await reissue(undefined, id)).status).toBe(401);
+  });
+
+  it.each(['EMP', 'SUP', 'GRD', 'EXE'] as const)('403 for %s and nothing changes', async (role) => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    expect((await revoke({ id: 'u-1', role, scopes: ['bd-line-1'] }, id)).status).toBe(403);
+    expect((await reissue({ id: 'u-1', role, scopes: ['bd-line-1'] }, id)).status).toBe(403);
+    expect(store.rows.get(id)!.qrRevoked).toBe(false);
+  });
+
+  it('404 for HR of another factory, like a missing employee, and nothing changes', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const elsewhere: UserRef = { id: 'hr-la', role: 'HR', scopes: ['long-an'] };
+    expect((await revoke(elsewhere, id)).status).toBe(404);
+    store.rows.get(id)!.qrRevoked = true;
+    expect((await reissue(elsewhere, id)).status).toBe(404);
+    expect(store.rows.get(id)!.qrRevoked).toBe(true);
+    expect(audit.entries.map((e) => e.action)).toEqual(['EMPLOYEE_CREATE']);
+  });
+
+  it('404 for an unknown employee', async () => {
+    expect((await revoke(hr, 'nope')).status).toBe(404);
+    expect((await reissue(hr, 'nope')).status).toBe(404);
+  });
+
+  it('409 with the reason when reissuing a deactivated employee', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    await eqr.deactivateEmployee('hr-1', id);
+    const res = await reissue(hr, id);
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ reason: 'INACTIVE' });
+  });
+
+  it('a storage failure is a 500 on both', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    store.setQrRevoked = async () => {
+      throw new Error('db down');
+    };
+    expect((await revoke(hr, id)).status).toBe(500);
+    expect((await reissue(hr, id)).status).toBe(500);
+  });
+});
+
+describe('POST /api/qr/token', () => {
+  const signedInAs = (id?: string, role = 'EMP') =>
+    signedIn(id ? ({ id: 'user-1', role, employeeId: id } as UserRef) : undefined);
   const app = (id?: string, role?: string, keys = keysK1) =>
     createApp([
       signedInAs(id, role),
@@ -434,9 +707,19 @@ describe('POST /api/qr/token', () => {
     expect(res.body).toMatchObject({ reason: 'INACTIVE' });
   });
 
-  it('403 for a signed-in user who is not an employee', async () => {
+  it('403 when the account has no linked employee record', async () => {
+    const res = await request(
+      createApp([signedIn({ id: 'u-1', role: 'ADM' }), employeeQrRoutes(eqr)]),
+    ).post('/api/qr/token');
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'No employee record linked to this account' });
+  });
+
+  it('every role may view its own QR (self:read)', async () => {
     const { id } = await eqr.createEmployee('hr-1', lan);
-    expect((await request(app(id, 'HR')).post('/api/qr/token')).status).toBe(403);
+    for (const role of ['EMP', 'SUP', 'HR', 'GRD', 'ADM', 'EXE']) {
+      expect((await request(app(id, role)).post('/api/qr/token')).status).toBe(200);
+    }
   });
 
   it('ignores an employeeId in the query or body: the token is for the session user', async () => {
@@ -456,6 +739,139 @@ describe('POST /api/qr/token', () => {
     const res = await request(app(id, 'EMP', { ...keysK1, privateKey: '' })).post('/api/qr/token');
     expect(res.status).toBe(503);
     expect(res.body).toEqual({ error: 'QR signing not configured' });
+  });
+});
+
+describe('EmployeeQrService.snapshot (ADR-9)', () => {
+  const svc = (keys = keysK2) => new EmployeeQrService(store, audit, keys, () => NOW);
+
+  it('gives the server time and the current and previous public keys', async () => {
+    const snapshot = await svc().snapshot();
+    expect(snapshot).toEqual({
+      generatedAt: NOW.toISOString(),
+      publicKeys: [
+        { kid: 'k2', spki: k2.publicKey },
+        { kid: 'k1', spki: k1.publicKey },
+      ],
+      employees: [],
+    });
+  });
+
+  it('lists every employee with the reason a gate must deny them', async () => {
+    const ok = await eqr.createEmployee('hr-1', lan);
+    const rev = await eqr.createEmployee('hr-1', { ...lan, code: 'E2', firstName: 'Hoa' });
+    const off = await eqr.createEmployee('hr-1', { ...lan, code: 'E3', firstName: 'Minh' });
+    const idle = await eqr.createEmployee('hr-1', { ...lan, code: 'E4', firstName: 'Tu' });
+    store.rows.get(rev.id)!.qrRevoked = true;
+    await eqr.deactivateEmployee('hr-1', off.id);
+    store.rows.get(idle.id)!.active = false;
+    expect((await svc().snapshot()).employees).toEqual([
+      { id: ok.id, firstName: 'Lan', deny: null },
+      { id: rev.id, firstName: 'Hoa', deny: 'REVOKED' },
+      { id: off.id, firstName: 'Minh', deny: 'INACTIVE' },
+      { id: idle.id, firstName: 'Tu', deny: 'INACTIVE' },
+    ]);
+  });
+
+  it('covers every factory: one snapshot for all edges', async () => {
+    await eqr.createEmployee('hr-1', lan);
+    await eqr.createEmployee('hr-1', { ...lan, code: 'LA-1', factoryId: 'long-an', teamId: null });
+    expect((await svc().snapshot()).employees).toHaveLength(2);
+  });
+
+  it('holds only id, first name and deny state, no other personal data (NFR-4)', async () => {
+    await eqr.createEmployee('hr-1', lan);
+    const { employees } = await svc().snapshot();
+    expect(Object.keys(employees[0]).sort()).toEqual(['deny', 'firstName', 'id']);
+    const wire = JSON.stringify(employees);
+    for (const value of [lan.lastName, lan.email, lan.code, lan.factoryId]) {
+      expect(wire).not.toContain(value);
+    }
+  });
+
+  it('never carries a private key', async () => {
+    expect(JSON.stringify(await svc().snapshot())).not.toContain(k2.privateKey);
+  });
+
+  it('takes generatedAt before reading employees, so age is never understated', async () => {
+    let t = NOW.getTime();
+    const list = store.list.bind(store);
+    store.list = async (scope) => {
+      t += 5_000;
+      return list(scope);
+    };
+    const snapshot = await new EmployeeQrService(
+      store,
+      audit,
+      keysK1,
+      () => new Date(t),
+    ).snapshot();
+    expect(snapshot.generatedAt).toBe(NOW.toISOString());
+  });
+
+  it('rejects when the keys are missing or storage fails, rather than a partial snapshot', async () => {
+    await expect(svc({ ...keysK1, privateKey: '' }).snapshot()).rejects.toBeInstanceOf(
+      QrNotConfiguredError,
+    );
+    store.list = async () => {
+      throw new Error('db down');
+    };
+    await expect(svc().snapshot()).rejects.toThrow('db down');
+  });
+
+  it('is all an edge needs: the same decision as the server, from the JSON alone', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const token = await svc().issueToken(id);
+    const decide = async () => {
+      const wire = JSON.parse(JSON.stringify(await svc().snapshot())) as EdgeSnapshot;
+      return checkQrToken(token, {
+        publicKeys: Object.fromEntries(
+          wire.publicKeys.map(({ kid, spki }) => [
+            kid,
+            createPublicKey({ key: Buffer.from(spki, 'base64'), format: 'der', type: 'spki' }),
+          ]),
+        ),
+        findEmployee: (sub) => wire.employees.find((e) => e.id === sub) ?? null,
+        nowS,
+      });
+    };
+    expect(await decide()).toMatchObject({ ok: true, employeeId: id, firstName: 'Lan' });
+    store.rows.get(id)!.qrRevoked = true;
+    expect(await decide()).toMatchObject({ ok: false, reason: 'REVOKED' });
+  });
+});
+
+describe('GET /api/edge/snapshot', () => {
+  const app = (keys = keysK1) =>
+    createApp([employeeQrRoutes(new EmployeeQrService(store, audit, keys, () => NOW))]);
+
+  it('needs no user session: the edge has none', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const res = await request(app()).get('/api/edge/snapshot?edgeId=edge-bd');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      generatedAt: NOW.toISOString(),
+      publicKeys: [{ kid: 'k1', spki: k1.publicKey }],
+      employees: [{ id, firstName: 'Lan', deny: null }],
+    });
+  });
+
+  it('is never cached: a revocation must reach the edge on its next pull', async () => {
+    const res = await request(app()).get('/api/edge/snapshot?edgeId=edge-bd');
+    expect(res.headers['cache-control']).toBe('no-store');
+  });
+
+  it('503 without details when the keys are misconfigured, so the edge keeps its last snapshot', async () => {
+    const res = await request(app({ ...keysK1, privateKey: '' })).get('/api/edge/snapshot');
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: 'QR signing not configured' });
+  });
+
+  it('500 when storage fails', async () => {
+    store.list = async () => {
+      throw new Error('db down');
+    };
+    expect((await request(app()).get('/api/edge/snapshot')).status).toBe(500);
   });
 });
 

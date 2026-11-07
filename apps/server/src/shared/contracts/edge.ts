@@ -6,6 +6,13 @@ export const SNAPSHOT_PULL_INTERVAL_MS = 60_000;
 /** An event decided from a snapshot older than this is sent with `stale: true`. */
 export const SNAPSHOT_STALE_AFTER_MS = 5 * 60_000;
 
+/**
+ * Most events in one POST /api/edge/events. A bigger batch gets 400, so the edge outbox must send
+ * at most this many per push. 200 events of UUID-sized ids are about 60 KB, under the server's
+ * 100 KB JSON body limit, so a long offline backlog drains in chunks instead of failing forever.
+ */
+export const MAX_EDGE_BATCH = 200;
+
 /** One scan the edge has committed locally. The edge's outbox pushes it until the server confirms. */
 export interface EdgeEvent {
   /** Made by the edge (UUID). The server inserts by eventId, so a repeated push is ignored (FR-3.2). */

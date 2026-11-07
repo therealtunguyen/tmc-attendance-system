@@ -87,13 +87,61 @@ model Gate {
   edge   Edge   @relation(fields: [edgeId], references: [id])
 }
 
-// Owned by the iam module. Append-only (FR-4.7).
+// Owned by the iam module. Append-only and hash-chained (FR-4.9): a trigger rejects UPDATE, DELETE
+// and TRUNCATE, and each row's hash covers the previous row's hash, so an edit or a gap is detectable.
 model AuditEntry {
-  id      String   @id @default(uuid())
-  actorId String
-  action  String
-  target  String
-  at      DateTime @default(now())
+  id       String   @id @default(uuid())
+  // Chain order. Assigned under an advisory lock, so there is one chain with no forks.
+  seq      Int      @unique @default(autoincrement())
+  actorId  String
+  action   String
+  target   String
+  // Values before and after a data change (FR-4.9). Null for actions that change nothing.
+  before   Json?
+  after    Json?
+  at       DateTime @default(now())
+  prevHash String
+  hash     String
 
   @@index([actorId, at])
+  @@index([target, at])
+  @@index([at])
+}
+
+// Owned by the iam module. A login account (FR-5.1), separate from but linked to an employee record.
+model User {
+  id           String    @id @default(uuid())
+  username     String    @unique
+  // scrypt$<salt>$<hash>, see iam.auth.ts. Never the password.
+  passwordHash String
+  // A Role code; validated in code, not by the database.
+  role         String
+  // Org unit IDs the user is limited to (FR-5.3). Only meaningful when scoped is true: an empty
+  // array with scoped = true means "limited to nothing", which differs from not limited.
+  scoped       Boolean   @default(false)
+  scopes       String[]  @default([])
+  // Plain string, no relation: modules do not relate across tables.
+  employeeId   String?   @unique
+  // Base32 TOTP secret (FR-5.2). Null until MFA is enrolled.
+  mfaSecret    String?
+  // Last TOTP step accepted; a code from that step or earlier is a replay.
+  mfaLastStep  Int?
+  active       Boolean   @default(true)
+  failedLogins Int       @default(0)
+  lockedUntil  DateTime?
+  createdAt    DateTime  @default(now())
+}
+
+// Owned by the iam module. Opaque bearer session (FR-5.2); mfaPassed is false until the second factor is verified.
+model Session {
+  id        String    @id @default(uuid())
+  // sha256 hex of the opaque token. The raw token is never stored.
+  tokenHash String    @unique
+  userId    String
+  mfaPassed Boolean
+  createdAt DateTime  @default(now())
+  expiresAt DateTime
+  revokedAt DateTime?
+
+  @@index([userId])
 }
