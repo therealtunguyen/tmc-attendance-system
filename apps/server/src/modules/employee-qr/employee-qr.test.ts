@@ -55,6 +55,13 @@ class InMemoryEmployees implements EmployeeStore {
     return this.write(id, { active: false, qrRevoked: true });
   }
 
+  async setQrRevoked(id: string, revoked: boolean) {
+    const employee = this.rows.get(id);
+    if (!employee || employee.qrRevoked === revoked) return null;
+    if (!revoked && !employee.active) return null;
+    return this.write(id, { qrRevoked: revoked });
+  }
+
   private write(id: string, changes: Partial<Employee>) {
     const employee = this.rows.get(id);
     if (!employee) return null;
@@ -499,6 +506,174 @@ describe('EmployeeQrService.issueToken (FR-1.2, ADR-10)', () => {
   it('fails clearly when the keys are not configured', async () => {
     const { id } = await eqr.createEmployee('hr-1', lan);
     await expect(eqr.issueToken(id)).rejects.toThrow('QR signing key not configured');
+  });
+});
+
+describe('EmployeeQrService: revoke and reissue (FR-1.4)', () => {
+  const qrActions = () => audit.entries.filter((e) => e.action.startsWith('QR_'));
+  const svc = () => new EmployeeQrService(store, audit, keysK1, () => NOW);
+
+  it('revoking keeps the employee active and audits who, what and the change', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    expect(await eqr.revokeQr('hr-2', id)).toMatchObject({ active: true, qrRevoked: true });
+    expect(qrActions()).toEqual([
+      {
+        actorId: 'hr-2',
+        action: 'QR_REVOKE',
+        target: `employee:${id}`,
+        at: expect.any(Date),
+        before: { qrRevoked: false },
+        after: { qrRevoked: true },
+      },
+    ]);
+  });
+
+  it('reissuing clears the flag and audits the change', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    await eqr.revokeQr('hr-1', id);
+    expect(await eqr.reissueQr('hr-2', id)).toMatchObject({ qrRevoked: false });
+    expect(qrActions().at(-1)).toMatchObject({
+      actorId: 'hr-2',
+      action: 'QR_REISSUE',
+      before: { qrRevoked: true },
+      after: { qrRevoked: false },
+    });
+  });
+
+  it('repeating either one changes nothing and audits nothing', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    expect(await eqr.reissueQr('hr-1', id)).toMatchObject({ qrRevoked: false });
+    expect(qrActions()).toEqual([]);
+    await eqr.revokeQr('hr-1', id);
+    expect(await eqr.revokeQr('hr-1', id)).toMatchObject({ qrRevoked: true });
+    expect(qrActions()).toHaveLength(1);
+  });
+
+  it('two concurrent revocations audit once', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const both = await Promise.all([eqr.revokeQr('hr-1', id), eqr.revokeQr('hr-2', id)]);
+    expect(both.every((e) => e?.qrRevoked)).toBe(true);
+    expect(qrActions()).toHaveLength(1);
+  });
+
+  it('returns null for an unknown employee and audits nothing', async () => {
+    expect(await eqr.revokeQr('hr-1', 'nope')).toBeNull();
+    expect(await eqr.reissueQr('hr-1', 'nope')).toBeNull();
+    expect(audit.entries).toEqual([]);
+  });
+
+  it('refuses to reissue a deactivated employee (FR-1.5)', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    await eqr.deactivateEmployee('hr-1', id);
+    await expect(eqr.reissueQr('hr-1', id)).rejects.toMatchObject({ reason: 'INACTIVE' });
+    expect(store.rows.get(id)).toMatchObject({ active: false, qrRevoked: true });
+    expect(qrActions()).toEqual([]);
+  });
+
+  it('keeps a deactivated employee revoked even when deactivation wins the race', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    await eqr.revokeQr('hr-1', id);
+    const find = store.find.bind(store);
+    // Reissue reads an active employee, then the deactivation lands before its write.
+    store.find = async (employeeId) => {
+      const seen = await find(employeeId);
+      store.find = find;
+      await eqr.deactivateEmployee('hr-1', id);
+      return seen;
+    };
+    expect(await eqr.reissueQr('hr-2', id)).toMatchObject({ active: false, qrRevoked: true });
+    expect(qrActions().map((e) => e.action)).toEqual(['QR_REVOKE']);
+  });
+
+  it('a revoked employee gets no token and a live token is denied; reissue restores both', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const live = await svc().issueToken(id);
+    await eqr.revokeQr('hr-1', id);
+    await expect(svc().issueToken(id)).rejects.toMatchObject({ reason: 'REVOKED' });
+    expect(await svc().validate(live)).toMatchObject({ ok: false, reason: 'REVOKED' });
+    await eqr.reissueQr('hr-1', id);
+    const fresh = await svc().issueToken(id);
+    expect(await svc().validate(fresh)).toMatchObject({ ok: true, employeeId: id });
+  });
+
+  it('a failed revoke stays an error: it must never look done', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    store.setQrRevoked = async () => {
+      throw new Error('db down');
+    };
+    await expect(eqr.revokeQr('hr-1', id)).rejects.toThrow('db down');
+    expect(audit.entries.map((e) => e.action)).toEqual(['EMPLOYEE_CREATE']);
+  });
+});
+
+describe('POST /api/employees/:id/qr/revoke and /reissue', () => {
+  const app = (user?: UserRef) => createApp([signedIn(user), employeeQrRoutes(eqr)]);
+  const hr: UserRef = { id: 'hr-9', role: 'HR' };
+  const revoke = (user: UserRef | undefined, id: string) =>
+    request(app(user)).post(`/api/employees/${id}/qr/revoke`);
+  const reissue = (user: UserRef | undefined, id: string) =>
+    request(app(user)).post(`/api/employees/${id}/qr/reissue`);
+
+  it('revokes and reissues, audited as the signed-in user', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const off = await revoke(hr, id);
+    expect([off.status, off.body.qrRevoked]).toEqual([200, true]);
+    const on = await reissue(hr, id);
+    expect([on.status, on.body.qrRevoked]).toEqual([200, false]);
+    expect(audit.entries.slice(-2).map((e) => [e.actorId, e.action])).toEqual([
+      ['hr-9', 'QR_REVOKE'],
+      ['hr-9', 'QR_REISSUE'],
+    ]);
+  });
+
+  it('allows ADM too', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    expect((await revoke({ id: 'adm-1', role: 'ADM' }, id)).status).toBe(200);
+  });
+
+  it('401 when nobody is signed in', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    expect((await revoke(undefined, id)).status).toBe(401);
+    expect((await reissue(undefined, id)).status).toBe(401);
+  });
+
+  it.each(['EMP', 'SUP', 'GRD', 'EXE'] as const)('403 for %s and nothing changes', async (role) => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    expect((await revoke({ id: 'u-1', role, scopes: ['bd-line-1'] }, id)).status).toBe(403);
+    expect((await reissue({ id: 'u-1', role, scopes: ['bd-line-1'] }, id)).status).toBe(403);
+    expect(store.rows.get(id)!.qrRevoked).toBe(false);
+  });
+
+  it('404 for HR of another factory, like a missing employee, and nothing changes', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const elsewhere: UserRef = { id: 'hr-la', role: 'HR', scopes: ['long-an'] };
+    expect((await revoke(elsewhere, id)).status).toBe(404);
+    store.rows.get(id)!.qrRevoked = true;
+    expect((await reissue(elsewhere, id)).status).toBe(404);
+    expect(store.rows.get(id)!.qrRevoked).toBe(true);
+    expect(audit.entries.map((e) => e.action)).toEqual(['EMPLOYEE_CREATE']);
+  });
+
+  it('404 for an unknown employee', async () => {
+    expect((await revoke(hr, 'nope')).status).toBe(404);
+    expect((await reissue(hr, 'nope')).status).toBe(404);
+  });
+
+  it('409 with the reason when reissuing a deactivated employee', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    await eqr.deactivateEmployee('hr-1', id);
+    const res = await reissue(hr, id);
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ reason: 'INACTIVE' });
+  });
+
+  it('a storage failure is a 500 on both', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    store.setQrRevoked = async () => {
+      throw new Error('db down');
+    };
+    expect((await revoke(hr, id)).status).toBe(500);
+    expect((await reissue(hr, id)).status).toBe(500);
   });
 });
 

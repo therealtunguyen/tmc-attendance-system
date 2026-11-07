@@ -18,6 +18,7 @@ export type {
   NewEmployee,
   QrIssuer,
   QrKeyConfig,
+  QrRevocation,
   QrValidation,
   ValidationResult,
 } from './employee-qr.service.js';
