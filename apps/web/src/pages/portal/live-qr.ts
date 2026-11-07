@@ -1,5 +1,5 @@
 // The live QR's behaviour (FR-1.2, FR-1.3, ADR-10), apart from React so it can be tested on its own.
-import { browserStorage, type KeyValue } from '../../session';
+import { browserStorage, LAST_QR_KEY, type KeyValue } from '../../session';
 
 export const QR_REFRESH_MS = 30_000;
 
@@ -11,7 +11,20 @@ export interface LiveQr {
   code: string;
 }
 
-export type DenyReason = 'REVOKED' | 'INACTIVE' | 'UNKNOWN' | 'NO_EMPLOYEE';
+const REASONS = ['REVOKED', 'INACTIVE', 'UNKNOWN', 'NO_EMPLOYEE'] as const;
+
+/** OTHER: a 403 this page does not know, e.g. another middleware's. Still no QR, with a generic message. */
+export type DenyReason = (typeof REASONS)[number] | 'OTHER';
+
+const reasonOf = (body: unknown): DenyReason => {
+  const reason = (body as { reason?: unknown } | null)?.reason;
+  return REASONS.find((known) => known === reason) ?? 'OTHER';
+};
+
+const isLiveQr = (body: unknown): body is LiveQr => {
+  const qr = body as Partial<LiveQr> | null;
+  return typeof qr?.token === 'string' && typeof qr.ttlSeconds === 'number';
+};
 
 export type QrFetch =
   | { kind: 'ok'; qr: LiveQr }
@@ -29,12 +42,13 @@ export const fetchLiveQr = async (token: string): Promise<QrFetch> => {
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     if (res.status === 401) return { kind: 'signed-out' };
+    // A 403 is a denial whatever its body says; only the message depends on it.
     if (res.status === 403) {
-      const { reason } = (await res.json()) as { reason: DenyReason };
-      return { kind: 'denied', reason };
+      return { kind: 'denied', reason: reasonOf(await res.json().catch(() => null)) };
     }
     if (!res.ok) return { kind: 'down' };
-    return { kind: 'ok', qr: (await res.json()) as LiveQr };
+    const body: unknown = await res.json();
+    return isLiveQr(body) ? { kind: 'ok', qr: body } : { kind: 'down' };
   } catch {
     return { kind: 'down' };
   }
@@ -42,21 +56,34 @@ export const fetchLiveQr = async (token: string): Promise<QrFetch> => {
 
 /** The last token, and when this device must stop showing it. */
 export interface ShownQr extends Omit<LiveQr, 'ttlSeconds'> {
-  /** This device's clock: ttlSeconds counted from the answer, so a wrong phone clock does no harm. */
+  /**
+   * This device's clock: ttlSeconds counted from when it asked, not from the answer, so a slow
+   * response never stretches it past the server's exp. A wrong phone clock does no harm either.
+   */
   showUntil: number;
 }
 
-const CACHE_KEY = 'tmc.lastQr';
+interface CachedQr extends ShownQr {
+  owner: string;
+}
 
-/** Survives a reload: the signal at a gate can be poor. */
+/**
+ * Survives a reload: the signal at a gate can be poor. Each entry carries the session that fetched it,
+ * and any other session ignores it, so one person's QR is never shown to the next (ADR-10).
+ */
 export class QrCache {
-  constructor(private store: KeyValue | null = browserStorage()) {}
+  constructor(
+    private store: KeyValue | null,
+    private owner: string,
+  ) {}
 
   load(now: number): ShownQr | null {
     try {
-      const qr = JSON.parse(this.store?.getItem(CACHE_KEY) ?? 'null') as ShownQr | null;
+      const qr = JSON.parse(this.store?.getItem(LAST_QR_KEY) ?? 'null') as CachedQr | null;
       if (typeof qr?.token !== 'string' || typeof qr.showUntil !== 'number') return null;
-      return qr.showUntil > now ? qr : null;
+      if (qr.owner !== this.owner || qr.showUntil <= now) return null;
+      const { token, firstName, lastName, code, showUntil } = qr;
+      return { token, firstName, lastName, code, showUntil };
     } catch {
       return null;
     }
@@ -64,7 +91,7 @@ export class QrCache {
 
   save(qr: ShownQr) {
     try {
-      this.store?.setItem(CACHE_KEY, JSON.stringify(qr));
+      this.store?.setItem(LAST_QR_KEY, JSON.stringify({ ...qr, owner: this.owner }));
     } catch {
       // The on-screen QR still works; only a reload without signal loses it.
     }
@@ -72,12 +99,15 @@ export class QrCache {
 
   clear() {
     try {
-      this.store?.removeItem(CACHE_KEY);
+      this.store?.removeItem(LAST_QR_KEY);
     } catch {
       // Nothing was stored.
     }
   }
 }
+
+/** The cache for one session. */
+export const qrCacheFor = (sessionToken: string) => new QrCache(browserStorage(), sessionToken);
 
 export type QrView =
   | { kind: 'loading' }
@@ -122,12 +152,13 @@ export class LiveQrController {
     if (this.fetching || this.stopped) return;
     this.expireIfDue();
     this.fetching = true;
+    const asked = this.now();
     const result = await this.fetchQr();
     this.fetching = false;
     if (this.stopped) return;
     switch (result.kind) {
       case 'ok':
-        return this.fresh(result.qr);
+        return this.fresh(result.qr, asked);
       case 'down':
         return this.lostConnection();
       case 'denied':
@@ -139,8 +170,8 @@ export class LiveQrController {
     }
   }
 
-  private fresh({ ttlSeconds, ...qr }: LiveQr) {
-    const shown = { ...qr, showUntil: this.now() + ttlSeconds * 1000 };
+  private fresh({ ttlSeconds, ...qr }: LiveQr, asked: number) {
+    const shown = { ...qr, showUntil: asked + ttlSeconds * 1000 };
     this.cache.save(shown);
     this.show(shown, false);
   }

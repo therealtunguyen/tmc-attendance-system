@@ -45,6 +45,31 @@ describe('stored session', () => {
     },
   );
 
+  it('clears the cached QR with the session (ADR-10: a QR is an identity)', () => {
+    const store = memory();
+    saveSession(session, store);
+    store.setItem('tmc.lastQr', '{"token":"a"}');
+    clearSession(store);
+    expect(store.getItem('tmc.lastQr')).toBeNull();
+  });
+
+  it("a new sign-in drops the previous user's cached QR", () => {
+    const store = memory();
+    store.setItem('tmc.lastQr', '{"token":"from-user-a"}');
+    saveSession(session, store);
+    expect(store.getItem('tmc.lastQr')).toBeNull();
+    expect(loadSession(store, NOW)).toEqual(session);
+  });
+
+  it('clears an expired session and its QR on load: it may have ended while the page was closed', () => {
+    const store = memory();
+    saveSession(session, store);
+    store.setItem('tmc.lastQr', '{"token":"a"}');
+    expect(loadSession(store, Date.parse(session.expiresAt) + 1)).toBeNull();
+    expect(store.getItem('tmc.session')).toBeNull();
+    expect(store.getItem('tmc.lastQr')).toBeNull();
+  });
+
   it('works without storage', () => {
     expect(loadSession(null, NOW)).toBeNull();
     expect(() => saveSession(session, null)).not.toThrow();
@@ -104,8 +129,33 @@ describe('signing in', () => {
     answer(401);
     expect(await passMfa('p', '000000')).toEqual({
       kind: 'refused',
-      message: 'Wrong or expired code.',
+      message: 'Wrong or expired code. Sign in again.',
+      restart: true,
     });
+  });
+
+  it('keeps the MFA step for a failure that did not spend the code', async () => {
+    answer(500);
+    expect(await passMfa('p', '1')).not.toHaveProperty('restart');
+    offline();
+    expect(await passMfa('p', '1')).not.toHaveProperty('restart');
+  });
+
+  it.each([
+    ['no expiresAt', { token: 't', mfaRequired: false }],
+    ['no token', { mfaRequired: false, expiresAt: session.expiresAt }],
+    ['a non-string expiresAt', { token: 't', mfaRequired: false, expiresAt: 5 }],
+  ])('refuses a sign-in answer with %s instead of saving an unusable session', async (_n, body) => {
+    answer(200, body);
+    expect(await signIn('lan', 'pw')).toEqual({
+      kind: 'refused',
+      message: 'Sign-in failed. Try again.',
+    });
+  });
+
+  it('refuses an MFA answer without expiresAt', async () => {
+    answer(200, {});
+    expect(await passMfa('p', '1')).toMatchObject({ kind: 'refused' });
   });
 
   it('does not throw without a connection', async () => {

@@ -50,7 +50,7 @@ describe('LiveQrController', () => {
     vi.useFakeTimers();
     serial = 0;
     store = memory();
-    cache = new QrCache(store);
+    cache = new QrCache(store, 'session-a');
     view = { kind: 'loading' };
     serverAnswers = () => ok(`t${++serial}`);
     fetchQr = vi.fn(async () => serverAnswers());
@@ -162,6 +162,43 @@ describe('LiveQrController', () => {
     expect(view).toEqual({ kind: 'expired' });
   });
 
+  it("never shows another session's cached QR, online or offline", async () => {
+    // User A's QR is still within its TTL when user B signs in on the same browser.
+    new QrCache(store, 'session-a').save({ ...qr('a-token'), showUntil: Date.now() + 50_000 });
+    cache = new QrCache(store, 'session-b');
+    serverAnswers = () => down;
+    live = controller();
+    live.start();
+    expect(view).toEqual({ kind: 'loading' });
+    await settle();
+    expect(view).toEqual({ kind: 'expired' });
+    serverAnswers = () => ok('b-token');
+    await vi.advanceTimersByTimeAsync(QR_REFRESH_MS);
+    expect(shown()?.qr.token).toBe('b-token');
+  });
+
+  it('ignores a cached entry with no owner', async () => {
+    store.setItem(
+      'tmc.lastQr',
+      JSON.stringify({ ...qr('legacy'), showUntil: Date.now() + 50_000 }),
+    );
+    expect(cache.load(Date.now())).toBeNull();
+  });
+
+  it('counts the display time from the request, so a slow answer cannot outlive the token', async () => {
+    let answer!: (result: QrFetch) => void;
+    fetchQr.mockReturnValueOnce(new Promise((resolve) => (answer = resolve)));
+    const asked = Date.now();
+    live.start();
+    await vi.advanceTimersByTimeAsync(5_000);
+    answer(ok('slow'));
+    await settle();
+    expect(shown()?.qr.showUntil).toBe(asked + TTL_MS);
+    serverAnswers = () => down;
+    await vi.advanceTimersByTimeAsync(TTL_MS - 5_000);
+    expect(view).toEqual({ kind: 'expired' });
+  });
+
   it('never shows an expired cached token', async () => {
     cache.save({ ...qr('dead'), showUntil: Date.now() - 1 });
     serverAnswers = () => down;
@@ -259,7 +296,7 @@ describe('QrCache', () => {
   const entry: ShownQr = { token: 't', firstName: 'L', lastName: 'N', code: 'C', showUntil: 100 };
 
   it('loads only what is still valid', () => {
-    const cache = new QrCache(memory());
+    const cache = new QrCache(memory(), 'session-a');
     cache.save(entry);
     expect(cache.load(99)).toEqual(entry);
     expect(cache.load(100)).toBeNull();
@@ -268,7 +305,7 @@ describe('QrCache', () => {
   it.each(['not json', 'null', '{"token":5}', '{"token":"t"}'])('ignores corrupt %s', (value) => {
     const store = memory();
     store.setItem('tmc.lastQr', value);
-    expect(new QrCache(store).load(0)).toBeNull();
+    expect(new QrCache(store, 'session-a').load(0)).toBeNull();
   });
 
   it('works without storage and when storage throws', () => {
@@ -283,7 +320,7 @@ describe('QrCache', () => {
         throw new Error('blocked');
       },
     };
-    for (const cache of [new QrCache(null), new QrCache(blocked)]) {
+    for (const cache of [new QrCache(null, 'session-a'), new QrCache(blocked, 'session-a')]) {
       expect(() => cache.save(entry)).not.toThrow();
       expect(cache.load(0)).toBeNull();
       expect(() => cache.clear()).not.toThrow();
@@ -315,6 +352,31 @@ describe('fetchLiveQr', () => {
     expect(await fetchLiveQr('s')).toEqual({ kind: 'signed-out' });
     answer(403, { reason: 'REVOKED' });
     expect(await fetchLiveQr('s')).toEqual({ kind: 'denied', reason: 'REVOKED' });
+  });
+
+  it.each([
+    ['an unknown reason', { reason: 'SOMETHING_NEW' }],
+    ['a privacy-notice block', { code: 'NOTICE_REQUIRED' }],
+    ['a permission check', { error: 'Forbidden' }],
+  ])('treats a 403 with %s as a denial with a generic reason', async (_name, body) => {
+    answer(403, body);
+    expect(await fetchLiveQr('s')).toEqual({ kind: 'denied', reason: 'OTHER' });
+  });
+
+  it('treats a 403 that is not JSON as a denial, not as no connection', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('<html>Forbidden</html>', { status: 403 })),
+    );
+    expect(await fetchLiveQr('s')).toEqual({ kind: 'denied', reason: 'OTHER' });
+  });
+
+  it.each([
+    ['a body without a token', { ttlSeconds: 60 }],
+    ['a body without a TTL', { token: 't' }],
+  ])('treats a 200 with %s as down', async (_name, body) => {
+    answer(200, body);
+    expect(await fetchLiveQr('s')).toEqual({ kind: 'down' });
   });
 
   it.each([500, 503])('treats %i as down, not as a denial', async (status) => {

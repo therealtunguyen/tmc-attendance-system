@@ -6,6 +6,7 @@ const DENIED: Record<DenyReason, string> = {
   INACTIVE: 'Your employee record is inactive. Contact HR.',
   UNKNOWN: 'Your employee record was not found. Contact HR.',
   NO_EMPLOYEE: 'This account has no employee record, so it has no QR code.',
+  OTHER: 'Your QR code is not available right now. If this keeps happening, contact HR.',
 };
 
 const quiet = { color: '#555' };

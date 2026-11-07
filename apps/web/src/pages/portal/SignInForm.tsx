@@ -20,6 +20,10 @@ export function SignInForm({ onSignedIn }: { onSignedIn: (session: Session) => v
       setPassword('');
       return setPendingToken(result.pendingToken);
     }
+    if (result.restart) {
+      setPendingToken(null);
+      setCode('');
+    }
     setError(result.message);
   };
 

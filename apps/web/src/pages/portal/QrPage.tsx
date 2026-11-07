@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { clearSession, loadSession, signOut, type Session } from '../../session';
-import { fetchLiveQr, LiveQrController, QrCache, type QrView } from './live-qr';
+import { fetchLiveQr, LiveQrController, qrCacheFor, type QrView } from './live-qr';
 import { QrScreen } from './QrScreen';
 import { SignInForm } from './SignInForm';
 
@@ -8,7 +8,11 @@ function LiveQrPanel({ session, onEnd }: { session: Session; onEnd: () => void }
   const [view, setView] = useState<QrView>({ kind: 'loading' });
 
   useEffect(() => {
-    const live = new LiveQrController(() => fetchLiveQr(session.token), new QrCache(), setView);
+    const live = new LiveQrController(
+      () => fetchLiveQr(session.token),
+      qrCacheFor(session.token),
+      setView,
+    );
     const wake = () => {
       if (document.visibilityState === 'visible') void live.refresh();
     };
@@ -28,7 +32,6 @@ function LiveQrPanel({ session, onEnd }: { session: Session; onEnd: () => void }
   }, [view, onEnd]);
 
   const leave = () => {
-    new QrCache().clear();
     void signOut(session);
     onEnd();
   };

@@ -32,6 +32,7 @@ describe('QrScreen', () => {
     [{ kind: 'denied', reason: 'INACTIVE' }, 'inactive'],
     [{ kind: 'denied', reason: 'UNKNOWN' }, 'not found'],
     [{ kind: 'denied', reason: 'NO_EMPLOYEE' }, 'no employee record'],
+    [{ kind: 'denied', reason: 'OTHER' }, 'not available right now'],
     [{ kind: 'expired' }, 'No connection'],
     [{ kind: 'loading' }, 'Loading'],
     [{ kind: 'signed-out' }, 'session has ended'],
