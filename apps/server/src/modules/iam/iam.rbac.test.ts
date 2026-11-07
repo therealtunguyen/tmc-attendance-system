@@ -52,6 +52,10 @@ describe('role-permission matrix', () => {
     expect(hasPermission('EXE', 'employee:read')).toBe(false);
     expect(roles.filter((r) => hasPermission(r, 'gate:override'))).toEqual(['GRD']);
   });
+
+  it('unknown role returns false for any permission', () => {
+    expect(hasPermission('FOO' as Role, 'self:read')).toBe(false);
+  });
 });
 
 describe('scope (BR-15)', () => {
@@ -117,5 +121,10 @@ describe('requirePermission', () => {
     const res = { locals: { user: { id: 'a', role: 'ADM' } } };
     requirePermission('audit:read')({} as never, res as never, next);
     expect(next).toHaveBeenCalledOnce();
+  });
+
+  it('403 for unknown role', async () => {
+    const unknown = await request(app({ id: 'u', role: 'FOO' as Role })).get('/x');
+    expect([unknown.status, unknown.body]).toEqual([403, { error: 'Forbidden' }]);
   });
 });

@@ -62,7 +62,7 @@ export const PERMISSIONS: Record<Role, readonly Permission[]> = {
 };
 
 export const hasPermission = (role: Role, permission: Permission): boolean =>
-  PERMISSIONS[role].includes(permission);
+  PERMISSIONS[role]?.includes(permission) ?? false;
 
 /** Limited to some scopes. SUP is always team-scoped, so without scopes it has no team (BR-15). */
 export const isRestricted = (user: UserRef): boolean =>

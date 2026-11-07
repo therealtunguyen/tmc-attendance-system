@@ -109,6 +109,7 @@ export const employeeQrRoutes = (eqr: EmployeeQrService) =>
       if (!current || !canSeeEmployee(userOf(res), current)) {
         return void res.status(404).json({ error: 'Employee not found' });
       }
+      // TODO(#47): also check teamId with inScope once the org structure can resolve team -> factory.
       // Moving an employee out of the user's scope is as forbidden as creating one there.
       if (changes.factoryId !== undefined && !inScope(userOf(res), changes.factoryId)) {
         return void res.status(403).json({ error: 'Forbidden' });
