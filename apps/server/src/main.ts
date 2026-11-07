@@ -12,7 +12,13 @@ import {
   employeeQrRoutes,
 } from './modules/employee-qr/index.js';
 import { GateRepo, GateService, gateRoutes } from './modules/gate/index.js';
-import { authenticate, IamRepo, IamService, iamRoutes } from './modules/iam/index.js';
+import {
+  authenticate,
+  IamRepo,
+  IamService,
+  iamRoutes,
+  requireNoticeAck,
+} from './modules/iam/index.js';
 import { ReportingRepo, ReportingService, reportingRoutes } from './modules/reporting/index.js';
 import { config } from './shared/config.js';
 import { createPrisma } from './shared/prisma.js';
@@ -42,7 +48,7 @@ const app = createApp(
     reportingRoutes(reporting),
     gateRoutes(gate),
   ],
-  { before: [authenticate(iam)] },
+  { before: [authenticate(iam), requireNoticeAck(iam)] },
 );
 
 app.listen(config.port, () => {

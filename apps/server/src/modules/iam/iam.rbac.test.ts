@@ -31,6 +31,7 @@ const matrix: Record<Permission, Role[]> = {
   'gate:manage': ['ADM'],
   'user:manage': ['ADM'],
   'audit:read': ['ADM'],
+  'notice:publish': ['HR', 'ADM'],
 };
 
 describe('role-permission matrix', () => {

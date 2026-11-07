@@ -82,6 +82,37 @@ export interface UserStore {
   purgeSessions(before: Date): Promise<void>;
 }
 
+export interface Notice {
+  version: number;
+  text: string;
+  publishedAt: Date;
+}
+
+/** Versioned privacy notice and who acknowledged it (NFR-20). Published versions are never edited. */
+export interface NoticeStore {
+  /** The highest version, or null when none was published. */
+  currentNotice(): Promise<Notice | null>;
+  /** Atomically publishes as max version + 1. */
+  publishNotice(text: string, by: string): Promise<Notice>;
+  hasAcked(userId: string, version: number): Promise<boolean>;
+  /** Idempotent: true only when this call inserted the acknowledgement, false for a repeat. */
+  ack(userId: string, version: number): Promise<boolean>;
+}
+
+export const MAX_NOTICE_LENGTH = 20_000;
+export const NOTICE_CACHE_TTL_MS = 60_000;
+
+/** Why a publish or an acknowledgement was refused. */
+export class NoticeError extends Error {
+  constructor(
+    readonly code: 'INVALID_TEXT' | 'NO_NOTICE' | 'STALE_VERSION',
+    message: string,
+    readonly currentVersion?: number,
+  ) {
+    super(message);
+  }
+}
+
 export type LoginResult =
   | { ok: true; token: string; mfaRequired: true }
   | { ok: true; token: string; mfaRequired: false; expiresAt: Date }
@@ -158,8 +189,10 @@ const unknownActor = (username: string) =>
 
 /** Users, login, roles, audit log (FR-1.7, FR-4.7, FR-4.8, FR-5.1, FR-5.2). */
 export class IamService implements Authorizer, AuditLog, AuditReader, Authenticator {
+  private noticeCache: { notice: Notice | null; until: number } | undefined;
+
   constructor(
-    private store: AuditStore & UserStore,
+    private store: AuditStore & UserStore & NoticeStore,
     private clock: () => number = Date.now,
     private random: () => number = Math.random,
   ) {}
@@ -286,6 +319,61 @@ export class IamService implements Authorizer, AuditLog, AuditReader, Authentica
       scopes: user.scoped ? user.scopes : undefined,
       employeeId: user.employeeId ?? undefined,
     };
+  }
+
+  /**
+   * Cached per process for NOTICE_CACHE_TTL_MS; publishNotice here invalidates it. With several
+   * instances a newer notice shows up within the TTL.
+   */
+  private async cachedNotice(): Promise<Notice | null> {
+    const now = this.clock();
+    if (this.noticeCache && this.noticeCache.until > now) return this.noticeCache.notice;
+    const notice = await this.store.currentNotice();
+    this.noticeCache = { notice, until: now + NOTICE_CACHE_TTL_MS };
+    return notice;
+  }
+
+  currentNotice(): Promise<Notice | null> {
+    return this.cachedNotice();
+  }
+
+  /** Publishes the next version of the privacy notice (NFR-20); everyone must acknowledge it again. */
+  async publishNotice(actorId: string, text: string): Promise<Notice> {
+    const trimmed = text.trim();
+    if (trimmed.length < 1 || trimmed.length > MAX_NOTICE_LENGTH) {
+      throw new NoticeError('INVALID_TEXT', `text must be 1 to ${MAX_NOTICE_LENGTH} characters`);
+    }
+    this.noticeCache = undefined;
+    const notice = await this.store.publishNotice(trimmed, actorId);
+    this.noticeCache = undefined;
+    // The text is in the notice table; the log keeps only the version.
+    await this.store.append({
+      actorId,
+      action: 'NOTICE_PUBLISH',
+      target: `notice:${notice.version}`,
+      at: new Date(this.clock()),
+      after: { version: notice.version },
+    });
+    return notice;
+  }
+
+  /** Records that the user read the current version. Repeats are accepted but audited once. */
+  async acknowledgeNotice(userId: string, version: number): Promise<void> {
+    const current = await this.cachedNotice();
+    if (!current) throw new NoticeError('NO_NOTICE', 'No privacy notice has been published');
+    if (version !== current.version) {
+      throw new NoticeError('STALE_VERSION', 'Not the current version', current.version);
+    }
+    // Only the call that inserted the row audits, so concurrent first acks log once.
+    if (await this.store.ack(userId, version))
+      await this.audit(userId, 'NOTICE_ACK', `notice:${version}`);
+  }
+
+  /** The current version when the user has not acknowledged it yet, else null. */
+  async noticePending(userId: string): Promise<number | null> {
+    const current = await this.cachedNotice();
+    if (!current) return null;
+    return (await this.store.hasAcked(userId, current.version)) ? null : current.version;
   }
 
   async logout(token: string): Promise<void> {
