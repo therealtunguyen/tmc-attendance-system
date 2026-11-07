@@ -24,7 +24,7 @@ const turnstile =
 const hrs = config.hrsMode === 'http' ? new HrsHttpClient(config.hrsBaseUrl) : new MockHrs();
 
 const iam = new IamService(new IamRepo(db));
-const admin = new AdminService(new AdminRepo(db));
+const admin = new AdminService(new AdminRepo(db), iam);
 const eqr = new EmployeeQrService(new EmployeeQrRepo(db), iam, config.qrKeys);
 const attendance = new AttendanceService(new AttendanceRepo(db));
 const reporting = new ReportingService(new ReportingRepo(db), attendance, admin, hrs, iam);
@@ -42,7 +42,7 @@ const app = createApp(
     reportingRoutes(reporting),
     gateRoutes(gate),
   ],
-  { before: [authenticate(iam)] },
+  { before: [authenticate(iam, admin)] },
 );
 
 app.listen(config.port, () => {

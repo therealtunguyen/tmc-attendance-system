@@ -87,6 +87,9 @@ export const employeeQrRoutes = (eqr: EmployeeQrService) =>
       if (!inScope(userOf(res), trimmed(body.factoryId) as string)) {
         return void res.status(403).json({ error: 'Forbidden' });
       }
+      if (body.teamId && !inScope(userOf(res), trimmed(body.teamId) as string)) {
+        return void res.status(403).json({ error: 'Forbidden' });
+      }
       const data = { teamId: null, ...pick(body), code: trimmed(body.code) } as NewEmployee;
       try {
         res.status(201).json(await eqr.createEmployee(userOf(res).id, data));
@@ -109,9 +112,12 @@ export const employeeQrRoutes = (eqr: EmployeeQrService) =>
       if (!current || !canSeeEmployee(userOf(res), current)) {
         return void res.status(404).json({ error: 'Employee not found' });
       }
-      // TODO(#47): also check teamId with inScope once the org structure can resolve team -> factory.
       // Moving an employee out of the user's scope is as forbidden as creating one there.
+      // Scopes are expanded down the org tree, so a factory scope covers its teams (BR-15).
       if (changes.factoryId !== undefined && !inScope(userOf(res), changes.factoryId)) {
+        return void res.status(403).json({ error: 'Forbidden' });
+      }
+      if (changes.teamId && !inScope(userOf(res), changes.teamId)) {
         return void res.status(403).json({ error: 'Forbidden' });
       }
       const employee = await eqr.updateEmployee(userOf(res).id, idOf(req), changes);

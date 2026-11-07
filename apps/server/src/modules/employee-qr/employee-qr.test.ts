@@ -5,6 +5,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../app.js';
 import { QR_TOKEN_TTL_S, signQrToken, verifyQrToken } from '../../shared/contracts/qr-token.js';
 import type { Scope } from '../../shared/types.js';
+import { InMemoryAdminStore } from '../admin/admin.fakes.js';
+import { AdminService } from '../admin/index.js';
 import type { AuditEntry, AuditLog, UserRef } from '../iam/index.js';
 import { QrKeyring } from './employee-qr.keys.js';
 import { employeeQrRoutes } from './employee-qr.routes.js';
@@ -344,8 +346,9 @@ describe('employee routes: RBAC (FR-5.3, BR-15)', () => {
     expect(store.rows.get(mine.id)!.factoryId).toBe('binh-duong');
     expect(store.rows.get(other.id)).toMatchObject({ lastName: 'Nguyen', active: true });
     expect(
+      // Scopes as the org tree would expand them: the team is inside the factory.
       (
-        await request(app(user))
+        await request(app(hrIn('binh-duong', 'bd-line-1')))
           .post('/api/employees')
           .send({ ...lan, code: 'BD-3' })
       ).status,
@@ -621,5 +624,51 @@ describe('EmployeeQrService.validate (FR-2.2)', () => {
     const { id } = await eqr.createEmployee('hr-1', lan);
     const token = await svc(keysK1).issueToken(id);
     expect(await svc(keysK2).validate(token)).toMatchObject({ ok: true, employeeId: id });
+  });
+});
+
+describe('employee routes: team scope through the org tree (#47, BR-15)', () => {
+  let orgs: AdminService;
+  const resolved = (user: UserRef) =>
+    Router().use(async (_req, res, next) => {
+      res.locals.user = await orgs.expandScopes(user);
+      next();
+    });
+  const hr: UserRef = { id: 'hr-f', role: 'HR', scopes: ['binh-duong'] };
+  const app = () => createApp([resolved(hr), employeeQrRoutes(eqr)]);
+
+  beforeEach(async () => {
+    orgs = new AdminService(new InMemoryAdminStore(), new RecordingAudit());
+    const unit = (id: string, kind: string, parentId: string | null) =>
+      orgs.createOrgUnit('adm', { id, kind, name: id, parentId });
+    await unit('binh-duong', 'FACTORY', null);
+    await unit('bd-sew', 'DEPARTMENT', 'binh-duong');
+    await unit('bd-line-1', 'TEAM', 'bd-sew');
+    await unit('long-an', 'FACTORY', null);
+    await unit('la-cut', 'DEPARTMENT', 'long-an');
+    await unit('la-line-1', 'TEAM', 'la-cut');
+  });
+
+  it('a factory-scoped HR can create and move an employee to a team inside the factory', async () => {
+    const created = await request(app())
+      .post('/api/employees')
+      .send({ ...lan, teamId: 'bd-line-1' });
+    expect(created.status).toBe(201);
+    const { id } = await eqr.createEmployee('hr-1', { ...lan, code: 'BD-2', teamId: null });
+    const moved = await request(app()).patch(`/api/employees/${id}`).send({ teamId: 'bd-line-1' });
+    expect(moved.status).toBe(200);
+  });
+
+  it('but not to a team outside it (403), on create or on PATCH', async () => {
+    const created = await request(app())
+      .post('/api/employees')
+      .send({ ...lan, teamId: 'la-line-1' });
+    expect(created.status).toBe(403);
+    const { id } = await eqr.createEmployee('hr-1', { ...lan, code: 'BD-2', teamId: null });
+    const moved = await request(app()).patch(`/api/employees/${id}`).send({ teamId: 'la-line-1' });
+    expect(moved.status).toBe(403);
+    expect(store.rows.get(id)!.teamId).toBeNull();
+    const cleared = await request(app()).patch(`/api/employees/${id}`).send({ teamId: null });
+    expect(cleared.status).toBe(200);
   });
 });
