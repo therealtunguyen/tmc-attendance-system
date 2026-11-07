@@ -149,4 +149,12 @@ export const employeeQrRoutes = (eqr: EmployeeQrService) =>
     .get('/me/qr', notImplemented)
     .post('/employees/:id/qr/revoke', notImplemented)
     // Edge agent (ADR-9). Response: EdgeSnapshot.
-    .get('/edge/snapshot', notImplemented);
+    // An edge has no user session, so no requirePermission. TODO(#44): authenticate the edge agent.
+    .get('/edge/snapshot', async (_req, res) => {
+      try {
+        res.set('Cache-Control', 'no-store').json(await eqr.snapshot());
+      } catch (e) {
+        if (!(e instanceof QrNotConfiguredError)) throw e;
+        res.status(503).json({ error: 'QR signing not configured' });
+      }
+    });

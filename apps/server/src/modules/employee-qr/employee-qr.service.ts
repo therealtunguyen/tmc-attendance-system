@@ -6,7 +6,6 @@ import {
   type QrCheckResult,
   type QrDenyReason,
 } from '../../shared/contracts/qr-validation.js';
-import { todo } from '../../shared/errors.js';
 import type { Scope } from '../../shared/types.js';
 import type { AuditLog } from '../iam/index.js';
 import { QrKeyring } from './employee-qr.keys.js';
@@ -193,8 +192,14 @@ export class EmployeeQrService
     return signQrToken({ sub: employee.id, exp, jti: randomUUID() }, kid, signingKey);
   }
 
+  /**
+   * The whole company, not one factory, and denied employees too: missing means UNKNOWN to the edge.
+   * generatedAt is taken before the read, so the edge can only think its deny states are older than they are.
+   */
   async snapshot(): Promise<EdgeSnapshot> {
-    return todo();
+    const generatedAt = this.now().toISOString();
+    const publicKeys = this.ring.edgePublicKeys();
+    return { generatedAt, publicKeys, employees: (await this.repo.list()).map(admission) };
   }
 
   async find(id: string): Promise<EmployeeSummary | null> {
