@@ -6,7 +6,6 @@ import {
   type QrCheckResult,
   type QrDenyReason,
 } from '../../shared/contracts/qr-validation.js';
-import { todo } from '../../shared/errors.js';
 import type { Scope } from '../../shared/types.js';
 import type { AuditLog } from '../iam/index.js';
 import { QrKeyring } from './employee-qr.keys.js';
@@ -58,6 +57,8 @@ export interface EmployeeStore {
   list(scope?: Scope): Promise<Employee[]>;
   /** Sets active = false and qrRevoked = true in one conditional write (FR-1.5). Null when there is nothing to change (unknown, or already deactivated and revoked). */
   deactivate(id: string): Promise<Employee | null>;
+  /** One conditional write (FR-1.4). Never clears it on an inactive employee (FR-1.5). Null when the row did not change. */
+  setQrRevoked(id: string, revoked: boolean): Promise<Employee | null>;
 }
 
 /** HR maintains employees (FR-1.1, FR-1.5). Every change is audited (FR-4.7). */
@@ -67,6 +68,13 @@ export interface EmployeeAdmin {
   getProfile(id: string): Promise<Employee | null>;
   listProfiles(scope?: Scope): Promise<Employee[]>;
   deactivateEmployee(actorId: string, id: string): Promise<Employee | null>;
+}
+
+/** Stops or restores one employee's QR (FR-1.4). Every change is audited (FR-4.7). */
+export interface QrRevocation {
+  revokeQr(actorId: string, id: string): Promise<Employee | null>;
+  /** Tokens are short-lived, so reissuing mints nothing: it lets the portal get tokens again. Throws QrNotIssuableError. */
+  reissueQr(actorId: string, id: string): Promise<Employee | null>;
 }
 
 /** Ed25519 keys as base64 DER (see .env.example). previous* empty when there was no rotation. */
@@ -108,7 +116,13 @@ export interface EmployeeDirectory {
 
 /** Employees, QR issue/revoke/reissue, validation (FR-1.1 to FR-1.5). */
 export class EmployeeQrService
-  implements QrValidation, QrIssuer, EdgeSnapshotSource, EmployeeDirectory, EmployeeAdmin
+  implements
+    QrValidation,
+    QrIssuer,
+    QrRevocation,
+    EdgeSnapshotSource,
+    EmployeeDirectory,
+    EmployeeAdmin
 {
   private keyring?: QrKeyring;
 
@@ -166,6 +180,33 @@ export class EmployeeQrService
     return employee;
   }
 
+  /** Stops new tokens now; edges deny from their next snapshot, live tokens expire within the TTL. */
+  async revokeQr(actorId: string, id: string): Promise<Employee | null> {
+    return this.setRevoked(actorId, id, true);
+  }
+
+  /** A deactivated employee stays revoked: only FR-1.5's reverse could undo that, and it does not exist. */
+  async reissueQr(actorId: string, id: string): Promise<Employee | null> {
+    const before = await this.repo.find(id);
+    if (before && !before.active) throw new QrNotIssuableError('INACTIVE');
+    return this.setRevoked(actorId, id, false);
+  }
+
+  private async setRevoked(actorId: string, id: string, revoked: boolean) {
+    const employee = await this.repo.setQrRevoked(id, revoked);
+    // Null: unknown, already in that state, or a concurrent request got there first, and it audits.
+    if (!employee) return this.repo.find(id);
+    await this.audit.append({
+      actorId,
+      action: revoked ? 'QR_REVOKE' : 'QR_REISSUE',
+      target: `employee:${id}`,
+      at: new Date(),
+      before: { qrRevoked: !revoked },
+      after: { qrRevoked: revoked },
+    });
+    return employee;
+  }
+
   /**
    * Server-side check (FR-2.2), e.g. for the kiosk route until it moves to the edge (#29).
    * A repository error rejects (fail closed): the caller maps it to 5xx and the gate never opens.
@@ -193,8 +234,14 @@ export class EmployeeQrService
     return signQrToken({ sub: employee.id, exp, jti: randomUUID() }, kid, signingKey);
   }
 
+  /**
+   * The whole company, not one factory, and denied employees too: missing means UNKNOWN to the edge.
+   * generatedAt is taken before the read, so the edge can only think its deny states are older than they are.
+   */
   async snapshot(): Promise<EdgeSnapshot> {
-    return todo();
+    const generatedAt = this.now().toISOString();
+    const publicKeys = this.ring.edgePublicKeys();
+    return { generatedAt, publicKeys, employees: (await this.repo.list()).map(admission) };
   }
 
   async find(id: string): Promise<EmployeeSummary | null> {
