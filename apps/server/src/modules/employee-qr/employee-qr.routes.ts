@@ -1,6 +1,5 @@
-import { Router, type Request, type Response } from 'express';
+import { Router, type Request, type RequestHandler, type Response } from 'express';
 import { QR_TOKEN_TTL_S } from '../../shared/contracts/qr-token.js';
-import { notImplemented } from '../../shared/errors.js';
 import {
   canSeeEmployee,
   inScope,
@@ -55,6 +54,27 @@ const idOf = (req: Request) => req.params.id as string;
 
 /** The signed-in user; requirePermission has already rejected requests without one. */
 const userOf = (res: Response) => res.locals.user as UserRef;
+
+/** Answers with the signed-in employee's QR, or the reason there is none, which the portal shows. */
+const ownQr =
+  (issue: (employeeId: string) => Promise<object>): RequestHandler =>
+  async (_req, res) => {
+    const { employeeId } = userOf(res);
+    if (!employeeId) {
+      return void res
+        .status(403)
+        .json({ error: 'No employee record linked to this account', reason: 'NO_EMPLOYEE' });
+    }
+    try {
+      res.set('Cache-Control', 'no-store').json(await issue(employeeId));
+    } catch (e) {
+      if (e instanceof QrNotConfiguredError) {
+        return void res.status(503).json({ error: 'QR signing not configured' });
+      }
+      if (!(e instanceof QrNotIssuableError)) throw e;
+      res.status(403).json({ error: e.message, reason: e.reason });
+    }
+  };
 
 export const employeeQrRoutes = (eqr: EmployeeQrService) =>
   Router()
@@ -129,24 +149,18 @@ export const employeeQrRoutes = (eqr: EmployeeQrService) =>
       res.json(employee);
     })
     // The signed-in employee's own token (FR-1.2, ADR-10). The portal asks again before it expires.
-    // Every role views its own QR (self:read). Identity comes from the verified session (#43), never a request field.
-    .post('/qr/token', requirePermission('self:read'), async (_req, res) => {
-      const { employeeId } = userOf(res);
-      if (!employeeId) {
-        return void res.status(403).json({ error: 'No employee record linked to this account' });
-      }
-      try {
-        const token = await eqr.issueToken(employeeId);
-        res.set('Cache-Control', 'no-store').json({ token, ttlSeconds: QR_TOKEN_TTL_S });
-      } catch (e) {
-        if (e instanceof QrNotConfiguredError) {
-          return void res.status(503).json({ error: 'QR signing not configured' });
-        }
-        if (!(e instanceof QrNotIssuableError)) throw e;
-        res.status(403).json({ error: e.message, reason: e.reason });
-      }
-    })
-    .get('/me/qr', notImplemented)
+    // Every role views its own QR (self:read). Identity comes from the verified session, never a request field.
+    .post(
+      '/qr/token',
+      requirePermission('self:read'),
+      ownQr(async (id) => ({ token: await eqr.issueToken(id), ttlSeconds: QR_TOKEN_TTL_S })),
+    )
+    // The portal's QR page (FR-1.3). A GET: issuing is stateless, it stores nothing.
+    .get(
+      '/me/qr',
+      requirePermission('self:read'),
+      ownQr((id) => eqr.liveQr(id)),
+    )
     .post('/employees/:id/qr/revoke', requirePermission('qr:revoke'), async (req, res) => {
       const current = await eqr.getProfile(idOf(req));
       if (!current || !canSeeEmployee(userOf(res), current)) {

@@ -15,6 +15,7 @@ export type {
   EmployeeDirectory,
   EmployeeStore,
   EmployeeSummary,
+  LiveQr,
   NewEmployee,
   QrIssuer,
   QrKeyConfig,
