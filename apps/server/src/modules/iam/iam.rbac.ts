@@ -18,7 +18,12 @@ export type Permission =
   | 'gate:emergency'
   | 'gate:manage'
   | 'user:manage'
-  | 'audit:read';
+  | 'audit:read'
+  | 'notice:publish'
+  | 'org:read'
+  | 'org:manage'
+  | 'config:read'
+  | 'config:manage';
 
 /**
  * Role-permission matrix (FR-5.3, report Illustration 7). Roles not listed have nothing: deny by default.
@@ -35,6 +40,7 @@ export const PERMISSIONS: Record<Role, readonly Permission[]> = {
     'attendance:request-correction',
     'report:read',
     'dashboard:read',
+    'org:read',
   ],
   HR: [
     'self:read',
@@ -46,6 +52,10 @@ export const PERMISSIONS: Record<Role, readonly Permission[]> = {
     'export:hr',
     'report:read',
     'dashboard:read',
+    // HR owns the employee-facing data-protection notice (NFR-20); ADM operates it.
+    'notice:publish',
+    'org:read',
+    'org:manage',
   ],
   GRD: ['self:read', 'dashboard:read', 'gate:monitor', 'gate:override', 'gate:emergency'],
   ADM: [
@@ -57,6 +67,11 @@ export const PERMISSIONS: Record<Role, readonly Permission[]> = {
     'gate:manage',
     'user:manage',
     'audit:read',
+    'notice:publish',
+    'org:read',
+    'org:manage',
+    'config:read',
+    'config:manage',
   ],
   EXE: ['self:read', 'report:read', 'dashboard:read'],
 };

@@ -7,6 +7,7 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node --env-file-if-exists=../../.env dist/main.js",
     "user:create": "tsx --env-file-if-exists=../../.env src/scripts/create-user.ts",
+    "notice:publish": "tsx --env-file-if-exists=../../.env src/scripts/publish-notice.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "postinstall": "prisma generate"
