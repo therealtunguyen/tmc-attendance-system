@@ -18,7 +18,7 @@ export interface EdgeEvent {
   /** Made by the edge (UUID). The server inserts by eventId, so a repeated push is ignored (FR-3.2). */
   eventId: string;
   gateId: string;
-  /** Null when the token could not be read or did not verify. */
+  /** Null when the token did not verify (bad signature, or expired): only a verified sub is recorded. */
   employeeId: string | null;
   method: 'QR' | 'MANUAL';
   /** PENDING if the edge crashed between commit and TCS call. */

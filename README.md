@@ -55,6 +55,14 @@ apps/web/               React + Vite single app
   src/pages/staff/      HR, supervisors, guards, admins, executives
 ```
 
+## Deployment notes
+
+The server assumes a single instance for now. These in-process caches would go stale across instances:
+
+- the org-unit cache (invalidated only on local writes)
+- the privacy-notice cache (60 s TTL), and any other in-process cache
+- the per-IP login rate limiter (counts are per instance)
+
 ## Team rules
 
 - `main` is protected. Work on a branch: `feat/<short-name>` or `fix/<short-name>`.

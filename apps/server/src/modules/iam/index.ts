@@ -11,8 +11,8 @@ export {
   requirePermission,
 } from './iam.rbac.js';
 export type { Permission } from './iam.rbac.js';
-export { authenticate, iamRoutes } from './iam.routes.js';
-export { IamService } from './iam.service.js';
+export { authenticate, iamRoutes, requireNoticeAck } from './iam.routes.js';
+export { IamService, NoticeError } from './iam.service.js';
 export type {
   AuditEntry,
   AuditFilter,
@@ -21,9 +21,12 @@ export type {
   AuditStore,
   Authenticator,
   Authorizer,
+  Notice,
+  NoticeStore,
   ChainedEntry,
   ChainVerdict,
   Role,
+  ScopeResolver,
   UserRecord,
   UserRef,
   UserStore,

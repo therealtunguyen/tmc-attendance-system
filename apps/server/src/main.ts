@@ -15,7 +15,13 @@ import {
   QrLinkMail,
 } from './modules/employee-qr/index.js';
 import { GateRepo, GateService, gateRoutes } from './modules/gate/index.js';
-import { authenticate, IamRepo, IamService, iamRoutes } from './modules/iam/index.js';
+import {
+  authenticate,
+  IamRepo,
+  IamService,
+  iamRoutes,
+  requireNoticeAck,
+} from './modules/iam/index.js';
 import { ReportingRepo, ReportingService, reportingRoutes } from './modules/reporting/index.js';
 import { config } from './shared/config.js';
 import { createPrisma } from './shared/prisma.js';
@@ -29,7 +35,7 @@ const mailer =
   config.mailMode === 'smtp' ? new SmtpMailer(config.smtpUrl, config.mailFrom) : new MockMailer();
 
 const iam = new IamService(new IamRepo(db));
-const admin = new AdminService(new AdminRepo(db));
+const admin = new AdminService(new AdminRepo(db), iam);
 const eqr = new EmployeeQrService(
   new EmployeeQrRepo(db),
   iam,
@@ -48,12 +54,12 @@ const app = createApp(
       mfa: { max: config.authRateLimitPerMin },
     }),
     adminRoutes(admin),
-    employeeQrRoutes(eqr),
+    employeeQrRoutes(eqr, admin),
     attendanceRoutes(attendance),
     reportingRoutes(reporting),
     gateRoutes(gate),
   ],
-  { before: [authenticate(iam)] },
+  { before: [authenticate(iam, admin), requireNoticeAck(iam)] },
 );
 
 app.listen(config.port, () => {
