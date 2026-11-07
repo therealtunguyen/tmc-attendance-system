@@ -19,6 +19,7 @@ export type Permission =
   | 'gate:manage'
   | 'user:manage'
   | 'audit:read'
+  | 'notice:publish'
   | 'org:read'
   | 'org:manage'
   | 'config:read'
@@ -51,6 +52,8 @@ export const PERMISSIONS: Record<Role, readonly Permission[]> = {
     'export:hr',
     'report:read',
     'dashboard:read',
+    // HR owns the employee-facing data-protection notice (NFR-20); ADM operates it.
+    'notice:publish',
     'org:read',
     'org:manage',
   ],
@@ -64,6 +67,7 @@ export const PERMISSIONS: Record<Role, readonly Permission[]> = {
     'gate:manage',
     'user:manage',
     'audit:read',
+    'notice:publish',
     'org:read',
     'org:manage',
     'config:read',

@@ -146,6 +146,23 @@ model Session {
   @@index([userId])
 }
 
+// Owned by the iam module. A published privacy notice (NFR-20). Versions only grow; a published row is never edited.
+model PrivacyNotice {
+  version     Int      @id
+  text        String
+  publishedAt DateTime @default(now())
+  publishedBy String
+}
+
+// Owned by the iam module. A user's acknowledgement of one notice version (NFR-20).
+model NoticeAck {
+  userId  String
+  version Int
+  at      DateTime @default(now())
+
+  @@id([userId, version])
+}
+
 // Owned by the admin module. One org tree (FR-5.5): FACTORY > DEPARTMENT > TEAM. The id is a slug chosen
 // by the client because Employee.factoryId/teamId and User.scopes already hold such IDs. kind is validated in
 // code. Never deleted: employees reference these IDs.

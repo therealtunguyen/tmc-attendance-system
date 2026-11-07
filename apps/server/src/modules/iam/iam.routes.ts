@@ -1,13 +1,23 @@
 import { Router, type Request, type RequestHandler } from 'express';
 import { createRateLimiter, type RateLimitOptions } from './iam.ratelimit.js';
 import { requirePermission } from './iam.rbac.js';
-import type {
-  AuditFilter,
-  AuditReader,
-  Authenticator,
-  ScopeResolver,
-  UserRef,
+import {
+  NoticeError,
+  type AuditFilter,
+  type AuditReader,
+  type Authenticator,
+  type Notice,
+  type ScopeResolver,
+  type UserRef,
 } from './iam.service.js';
+
+/** What the routes and the guard need from the service. */
+export interface NoticeApi {
+  currentNotice(): Promise<Notice | null>;
+  publishNotice(actorId: string, text: string): Promise<Notice>;
+  acknowledgeNotice(userId: string, version: number): Promise<void>;
+  noticePending(userId: string): Promise<number | null>;
+}
 
 /** The bearer token of the request, or undefined when the header is missing or malformed. */
 const bearer = (req: Request): string | undefined => {
@@ -30,6 +40,39 @@ export const authenticate =
       if (user) res.locals.user = resolver ? await resolver.expandScopes(user) : user;
     }
     next();
+  };
+
+/** Reachable before the notice is acknowledged; paths are relative to the /api mount (NFR-20). */
+const NOTICE_EXEMPT = new Set([
+  '/auth/login',
+  '/auth/mfa',
+  '/auth/logout',
+  '/auth/me',
+  '/privacy-notice',
+  '/privacy-notice/ack',
+  // Gate access and attendance are needed to perform the labour contract (Decree 13/2023 Art. 17):
+  // the QR token and the live QR page the email link opens.
+  // When gate monitor/override/emergency routes land, exempt them by permission rather than by
+  // path, so that an unacknowledged notice never blocks an emergency action.
+  '/qr/token',
+  '/me/qr',
+]);
+
+/**
+ * Blocks a signed-in user until they acknowledge the current privacy notice (NFR-20). Mount after
+ * authenticate, which runs under the same /api mount, so req.path has no /api prefix. Requests
+ * without a user (kiosks, edge devices) pass; routes decide 401 themselves.
+ */
+export const requireNoticeAck =
+  (notices: Pick<NoticeApi, 'noticePending'>): RequestHandler =>
+  async (req, res, next) => {
+    const user = res.locals.user as UserRef | undefined;
+    if (!user || NOTICE_EXEMPT.has(req.path.replace(/(?<=.)\/$/, ''))) return void next();
+    const version = await notices.noticePending(user.id);
+    if (version === null) return void next();
+    res
+      .status(403)
+      .json({ error: 'Privacy notice must be acknowledged', code: 'NOTICE_REQUIRED', version });
   };
 
 const text = ['actorId', 'action', 'target'] as const;
@@ -70,7 +113,7 @@ const passThrough: RequestHandler = (_req, _res, next) => next();
 // Read-only on purpose: no route can change or delete an entry (FR-4.10).
 /** `limits.login` / `limits.mfa` override the default 10 requests per minute per IP; false disables. */
 export const iamRoutes = (
-  iam: AuditReader & Authenticator,
+  iam: AuditReader & Authenticator & NoticeApi,
   limits: { login?: RateLimitOptions | false; mfa?: RateLimitOptions | false } = {},
 ) => {
   const limiter = (options: RateLimitOptions | false | undefined) =>
@@ -110,8 +153,42 @@ export const iamRoutes = (
       if (token) await iam.logout(token);
       res.status(204).end();
     })
-    .get('/auth/me', requirePermission('self:read'), (_req, res) => {
-      res.json(res.locals.user as UserRef);
+    .get('/auth/me', requirePermission('self:read'), async (_req, res) => {
+      const user = res.locals.user as UserRef;
+      res.json({ ...user, noticePending: await iam.noticePending(user.id) });
+    })
+    .get('/privacy-notice', requirePermission('self:read'), async (_req, res) => {
+      const notice = await iam.currentNotice();
+      if (!notice) return void res.status(404).json({ error: 'No privacy notice published' });
+      res.json(notice);
+    })
+    .post('/privacy-notice/ack', requirePermission('self:read'), async (req, res) => {
+      const { version } = (req.body ?? {}) as Record<string, unknown>;
+      if (typeof version !== 'number' || !Number.isInteger(version)) {
+        return void res.status(400).json({ error: 'version must be an integer' });
+      }
+      try {
+        await iam.acknowledgeNotice((res.locals.user as UserRef).id, version);
+      } catch (err) {
+        if (!(err instanceof NoticeError)) throw err;
+        if (err.code === 'NO_NOTICE') return void res.status(404).json({ error: err.message });
+        return void res
+          .status(409)
+          .json({ error: err.message, currentVersion: err.currentVersion });
+      }
+      res.status(204).end();
+    })
+    .put('/privacy-notice', requirePermission('notice:publish'), async (req, res) => {
+      const { text } = (req.body ?? {}) as Record<string, unknown>;
+      if (typeof text !== 'string') return void res.status(400).json({ error: 'text is required' });
+      try {
+        res.status(201).json(await iam.publishNotice((res.locals.user as UserRef).id, text));
+      } catch (err) {
+        if (err instanceof NoticeError && err.code === 'INVALID_TEXT') {
+          return void res.status(400).json({ error: err.message });
+        }
+        throw err;
+      }
     })
     .get('/audit', requirePermission('audit:read'), async (req, res) => {
       const filter = parseFilter(req);
