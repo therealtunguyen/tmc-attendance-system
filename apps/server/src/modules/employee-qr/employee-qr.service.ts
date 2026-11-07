@@ -77,6 +77,11 @@ export interface QrRevocation {
   reissueQr(actorId: string, id: string): Promise<Employee | null>;
 }
 
+/** Tells an employee where their QR is (FR-1.3). */
+export interface QrLinkSender {
+  sendQrLink(employee: Pick<Employee, 'email' | 'firstName'>): Promise<void>;
+}
+
 /** Ed25519 keys as base64 DER (see .env.example). previous* empty when there was no rotation. */
 export interface QrKeyConfig {
   kid: string;
@@ -131,6 +136,7 @@ export class EmployeeQrService
     private audit: AuditLog,
     private keys: QrKeyConfig,
     private now: () => Date = () => new Date(),
+    private links: QrLinkSender = { sendQrLink: async () => {} },
   ) {}
 
   /** Built on first use, so the server still starts (and serves everything else) without QR keys. */
@@ -145,6 +151,7 @@ export class EmployeeQrService
   async createEmployee(actorId: string, data: NewEmployee): Promise<Employee> {
     const employee = await this.repo.create(data);
     await this.record(actorId, 'EMPLOYEE_CREATE', employee.id);
+    await this.sendLink(employee);
     return employee;
   }
 
@@ -204,7 +211,21 @@ export class EmployeeQrService
       before: { qrRevoked: !revoked },
       after: { qrRevoked: revoked },
     });
+    if (!revoked) await this.sendLink(employee);
     return employee;
+  }
+
+  /** Best effort: the employee and the audit entry are already stored, and the page works without the email. */
+  private async sendLink(employee: Employee) {
+    try {
+      await this.links.sendQrLink(employee);
+    } catch (e) {
+      // The ID and error code only: a mail error can quote the address (NFR-4).
+      console.error(
+        `QR link email failed for employee ${employee.id}:`,
+        (e as { code?: string }).code,
+      );
+    }
   }
 
   /**
