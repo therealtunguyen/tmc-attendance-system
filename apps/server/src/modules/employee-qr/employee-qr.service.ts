@@ -58,6 +58,8 @@ export interface EmployeeStore {
   list(scope?: Scope): Promise<Employee[]>;
   /** Sets active = false and qrRevoked = true in one conditional write (FR-1.5). Null when there is nothing to change (unknown, or already deactivated and revoked). */
   deactivate(id: string): Promise<Employee | null>;
+  /** One conditional write (FR-1.4). Never clears it on an inactive employee (FR-1.5). Null when the row did not change. */
+  setQrRevoked(id: string, revoked: boolean): Promise<Employee | null>;
 }
 
 /** HR maintains employees (FR-1.1, FR-1.5). Every change is audited (FR-4.7). */
@@ -67,6 +69,13 @@ export interface EmployeeAdmin {
   getProfile(id: string): Promise<Employee | null>;
   listProfiles(scope?: Scope): Promise<Employee[]>;
   deactivateEmployee(actorId: string, id: string): Promise<Employee | null>;
+}
+
+/** Stops or restores one employee's QR (FR-1.4). Every change is audited (FR-4.7). */
+export interface QrRevocation {
+  revokeQr(actorId: string, id: string): Promise<Employee | null>;
+  /** Tokens are short-lived, so reissuing mints nothing: it lets the portal get tokens again. Throws QrNotIssuableError. */
+  reissueQr(actorId: string, id: string): Promise<Employee | null>;
 }
 
 /** Ed25519 keys as base64 DER (see .env.example). previous* empty when there was no rotation. */
@@ -108,7 +117,13 @@ export interface EmployeeDirectory {
 
 /** Employees, QR issue/revoke/reissue, validation (FR-1.1 to FR-1.5). */
 export class EmployeeQrService
-  implements QrValidation, QrIssuer, EdgeSnapshotSource, EmployeeDirectory, EmployeeAdmin
+  implements
+    QrValidation,
+    QrIssuer,
+    QrRevocation,
+    EdgeSnapshotSource,
+    EmployeeDirectory,
+    EmployeeAdmin
 {
   private keyring?: QrKeyring;
 
@@ -163,6 +178,33 @@ export class EmployeeQrService
     if (!employee) return this.repo.find(id);
     // TODO(#45): write the change and its audit entry in one transaction
     await this.record(actorId, 'EMPLOYEE_DEACTIVATE', id);
+    return employee;
+  }
+
+  /** Stops new tokens now; edges deny from their next snapshot, live tokens expire within the TTL. */
+  async revokeQr(actorId: string, id: string): Promise<Employee | null> {
+    return this.setRevoked(actorId, id, true);
+  }
+
+  /** A deactivated employee stays revoked: only FR-1.5's reverse could undo that, and it does not exist. */
+  async reissueQr(actorId: string, id: string): Promise<Employee | null> {
+    const before = await this.repo.find(id);
+    if (before && !before.active) throw new QrNotIssuableError('INACTIVE');
+    return this.setRevoked(actorId, id, false);
+  }
+
+  private async setRevoked(actorId: string, id: string, revoked: boolean) {
+    const employee = await this.repo.setQrRevoked(id, revoked);
+    // Null: unknown, already in that state, or a concurrent request got there first, and it audits.
+    if (!employee) return this.repo.find(id);
+    await this.audit.append({
+      actorId,
+      action: revoked ? 'QR_REVOKE' : 'QR_REISSUE',
+      target: `employee:${id}`,
+      at: new Date(),
+      before: { qrRevoked: !revoked },
+      after: { qrRevoked: revoked },
+    });
     return employee;
   }
 

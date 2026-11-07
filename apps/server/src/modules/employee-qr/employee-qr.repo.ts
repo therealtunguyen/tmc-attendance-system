@@ -61,6 +61,14 @@ export class EmployeeQrRepo implements EmployeeStore {
     return count ? this.find(id) : null;
   }
 
+  async setQrRevoked(id: string, revoked: boolean): Promise<Employee | null> {
+    const { count } = await this.db.employee.updateMany({
+      where: revoked ? { id, qrRevoked: false } : { id, qrRevoked: true, active: true },
+      data: { qrRevoked: revoked },
+    });
+    return count ? this.find(id) : null;
+  }
+
   private async write(
     id: string,
     data: EmployeeChanges & { active?: boolean; qrRevoked?: boolean },
