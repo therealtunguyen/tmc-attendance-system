@@ -1,4 +1,4 @@
-import { createPrivateKey, generateKeyPairSync, randomUUID } from 'node:crypto';
+import { createPrivateKey, createPublicKey, generateKeyPairSync, randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -11,6 +11,7 @@ import { employeeQrRoutes } from './employee-qr.routes.js';
 import {
   DuplicateEmployeeCodeError,
   EmployeeQrService,
+  QrNotConfiguredError,
   QrNotIssuableError,
   type Employee,
   type EmployeeChanges,
@@ -515,5 +516,228 @@ describe('EmployeeQrService.validate (FR-2.2)', () => {
     const { id } = await eqr.createEmployee('hr-1', lan);
     const token = await svc(keysK1).issueToken(id);
     expect(await svc(keysK2).validate(token)).toMatchObject({ ok: true, employeeId: id });
+  });
+});
+
+describe('employee routes: who, edge cases, failures (#15)', () => {
+  const signedIn = (user?: { id: string; role: string }) =>
+    createApp([
+      Router().use((_req, res, next) => {
+        if (user) res.locals.user = user;
+        next();
+      }),
+      employeeQrRoutes(eqr),
+    ]);
+
+  it('audits the signed-in user as the actor of every write', async () => {
+    const hr = signedIn({ id: 'hr-7', role: 'HR' });
+    const { body } = await request(hr).post('/api/employees').send(lan);
+    await request(hr).patch(`/api/employees/${body.id}`).send({ lastName: 'Tran' });
+    await request(hr).post(`/api/employees/${body.id}/deactivate`);
+    expect(audit.entries.map((e) => [e.actorId, e.action, e.target])).toEqual([
+      ['hr-7', 'EMPLOYEE_CREATE', `employee:${body.id}`],
+      ['hr-7', 'EMPLOYEE_UPDATE', `employee:${body.id}`],
+      ['hr-7', 'EMPLOYEE_DEACTIVATE', `employee:${body.id}`],
+    ]);
+  });
+
+  it('GET /api/employees without a scope lists everyone', async () => {
+    await eqr.createEmployee('hr-1', lan);
+    await eqr.createEmployee('hr-1', { ...lan, code: 'LA-0001', factoryId: 'long-an' });
+    expect((await request(signedIn()).get('/api/employees')).body).toHaveLength(2);
+  });
+
+  it('accepts teamId null on create and clears it on PATCH', async () => {
+    const created = await request(signedIn())
+      .post('/api/employees')
+      .send({ ...lan, teamId: null });
+    expect(created.body).toMatchObject({ teamId: null });
+    const { id } = await eqr.createEmployee('hr-1', { ...lan, code: 'BD-0002' });
+    const cleared = await request(signedIn()).patch(`/api/employees/${id}`).send({ teamId: null });
+    expect(cleared.body).toMatchObject({ teamId: null });
+  });
+
+  it('rejects a blank or non-string value on PATCH (400) and changes nothing', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    for (const body of [{ firstName: '  ' }, { email: 5 }, { teamId: '' }, { email: 'bad' }]) {
+      expect((await request(signedIn()).patch(`/api/employees/${id}`).send(body)).status).toBe(400);
+    }
+    expect(await eqr.getProfile(id)).toMatchObject({ firstName: 'Lan', email: 'lan@tmc.vn' });
+  });
+
+  it('deactivating twice is a 200 both times', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    for (let i = 0; i < 2; i++) {
+      const res = await request(signedIn()).post(`/api/employees/${id}/deactivate`);
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ active: false, qrRevoked: true });
+    }
+  });
+
+  it('a storage failure is a 500, not a duplicate, and is not audited', async () => {
+    store.create = async () => {
+      throw new Error('db down');
+    };
+    expect((await request(signedIn()).post('/api/employees').send(lan)).status).toBe(500);
+    expect(audit.entries).toEqual([]);
+  });
+});
+
+const k3 = pair();
+/** A second rotation, k2 -> k3: k1 is no longer trusted anywhere. */
+const keysK3: QrKeyConfig = {
+  kid: 'k3',
+  privateKey: k3.privateKey,
+  previousKid: 'k2',
+  previousPublicKey: k2.publicKey,
+};
+
+const claimsOf = (token: string): unknown =>
+  JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+
+describe('QR token lifecycle (#22)', () => {
+  const at = (keys: QrKeyConfig, seconds = 0) =>
+    new EmployeeQrService(store, audit, keys, () => new Date(NOW.getTime() + seconds * 1000));
+
+  describe('expired', () => {
+    it('admits a token up to TTL + 10 s after it was issued, then denies it', async () => {
+      const { id } = await eqr.createEmployee('hr-1', lan);
+      const token = await at(keysK1).issueToken(id);
+      expect(await at(keysK1, 70).validate(token)).toMatchObject({ ok: true });
+      expect(await at(keysK1, 71).validate(token)).toEqual({ ok: false, reason: 'EXPIRED' });
+    });
+
+    it('denies a token whose exp is too far ahead (verifier clock behind)', async () => {
+      const { id } = await eqr.createEmployee('hr-1', lan);
+      const token = await at(keysK1).issueToken(id);
+      expect(await at(keysK1, -10).validate(token)).toMatchObject({ ok: true });
+      expect(await at(keysK1, -11).validate(token)).toEqual({ ok: false, reason: 'EXPIRED' });
+    });
+
+    it('rounds a fractional clock down, so exp is a whole number of seconds', async () => {
+      const { id } = await eqr.createEmployee('hr-1', lan);
+      const clock = () => new Date(NOW.getTime() + 999);
+      const token = await new EmployeeQrService(store, audit, keysK1, clock).issueToken(id);
+      expect(claimsOf(token)).toMatchObject({ exp: nowS + QR_TOKEN_TTL_S });
+    });
+  });
+
+  describe('bad signature', () => {
+    it('denies a token whose sub was changed to another real employee', async () => {
+      const me = await eqr.createEmployee('hr-1', lan);
+      const victim = await eqr.createEmployee('hr-1', { ...lan, code: 'BD-0002' });
+      const [h, c, s] = (await at(keysK1).issueToken(me.id)).split('.');
+      const claims = JSON.parse(Buffer.from(c, 'base64url').toString());
+      const swapped = Buffer.from(JSON.stringify({ ...claims, sub: victim.id })).toString(
+        'base64url',
+      );
+      expect(await at(keysK1).validate(`${h}.${swapped}.${s}`)).toEqual({
+        ok: false,
+        reason: 'INVALID_SIGNATURE',
+      });
+    });
+
+    it.each([undefined, null, 42, '', 'not-a-token'])('denies %j as a token', async (token) => {
+      expect(await at(keysK1).validate(token as never)).toEqual({
+        ok: false,
+        reason: 'INVALID_SIGNATURE',
+      });
+    });
+  });
+
+  describe('old kid', () => {
+    it('admits the previous key but not one rotated out two rotations ago', async () => {
+      const { id } = await eqr.createEmployee('hr-1', lan);
+      const fromK1 = await at(keysK1).issueToken(id);
+      const fromK2 = await at(keysK2).issueToken(id);
+      expect(await at(keysK3).validate(fromK2)).toMatchObject({ ok: true });
+      expect(await at(keysK3).validate(fromK1)).toEqual({ ok: false, reason: 'INVALID_SIGNATURE' });
+    });
+
+    it('denies a kid the verifier has not learned yet', async () => {
+      const { id } = await eqr.createEmployee('hr-1', lan);
+      const fromK2 = await at(keysK2).issueToken(id);
+      expect(await at(keysK1).validate(fromK2)).toEqual({ ok: false, reason: 'INVALID_SIGNATURE' });
+    });
+
+    it('verifies with the SPKI strings the edge gets, not only the server key objects', async () => {
+      const { id } = await eqr.createEmployee('hr-1', lan);
+      const token = await at(keysK2).issueToken(id);
+      const fromSnapshot = Object.fromEntries(
+        new QrKeyring(keysK2)
+          .edgePublicKeys()
+          .map(({ kid, spki }) => [
+            kid,
+            createPublicKey({ key: Buffer.from(spki, 'base64'), format: 'der', type: 'spki' }),
+          ]),
+      );
+      expect(verifyQrToken(token, fromSnapshot, nowS)).toMatchObject({ ok: true, kid: 'k2' });
+    });
+  });
+
+  describe('revoked employee', () => {
+    it('denies a live token right after deactivation through the API', async () => {
+      const { id } = await eqr.createEmployee('hr-1', lan);
+      const token = await at(keysK1).issueToken(id);
+      const off = await request(createApp([employeeQrRoutes(eqr)])).post(
+        `/api/employees/${id}/deactivate`,
+      );
+      expect(off.status).toBe(200);
+      expect(await at(keysK1).validate(token)).toMatchObject({ ok: false, reason: 'INACTIVE' });
+    });
+
+    it('keeps the jti on a revoked deny, so the attempt can be recorded', async () => {
+      const { id } = await eqr.createEmployee('hr-1', lan);
+      const token = await at(keysK1).issueToken(id);
+      store.rows.get(id)!.qrRevoked = true;
+      const { jti } = claimsOf(token) as { jti: string };
+      expect(await at(keysK1).validate(token)).toEqual({ ok: false, reason: 'REVOKED', jti });
+    });
+
+    it('never gives a token to a revoked employee', async () => {
+      const { id } = await eqr.createEmployee('hr-1', lan);
+      store.rows.get(id)!.qrRevoked = true;
+      await expect(at(keysK1).issueToken(id)).rejects.toMatchObject({ reason: 'REVOKED' });
+    });
+  });
+
+  describe('fails closed', () => {
+    it('rejects, never admits, when the employee lookup fails', async () => {
+      const { id } = await eqr.createEmployee('hr-1', lan);
+      const token = await at(keysK1).issueToken(id);
+      store.find = async () => {
+        throw new Error('db down');
+      };
+      await expect(at(keysK1).validate(token)).rejects.toThrow('db down');
+      await expect(at(keysK1).issueToken(id)).rejects.toThrow('db down');
+    });
+
+    it.each([
+      ['missing', { ...keysK1, privateKey: '' }],
+      ['garbage', { ...keysK1, privateKey: 'bm90LWEta2V5' }],
+    ])('reports %s keys as QrNotConfiguredError', async (_name, keys) => {
+      const { id } = await eqr.createEmployee('hr-1', lan);
+      await expect(at(keys).validate('x.y.z')).rejects.toBeInstanceOf(QrNotConfiguredError);
+      await expect(at(keys).issueToken(id)).rejects.toBeInstanceOf(QrNotConfiguredError);
+    });
+
+    it('POST /api/qr/token is a 500, not a 403, when storage fails', async () => {
+      const withUser = Router().use((_req, res, next) => {
+        res.locals.user = { id: 'e-1', role: 'EMP' };
+        next();
+      });
+      store.find = async () => {
+        throw new Error('db down');
+      };
+      const app = createApp([withUser, employeeQrRoutes(at(keysK1))]);
+      expect((await request(app).post('/api/qr/token')).status).toBe(500);
+    });
+  });
+
+  it('puts only sub, exp and jti in the token: no personal data (NFR-4)', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const token = await at(keysK1).issueToken(id);
+    expect(Object.keys(claimsOf(token) as object).sort()).toEqual(['exp', 'jti', 'sub']);
+    expect(Buffer.from(token.split('.')[1], 'base64url').toString()).not.toContain('Lan');
   });
 });
