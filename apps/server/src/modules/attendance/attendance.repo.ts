@@ -14,6 +14,12 @@ export class AttendanceRepo implements AttendanceStore {
     return count === 1;
   }
 
+  async insertMany(events: StoredEvent[]): Promise<void> {
+    if (events.length === 0) return;
+    // One INSERT ... ON CONFLICT DO NOTHING: all new rows land together, duplicates are skipped.
+    await this.db.attendanceEvent.createMany({ data: events, skipDuplicates: true });
+  }
+
   async decide(eventId: string, outcome: ScanOutcome): Promise<boolean> {
     // Conditional, so a decided outcome is never flipped by a late or concurrent call.
     const { count } = await this.db.attendanceEvent.updateMany({
