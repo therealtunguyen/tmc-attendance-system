@@ -43,16 +43,18 @@ export class IamRepo implements AuditStore {
         select: { hash: true },
       });
       const prevHash = last?.hash ?? GENESIS_HASH;
+      // The time comes from the store, so callers cannot backdate.
+      const at = new Date();
       await tx.auditEntry.create({
         data: {
           actorId: entry.actorId,
           action: entry.action,
           target: entry.target,
-          at: entry.at,
+          at,
           before: json(entry.before),
           after: json(entry.after),
           prevHash,
-          hash: chainHash(prevHash, entry),
+          hash: chainHash(prevHash, { ...entry, at }),
         },
       });
     });

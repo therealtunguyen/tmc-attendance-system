@@ -21,6 +21,7 @@ export interface AuditEntry {
   actorId: string;
   action: string;
   target: string;
+  /** Ignored by stores: stores replace it with their own clock to prevent backdating. */
   at: Date;
   /** Values before and after a data change (FR-4.9). Omit for actions that change nothing. */
   before?: unknown;
