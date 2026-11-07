@@ -83,6 +83,17 @@ describe('SmtpMailer', () => {
     await expect(new SmtpMailer(url, 'no-reply@tmc.vn').send(mail)).rejects.toThrow();
   });
 
+  it.each(['', 'not a url', 'http://mail.tmc.vn', 'smtp://'])(
+    'refuses SMTP_URL %j at startup, naming the variable',
+    (bad) => {
+      expect(() => new SmtpMailer(bad, 'no-reply@tmc.vn')).toThrow('SMTP_URL must look like');
+    },
+  );
+
+  it.each(['smtp://mail.tmc.vn:587', 'smtps://u:p%40ss@mail.tmc.vn:465'])('accepts %s', (good) => {
+    expect(() => new SmtpMailer(good, 'no-reply@tmc.vn')).not.toThrow();
+  });
+
   it('rejects when the server is unreachable', async () => {
     const mailer = new SmtpMailer('smtp://localhost:1', 'no-reply@tmc.vn');
     await expect(mailer.send(mail)).rejects.toThrow();

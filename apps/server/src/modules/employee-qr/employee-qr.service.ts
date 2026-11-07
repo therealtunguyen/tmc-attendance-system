@@ -151,7 +151,7 @@ export class EmployeeQrService
   async createEmployee(actorId: string, data: NewEmployee): Promise<Employee> {
     const employee = await this.repo.create(data);
     await this.record(actorId, 'EMPLOYEE_CREATE', employee.id);
-    await this.sendLink(employee);
+    this.sendLink(employee);
     return employee;
   }
 
@@ -211,20 +211,25 @@ export class EmployeeQrService
       before: { qrRevoked: !revoked },
       after: { qrRevoked: revoked },
     });
-    if (!revoked) await this.sendLink(employee);
+    if (!revoked) this.sendLink(employee);
     return employee;
   }
 
   /** Best effort: the employee and the audit entry are already stored, and the page works without the email. */
-  private async sendLink(employee: Employee) {
+  /**
+   * Not awaited: the employee and the audit entry are already stored, and a stalled mail server
+   * must not hold the request open (HR would retry into a 409). Every failure is caught and logged.
+   */
+  private sendLink(employee: Employee): void {
+    // Name and code only: a mail error message can quote the address (NFR-4).
+    const failed = (e: unknown) => {
+      const { name, code } = (e ?? {}) as { name?: string; code?: string };
+      console.error(`QR link email failed for employee ${employee.id}:`, name, code);
+    };
     try {
-      await this.links.sendQrLink(employee);
+      this.links.sendQrLink(employee).catch(failed);
     } catch (e) {
-      // The ID and error code only: a mail error can quote the address (NFR-4).
-      console.error(
-        `QR link email failed for employee ${employee.id}:`,
-        (e as { code?: string }).code,
-      );
+      failed(e);
     }
   }
 

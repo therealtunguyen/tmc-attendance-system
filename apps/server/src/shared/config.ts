@@ -2,7 +2,13 @@ type Mode = 'mock' | 'http';
 
 const mode = (value: string | undefined): Mode => (value === 'http' ? 'http' : 'mock');
 
-const mailMode = (value: string | undefined) => (value === 'smtp' ? 'smtp' : 'mock');
+/** Unset means mock. Anything else but mock or smtp stops the server: a typo must not silently mock mail. */
+export const parseMailMode = (value: string | undefined): 'mock' | 'smtp' => {
+  const mode = (value ?? '').trim().toLowerCase();
+  if (mode === '' || mode === 'mock') return 'mock';
+  if (mode === 'smtp') return 'smtp';
+  throw new Error(`MAIL_MODE must be mock or smtp, not "${value}"`);
+};
 
 export const config = {
   port: Number(process.env.PORT ?? 3000),
@@ -11,7 +17,7 @@ export const config = {
   tcsBaseUrl: process.env.TCS_BASE_URL ?? '',
   hrsMode: mode(process.env.HRS_MODE),
   hrsBaseUrl: process.env.HRS_BASE_URL ?? '',
-  mailMode: mailMode(process.env.MAIL_MODE),
+  mailMode: parseMailMode(process.env.MAIL_MODE),
   smtpUrl: process.env.SMTP_URL ?? '',
   mailFrom: process.env.MAIL_FROM ?? 'TMC Attendance <no-reply@tmc.local>',
   /** Where employees open the portal; emails link to it (FR-1.3). */

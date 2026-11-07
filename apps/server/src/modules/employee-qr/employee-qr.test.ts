@@ -473,9 +473,50 @@ describe('EmployeeQrService: QR link email (FR-1.3)', () => {
     expect(audit.entries.map((e) => e.action)).toEqual(['EMPLOYEE_CREATE']);
     await svc.revokeQr('hr-1', employee.id);
     expect(await svc.reissueQr('hr-1', employee.id)).toMatchObject({ qrRevoked: false });
-    expect(log).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(log).toHaveBeenCalledTimes(2));
     expect(JSON.stringify(log.mock.calls)).toContain(employee.id);
     expect(JSON.stringify(log.mock.calls)).not.toContain(lan.email);
+  });
+
+  it('does not wait for the mail server: a stalled one cannot hold the request', async () => {
+    const stalled = { sendQrLink: vi.fn(() => new Promise<void>(() => {})) };
+    const svc = new EmployeeQrService(store, audit, keys, () => new Date(), stalled);
+    const employee = await svc.createEmployee('hr-1', lan);
+    await svc.revokeQr('hr-1', employee.id);
+    expect(await svc.reissueQr('hr-1', employee.id)).toMatchObject({ qrRevoked: false });
+    expect(stalled.sendQrLink).toHaveBeenCalledTimes(2);
+  });
+
+  it('POST /api/employees answers at once with a stalled mail server', async () => {
+    const stalled = { sendQrLink: () => new Promise<void>(() => {}) };
+    const svc = new EmployeeQrService(store, audit, keys, () => new Date(), stalled);
+    const app = createApp([signedIn({ id: 'hr-9', role: 'HR' }), employeeQrRoutes(svc)]);
+    expect((await request(app).post('/api/employees').send(lan)).status).toBe(201);
+  });
+
+  it('logs the error name when there is no code, e.g. a timeout', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const timeout = { sendQrLink: async () => Promise.reject(new TypeError('socket hang up')) };
+    const svc = new EmployeeQrService(store, audit, keys, () => new Date(), timeout);
+    const { id } = await svc.createEmployee('hr-1', lan);
+    await vi.waitFor(() => expect(log).toHaveBeenCalledOnce());
+    expect(log.mock.calls[0]).toEqual([
+      `QR link email failed for employee ${id}:`,
+      'TypeError',
+      undefined,
+    ]);
+  });
+
+  it('catches a sender that throws before returning a promise', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const broken = {
+      sendQrLink: (): Promise<void> => {
+        throw new Error('bad config');
+      },
+    };
+    const svc = new EmployeeQrService(store, audit, keys, () => new Date(), broken);
+    expect(await svc.createEmployee('hr-1', lan)).toMatchObject({ code: lan.code });
+    expect(log).toHaveBeenCalledOnce();
   });
 
   it('POST /api/employees still answers 201 when the email fails', async () => {
