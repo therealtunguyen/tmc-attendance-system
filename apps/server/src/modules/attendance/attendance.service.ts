@@ -1,4 +1,9 @@
-import type { PushEventsRequest, PushEventsResponse } from '../../shared/contracts/edge.js';
+import {
+  DENY_REASONS,
+  type EdgeDenyReason,
+  type PushEventsRequest,
+  type PushEventsResponse,
+} from '../../shared/contracts/edge.js';
 import { todo } from '../../shared/errors.js';
 import type { DateRange, Scope } from '../../shared/types.js';
 import type { EmployeeDirectory } from '../employee-qr/index.js';
@@ -20,11 +25,14 @@ export interface ScanEvent {
    * from setOutcome(), after the gate opened.
    */
   outcome?: 'PENDING' | 'DENIED';
+  /** Why the scan was denied, for the security access log (FR-4.4). Only with outcome DENIED. */
+  denyReason?: EdgeDenyReason;
 }
 
 /** A row in AttendanceEvent. Edge ingest (#32) fills the extra fields; record() leaves the defaults. */
-export interface StoredEvent extends Omit<ScanEvent, 'outcome'> {
+export interface StoredEvent extends Omit<ScanEvent, 'outcome' | 'denyReason'> {
   outcome: ScanOutcome | 'PENDING';
+  denyReason: EdgeDenyReason | null;
   edgeId: string | null;
   jti: string | null;
   stale: boolean;
@@ -119,6 +127,12 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
     if (outcome !== 'PENDING' && outcome !== 'DENIED') {
       throw new TypeError(`record() takes outcome PENDING or DENIED, got ${String(outcome)}`);
     }
+    if (event.denyReason !== undefined) {
+      if (outcome !== 'DENIED') throw new TypeError('denyReason requires outcome DENIED');
+      if (!DENY_REASONS.includes(event.denyReason)) {
+        throw new TypeError(`Unknown denyReason ${String(event.denyReason)}`);
+      }
+    }
     return this.repo.insert({
       eventId,
       employeeId,
@@ -126,6 +140,7 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
       method,
       occurredAt,
       outcome,
+      denyReason: event.denyReason ?? null,
       edgeId: null,
       jti: null,
       stale: false,
@@ -156,6 +171,7 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
         method: e.method,
         occurredAt: new Date(e.occurredAt),
         outcome: e.outcome,
+        denyReason: e.denyReason ?? null,
         edgeId,
         jti: e.jti,
         stale: e.stale,
