@@ -77,6 +77,11 @@ export interface QrRevocation {
   reissueQr(actorId: string, id: string): Promise<Employee | null>;
 }
 
+/** Tells an employee where their QR is (FR-1.3). */
+export interface QrLinkSender {
+  sendQrLink(employee: Pick<Employee, 'email' | 'firstName'>): Promise<void>;
+}
+
 /** Ed25519 keys as base64 DER (see .env.example). previous* empty when there was no rotation. */
 export interface QrKeyConfig {
   kid: string;
@@ -142,6 +147,7 @@ export class EmployeeQrService
     private audit: AuditLog,
     private keys: QrKeyConfig,
     private now: () => Date = () => new Date(),
+    private links: QrLinkSender = { sendQrLink: async () => {} },
   ) {}
 
   /** Built on first use, so the server still starts (and serves everything else) without QR keys. */
@@ -156,6 +162,7 @@ export class EmployeeQrService
   async createEmployee(actorId: string, data: NewEmployee): Promise<Employee> {
     const employee = await this.repo.create(data);
     await this.record(actorId, 'EMPLOYEE_CREATE', employee.id);
+    this.sendLink(employee);
     return employee;
   }
 
@@ -215,7 +222,26 @@ export class EmployeeQrService
       before: { qrRevoked: !revoked },
       after: { qrRevoked: revoked },
     });
+    if (!revoked) this.sendLink(employee);
     return employee;
+  }
+
+  /** Best effort: the employee and the audit entry are already stored, and the page works without the email. */
+  /**
+   * Not awaited: the employee and the audit entry are already stored, and a stalled mail server
+   * must not hold the request open (HR would retry into a 409). Every failure is caught and logged.
+   */
+  private sendLink(employee: Employee): void {
+    // Name and code only: a mail error message can quote the address (NFR-4).
+    const failed = (e: unknown) => {
+      const { name, code } = (e ?? {}) as { name?: string; code?: string };
+      console.error(`QR link email failed for employee ${employee.id}:`, name, code);
+    };
+    try {
+      this.links.sendQrLink(employee).catch(failed);
+    } catch (e) {
+      failed(e);
+    }
   }
 
   /**

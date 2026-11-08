@@ -1,16 +1,18 @@
 import { createPrivateKey, createPublicKey, generateKeyPairSync, randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import request from 'supertest';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../../app.js';
 import type { EdgeSnapshot } from '../../shared/contracts/edge.js';
 import { QR_TOKEN_TTL_S, signQrToken, verifyQrToken } from '../../shared/contracts/qr-token.js';
 import { checkQrToken, type QrCheckResult } from '../../shared/contracts/qr-validation.js';
 import type { Scope } from '../../shared/types.js';
+import { MockMailer } from '../../adapters/mail/mock.js';
 import { InMemoryAdminStore } from '../admin/admin.fakes.js';
 import { AdminService } from '../admin/index.js';
 import type { AuditEntry, AuditLog, UserRef } from '../iam/index.js';
 import { QrKeyring } from './employee-qr.keys.js';
+import { QrLinkMail } from './employee-qr.mail.js';
 import { employeeQrRoutes } from './employee-qr.routes.js';
 import {
   DuplicateEmployeeCodeError,
@@ -405,6 +407,130 @@ const keysK2: QrKeyConfig = {
 
 const NOW = new Date('2026-11-05T07:00:00Z');
 const nowS = NOW.getTime() / 1000;
+
+describe('EmployeeQrService: QR link email (FR-1.3)', () => {
+  const mailing = (mailer = new MockMailer()) => ({
+    mailer,
+    svc: new EmployeeQrService(
+      store,
+      audit,
+      keys,
+      () => new Date(),
+      new QrLinkMail(mailer, 'https://portal.tmc.vn'),
+    ),
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it('emails the link to a new employee', async () => {
+    const { mailer, svc } = mailing();
+    await svc.createEmployee('hr-1', lan);
+    expect(mailer.sent.map((m) => m.to)).toEqual(['lan@tmc.vn']);
+    expect(mailer.sent[0].text).toContain('https://portal.tmc.vn/portal/qr');
+  });
+
+  it('emails the link again on a reissue, and not on a revoke', async () => {
+    const { mailer, svc } = mailing();
+    const { id } = await svc.createEmployee('hr-1', lan);
+    await svc.revokeQr('hr-1', id);
+    expect(mailer.sent).toHaveLength(1);
+    await svc.reissueQr('hr-1', id);
+    expect(mailer.sent).toHaveLength(2);
+  });
+
+  it('sends nothing for a reissue that changed nothing or was refused', async () => {
+    const { mailer, svc } = mailing();
+    const { id } = await svc.createEmployee('hr-1', lan);
+    await svc.reissueQr('hr-1', id);
+    await svc.reissueQr('hr-1', 'nope');
+    await svc.deactivateEmployee('hr-1', id);
+    await expect(svc.reissueQr('hr-1', id)).rejects.toMatchObject({ reason: 'INACTIVE' });
+    expect(mailer.sent).toHaveLength(1);
+  });
+
+  it('sends nothing for a duplicate code', async () => {
+    const { mailer, svc } = mailing();
+    await svc.createEmployee('hr-1', lan);
+    await expect(svc.createEmployee('hr-1', lan)).rejects.toBeInstanceOf(
+      DuplicateEmployeeCodeError,
+    );
+    expect(mailer.sent).toHaveLength(1);
+  });
+
+  it('sends nothing when the audit entry could not be written', async () => {
+    const { mailer, svc } = mailing();
+    audit.append = async () => {
+      throw new Error('audit down');
+    };
+    await expect(svc.createEmployee('hr-1', lan)).rejects.toThrow('audit down');
+    expect(mailer.sent).toEqual([]);
+  });
+
+  it('a failed email does not fail the change, and logs no address (NFR-4)', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { svc } = mailing(new MockMailer(true));
+    const employee = await svc.createEmployee('hr-1', lan);
+    expect(store.rows.get(employee.id)).toBeDefined();
+    expect(audit.entries.map((e) => e.action)).toEqual(['EMPLOYEE_CREATE']);
+    await svc.revokeQr('hr-1', employee.id);
+    expect(await svc.reissueQr('hr-1', employee.id)).toMatchObject({ qrRevoked: false });
+    await vi.waitFor(() => expect(log).toHaveBeenCalledTimes(2));
+    expect(JSON.stringify(log.mock.calls)).toContain(employee.id);
+    expect(JSON.stringify(log.mock.calls)).not.toContain(lan.email);
+  });
+
+  it('does not wait for the mail server: a stalled one cannot hold the request', async () => {
+    const stalled = { sendQrLink: vi.fn(() => new Promise<void>(() => {})) };
+    const svc = new EmployeeQrService(store, audit, keys, () => new Date(), stalled);
+    const employee = await svc.createEmployee('hr-1', lan);
+    await svc.revokeQr('hr-1', employee.id);
+    expect(await svc.reissueQr('hr-1', employee.id)).toMatchObject({ qrRevoked: false });
+    expect(stalled.sendQrLink).toHaveBeenCalledTimes(2);
+  });
+
+  it('POST /api/employees answers at once with a stalled mail server', async () => {
+    const stalled = { sendQrLink: () => new Promise<void>(() => {}) };
+    const svc = new EmployeeQrService(store, audit, keys, () => new Date(), stalled);
+    const app = createApp([signedIn({ id: 'hr-9', role: 'HR' }), employeeQrRoutes(svc)]);
+    expect((await request(app).post('/api/employees').send(lan)).status).toBe(201);
+  });
+
+  it('logs the error name when there is no code, e.g. a timeout', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const timeout = { sendQrLink: async () => Promise.reject(new TypeError('socket hang up')) };
+    const svc = new EmployeeQrService(store, audit, keys, () => new Date(), timeout);
+    const { id } = await svc.createEmployee('hr-1', lan);
+    await vi.waitFor(() => expect(log).toHaveBeenCalledOnce());
+    expect(log.mock.calls[0]).toEqual([
+      `QR link email failed for employee ${id}:`,
+      'TypeError',
+      undefined,
+    ]);
+  });
+
+  it('catches a sender that throws before returning a promise', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const broken = {
+      sendQrLink: (): Promise<void> => {
+        throw new Error('bad config');
+      },
+    };
+    const svc = new EmployeeQrService(store, audit, keys, () => new Date(), broken);
+    expect(await svc.createEmployee('hr-1', lan)).toMatchObject({ code: lan.code });
+    expect(log).toHaveBeenCalledOnce();
+  });
+
+  it('POST /api/employees still answers 201 when the email fails', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { svc } = mailing(new MockMailer(true));
+    const app = createApp([signedIn({ id: 'hr-9', role: 'HR' }), employeeQrRoutes(svc)]);
+    expect((await request(app).post('/api/employees').send(lan)).status).toBe(201);
+  });
+
+  it('works without a sender, for callers that do not mail', async () => {
+    expect(await eqr.createEmployee('hr-1', lan)).toMatchObject({ code: lan.code });
+  });
+});
 
 describe('QrKeyring (ADR-10 key rotation)', () => {
   it('signs with the current key and trusts current + previous', () => {

@@ -1,6 +1,8 @@
 // Composition root: every concrete class is chosen and wired here, by hand.
 import { HrsHttpClient } from './adapters/hrs/http.js';
 import { MockHrs } from './adapters/hrs/mock.js';
+import { MockMailer } from './adapters/mail/mock.js';
+import { SmtpMailer } from './adapters/mail/smtp.js';
 import { TcsHttpClient } from './adapters/tcs/http.js';
 import { MockTurnstile } from './adapters/tcs/mock.js';
 import { createApp } from './app.js';
@@ -10,6 +12,7 @@ import {
   EmployeeQrRepo,
   EmployeeQrService,
   employeeQrRoutes,
+  QrLinkMail,
 } from './modules/employee-qr/index.js';
 import { GateRepo, GateService, gateRoutes } from './modules/gate/index.js';
 import {
@@ -28,10 +31,18 @@ const db = createPrisma(config.databaseUrl);
 const turnstile =
   config.tcsMode === 'http' ? new TcsHttpClient(config.tcsBaseUrl) : new MockTurnstile('open');
 const hrs = config.hrsMode === 'http' ? new HrsHttpClient(config.hrsBaseUrl) : new MockHrs();
+const mailer =
+  config.mailMode === 'smtp' ? new SmtpMailer(config.smtpUrl, config.mailFrom) : new MockMailer();
 
 const iam = new IamService(new IamRepo(db));
 const admin = new AdminService(new AdminRepo(db), iam);
-const eqr = new EmployeeQrService(new EmployeeQrRepo(db), iam, config.qrKeys);
+const eqr = new EmployeeQrService(
+  new EmployeeQrRepo(db),
+  iam,
+  config.qrKeys,
+  () => new Date(),
+  new QrLinkMail(mailer, config.portalUrl),
+);
 const attendance = new AttendanceService(new AttendanceRepo(db), eqr);
 const reporting = new ReportingService(new ReportingRepo(db), attendance, admin, hrs, iam);
 const gate = new GateService(new GateRepo(db), eqr, attendance, turnstile, admin, reporting, iam);
