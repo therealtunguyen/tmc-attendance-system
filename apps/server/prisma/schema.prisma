@@ -54,6 +54,9 @@ model AttendanceEvent {
   // Edge agent that pushed it (ADR-9). Null for events entered on the server (MANUAL fallback).
   edgeId     String?
   method     ScanMethod
+  // FR-2.5: authenticated guard and justification; null for QR and legacy events.
+  guardId    String?
+  reason     String?
   outcome    ScanOutcome @default(PENDING)
   // Token ID; not unique, so one jti used at two edges is stored and flagged (ADR-10).
   jti        String?
