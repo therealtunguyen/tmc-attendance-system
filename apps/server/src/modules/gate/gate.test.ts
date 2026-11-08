@@ -77,7 +77,7 @@ describe('GateService registry (FR-2.1)', () => {
     await expect(gate.updateGate('adm', created.id, { edgeId: 'edge-la' })).rejects.toBeInstanceOf(
       InvalidGateEdgeError,
     );
-    expect(await gate.getGate(created.id)).toEqual(created);
+    expect(await gate.getGate(created.id)).toMatchObject(created);
     expect(audit.entries).toHaveLength(1);
   });
 
@@ -210,8 +210,8 @@ describe('Gate CRUD routes', () => {
       createdAt: expect.any(String),
       updatedAt: expect.any(String),
     });
-    expect((await request(app()).get(`/api/gates/${id}`)).body).toEqual(created.body);
-    expect((await request(app()).get('/api/gates')).body).toEqual([created.body]);
+    expect((await request(app()).get(`/api/gates/${id}`)).body).toMatchObject(created.body);
+    expect((await request(app()).get('/api/gates')).body).toMatchObject([created.body]);
     const updated = await request(app())
       .patch(`/api/gates/${id}`)
       .send({ name: 'Exit', direction: 'OUT' });

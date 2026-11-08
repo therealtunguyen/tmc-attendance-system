@@ -57,6 +57,8 @@ apps/web/               React + Vite single app
 
 Gate registry data and CRUD rules (FR-2.1): [docs/gate-registry.md](docs/gate-registry.md).
 
+Gate online/offline monitoring and ADM alerts (FR-2.6): [docs/gate-heartbeat.md](docs/gate-heartbeat.md).
+
 ## Deployment notes
 
 The server assumes a single instance for now. These in-process caches would go stale across instances:

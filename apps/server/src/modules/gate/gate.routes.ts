@@ -1,5 +1,6 @@
 import { Router, type Request, type RequestHandler, type Response } from 'express';
 import { notImplemented } from '../../shared/errors.js';
+import { parseHeartbeat, UnknownEdgeError } from './gate.heartbeat.js';
 import {
   hasPermission,
   inScope,
@@ -11,6 +12,7 @@ import {
   DuplicateTurnstileError,
   InactiveGateError,
   InvalidGateEdgeError,
+  OverrideError,
   type GateChanges,
   type GateFilters,
   type GateService,
@@ -109,14 +111,16 @@ export const gateRoutes = (gate: GateService) =>
       if (filters.factoryId !== undefined && !inScope(user, filters.factoryId)) {
         return void res.status(403).json({ error: 'Forbidden' });
       }
-      res.json(await gate.listGates(filters, isRestricted(user) ? (user.scopes ?? []) : undefined));
+      res
+        .set('Cache-Control', 'no-store')
+        .json(await gate.listGates(filters, isRestricted(user) ? (user.scopes ?? []) : undefined));
     })
     .get('/gates/:gateId', requireGateRead, async (req, res) => {
       const current = await gate.getGate(idOf(req));
       if (!current || !inScope(userOf(res), current.factoryId)) {
         return void res.status(404).json({ error: 'Gate not found' });
       }
-      res.json(current);
+      res.set('Cache-Control', 'no-store').json(current);
     })
     .post('/gates', requirePermission('gate:manage'), async (req, res) => {
       const data = parseBody(req.body, true);
@@ -161,6 +165,80 @@ export const gateRoutes = (gate: GateService) =>
       if (!deactivated) return void res.status(404).json({ error: 'Gate not found' });
       res.sendStatus(204);
     })
-    .post('/gates/:gateId/override', notImplemented)
+    .post('/gates/:gateId/override', requirePermission('gate:override'), async (req, res) => {
+      const body: unknown = req.body;
+      if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+        return void res.status(400).json({ error: 'body must be a JSON object' });
+      }
+      const input = body as Record<string, unknown>;
+      if (
+        Object.keys(input).some(
+          (key) => !['eventId', 'employeeId', 'reason', 'mode', 'occurredAt'].includes(key),
+        ) ||
+        ['eventId', 'employeeId', 'reason'].some(
+          (key) => typeof input[key] !== 'string' || !input[key].trim(),
+        ) ||
+        !['OPEN', 'BACKFILL'].includes(input.mode as string)
+      ) {
+        return void res
+          .status(400)
+          .json({ error: 'Expected eventId, employeeId, reason and mode OPEN/BACKFILL' });
+      }
+      let occurredAt: Date | undefined;
+      if (input.mode === 'BACKFILL') {
+        if (
+          typeof input.occurredAt !== 'string' ||
+          !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(input.occurredAt)
+        ) {
+          return void res
+            .status(400)
+            .json({ error: 'occurredAt must be an ISO timestamp with timezone' });
+        }
+        occurredAt = new Date(input.occurredAt);
+        const [year, month, day] = input.occurredAt.slice(0, 10).split('-').map(Number) as [
+          number,
+          number,
+          number,
+        ];
+        if (
+          !Number.isFinite(occurredAt.getTime()) ||
+          new Date(Date.UTC(year, month - 1, day)).getUTCDate() !== day
+        ) {
+          return void res.status(400).json({ error: 'Invalid occurredAt' });
+        }
+      } else if (input.occurredAt !== undefined) {
+        return void res.status(400).json({ error: 'OPEN uses the server time' });
+      }
+      const current = await gate.getGate(idOf(req));
+      const user = userOf(res);
+      if (!current || !inScope(user, current.factoryId)) {
+        return void res.status(404).json({ error: 'Gate not found' });
+      }
+      try {
+        res.status(201).json(
+          await gate.override(user.id, current.id, {
+            eventId: (input.eventId as string).trim(),
+            employeeId: (input.employeeId as string).trim(),
+            reason: (input.reason as string).trim(),
+            mode: input.mode as 'OPEN' | 'BACKFILL',
+            occurredAt,
+          }),
+        );
+      } catch (error) {
+        if (!(error instanceof OverrideError)) throw error;
+        res.status(error.status).json({ error: error.message });
+      }
+    })
     // Edge agent (ADR-9). Body: EdgeHeartbeat. Response: 204.
-    .post('/edge/heartbeat', notImplemented);
+    // Edge authentication is shared integration work (#44), like /edge/events and /edge/snapshot.
+    .post('/edge/heartbeat', async (req, res) => {
+      const hb = parseHeartbeat(req.body);
+      if (!hb) return void res.status(400).json({ error: 'Invalid edge heartbeat' });
+      try {
+        await gate.edgeHeartbeat(hb);
+        res.sendStatus(204);
+      } catch (error) {
+        if (!(error instanceof UnknownEdgeError)) throw error;
+        res.status(404).json({ error: error.message });
+      }
+    });

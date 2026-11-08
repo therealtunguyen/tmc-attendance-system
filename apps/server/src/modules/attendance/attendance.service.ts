@@ -11,6 +11,8 @@ export interface ScanEvent {
   employeeId: string | null;
   gateId: string;
   method: 'QR' | 'MANUAL';
+  guardId?: string;
+  reason?: string;
   occurredAt: Date;
   /**
    * Outcome at commit time (ADR-3): PENDING (default) before the TCS call, or DENIED when the
@@ -108,6 +110,11 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
    */
   async record(event: ScanEvent): Promise<boolean> {
     const { eventId, employeeId, gateId, method, occurredAt, outcome = 'PENDING' } = event;
+    if (method === 'MANUAL' && (event.guardId !== undefined || event.reason !== undefined)) {
+      if (!event.guardId?.trim() || !event.reason?.trim()) {
+        throw new TypeError('MANUAL override requires guardId and reason');
+      }
+    }
     // A runtime guard: GRANTED at commit time would count an entry before the gate opened.
     if (outcome !== 'PENDING' && outcome !== 'DENIED') {
       throw new TypeError(`record() takes outcome PENDING or DENIED, got ${String(outcome)}`);
@@ -122,6 +129,7 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
       edgeId: null,
       jti: null,
       stale: false,
+      ...(method === 'MANUAL' ? { guardId: event.guardId, reason: event.reason } : {}),
     });
   }
 

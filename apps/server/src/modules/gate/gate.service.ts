@@ -3,9 +3,16 @@ import type { EdgeHeartbeat } from '../../shared/contracts/edge.js';
 import { todo } from '../../shared/errors.js';
 import type { ConfigReader } from '../admin/index.js';
 import type { AttendanceRecorder } from '../attendance/index.js';
-import type { QrValidation } from '../employee-qr/index.js';
+import type { EmployeeDirectory, QrValidation } from '../employee-qr/index.js';
 import type { AuditLog } from '../iam/index.js';
 import type { Notifier } from '../reporting/index.js';
+import { HEARTBEAT_TIMEOUT_MS } from '../../shared/contracts/edge.js';
+import {
+  connectionStatus,
+  UnknownEdgeError,
+  type EdgeState,
+  type OfflineEdge,
+} from './gate.heartbeat.js';
 
 export type GateDirection = 'IN' | 'OUT';
 
@@ -20,6 +27,34 @@ export interface Gate {
   active: boolean;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface GateView extends Gate {
+  status: 'ONLINE' | 'OFFLINE';
+  lastHeartbeatAt: Date | null;
+}
+
+export interface OverrideRequest {
+  eventId: string;
+  employeeId: string;
+  reason: string;
+  mode: 'OPEN' | 'BACKFILL';
+  occurredAt?: Date;
+}
+
+export class OverrideError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+export interface GateOptions {
+  directory?: EmployeeDirectory;
+  now?: () => Date;
+  heartbeatTimeoutMs?: number;
 }
 
 export type NewGate = Pick<
@@ -70,6 +105,9 @@ export interface GateStore {
   /** Conditional active -> inactive write; null if missing or already inactive. */
   deactivate(id: string): Promise<Gate | null>;
   findEdge(id: string): Promise<GateEdge | null>;
+  heartbeats(edgeIds: string[]): Promise<EdgeState[]>;
+  recordHeartbeat(edgeId: string, receivedAt: Date): Promise<boolean>;
+  offlineEdges(cutoff: Date): Promise<OfflineEdge[]>;
 }
 
 /** JSON-safe config snapshots for audit, without database timestamps. */
@@ -106,6 +144,11 @@ export interface Decision {
 
 /** Gate registry, scan flow, kiosk API, heartbeat, manual override (FR-2.x). */
 export class GateService {
+  private readonly alerted = new Map<string, number>();
+  private readonly now: () => Date;
+  private readonly timeout: number;
+  private readonly directory?: EmployeeDirectory;
+
   constructor(
     private repo: GateStore,
     private qr: QrValidation,
@@ -114,7 +157,12 @@ export class GateService {
     private config: ConfigReader,
     private notifier: Notifier,
     private audit: AuditLog,
-  ) {}
+    options: GateOptions = {},
+  ) {
+    this.directory = options.directory;
+    this.now = options.now ?? (() => new Date());
+    this.timeout = options.heartbeatTimeoutMs ?? HEARTBEAT_TIMEOUT_MS;
+  }
 
   async createGate(actorId: string, data: NewGate): Promise<Gate> {
     await this.requireEdge(data.edgeId, data.factoryId);
@@ -124,12 +172,28 @@ export class GateService {
     return gate;
   }
 
-  listGates(filters: GateFilters = {}, factoryIds?: string[]): Promise<Gate[]> {
-    return this.repo.list(filters, factoryIds);
+  async listGates(filters: GateFilters = {}, factoryIds?: string[]): Promise<GateView[]> {
+    return this.withStatus(await this.repo.list(filters, factoryIds));
   }
 
-  getGate(id: string): Promise<Gate | null> {
-    return this.repo.find(id);
+  async getGate(id: string): Promise<GateView | null> {
+    const gate = await this.repo.find(id);
+    return gate ? (await this.withStatus([gate]))[0]! : null;
+  }
+
+  private async withStatus(gates: Gate[]): Promise<GateView[]> {
+    if (!gates.length) return [];
+    const edges = await this.repo.heartbeats([...new Set(gates.map((gate) => gate.edgeId))]);
+    const times = new Map(edges.map((edge) => [edge.id, edge.lastHeartbeatAt]));
+    const now = this.now();
+    return gates.map((gate) => {
+      const lastHeartbeatAt = times.get(gate.edgeId) ?? null;
+      return {
+        ...gate,
+        lastHeartbeatAt,
+        status: connectionStatus(lastHeartbeatAt, now, this.timeout),
+      };
+    });
   }
 
   async updateGate(actorId: string, id: string, changes: GateChanges): Promise<Gate | null> {
@@ -185,12 +249,75 @@ export class GateService {
     return todo();
   }
 
+  async override(actorId: string, gateId: string, req: OverrideRequest) {
+    const gate = await this.repo.find(gateId);
+    if (!gate) throw new OverrideError(404, 'Gate not found');
+    if (!this.directory) throw new Error('Employee directory is not configured');
+    const employee = await this.directory.find(req.employeeId);
+    if (!employee) throw new OverrideError(404, 'Employee not found');
+    if (req.mode === 'OPEN' && (!gate.active || !employee.active)) {
+      throw new OverrideError(409, 'Gate and employee must be active');
+    }
+    const now = this.now();
+    const occurredAt = req.mode === 'BACKFILL' ? req.occurredAt : now;
+    if (!occurredAt || !Number.isFinite(occurredAt.getTime()) || occurredAt > now) {
+      throw new OverrideError(400, 'A valid past occurredAt is required');
+    }
+    const event = {
+      eventId: req.eventId,
+      employeeId: employee.id,
+      gateId,
+      method: 'MANUAL' as const,
+      guardId: actorId,
+      reason: req.reason,
+      occurredAt,
+    };
+    if (!(await this.recorder.record(event))) {
+      // Never repeat a physical open, including after a crash or a concurrent request.
+      throw new OverrideError(409, 'Event already recorded; do not repeat the override');
+    }
+    // TODO(#45): commit the attendance event and audit together. On failure the event stays
+    // PENDING; do not open or retry automatically. It requires operator reconciliation.
+    await this.audit.append({
+      actorId,
+      action: 'GATE_OVERRIDE',
+      target: `attendance-event:${req.eventId}`,
+      at: now,
+      after: { ...event, occurredAt: occurredAt.toISOString(), mode: req.mode },
+    });
+    const result = req.mode === 'BACKFILL' ? 'OPENED' : await this.turnstile.open(gate.turnstileId);
+    const outcome = result === 'OPENED' ? 'GRANTED' : 'DENIED';
+    await this.recorder.setOutcome(req.eventId, outcome);
+    return { eventId: req.eventId, outcome };
+  }
+
   async heartbeat(_gateId: string): Promise<void> {
     return todo();
   }
 
   /** Marks the edge online; the edge is offline when these stop (ADR-9, FR-2.6). */
-  async edgeHeartbeat(_hb: EdgeHeartbeat): Promise<void> {
-    return todo();
+  async edgeHeartbeat(hb: EdgeHeartbeat): Promise<void> {
+    if (!(await this.repo.recordHeartbeat(hb.edgeId, this.now()))) throw new UnknownEdgeError();
+  }
+
+  async checkOffline(): Promise<void> {
+    const errors: unknown[] = [];
+    for (const edge of await this.repo.offlineEdges(
+      new Date(this.now().getTime() - this.timeout),
+    )) {
+      const heartbeat = edge.lastHeartbeatAt!.getTime();
+      if (this.alerted.get(edge.id) === heartbeat) continue;
+      try {
+        const gates = edge.gates.map((gate) => `${gate.name} (${gate.id})`).join(', ');
+        await this.notifier.alert(
+          'GATE_OFFLINE',
+          `Edge ${edge.id}, factory ${edge.factoryId}: ${gates} offline`,
+        );
+        this.alerted.set(edge.id, heartbeat);
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length) throw new AggregateError(errors, 'Gate offline alert failed');
   }
 }

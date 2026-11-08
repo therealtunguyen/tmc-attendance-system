@@ -1,4 +1,5 @@
 export { GateRepo } from './gate.repo.js';
+export { startGateMonitor } from './gate.heartbeat.js';
 export { gateRoutes } from './gate.routes.js';
 export {
   DuplicateTurnstileError,
@@ -13,7 +14,9 @@ export type {
   GateDirection,
   GateEdge,
   GateFilters,
+  GateOptions,
   GateStore,
+  GateView,
   NewGate,
   ScanRequest,
 } from './gate.service.js';
