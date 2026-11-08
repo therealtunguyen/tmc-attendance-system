@@ -130,6 +130,17 @@ export interface EmployeeDirectory {
   list(scope: Scope): Promise<EmployeeSummary[]>;
 }
 
+/** What a report needs about an employee (FR-4.1): no email or QR state (NFR-4). */
+export type RosterEntry = Pick<
+  Employee,
+  'id' | 'code' | 'firstName' | 'lastName' | 'active' | 'factoryId' | 'teamId'
+>;
+
+export interface EmployeeRoster {
+  /** Employees in one factory or team (everyone when scope is undefined), inactive ones included. */
+  roster(scope?: Scope): Promise<RosterEntry[]>;
+}
+
 /** Employees, QR issue/revoke/reissue, validation (FR-1.1 to FR-1.5). */
 export class EmployeeQrService
   implements
@@ -138,6 +149,7 @@ export class EmployeeQrService
     QrRevocation,
     EdgeSnapshotSource,
     EmployeeDirectory,
+    EmployeeRoster,
     EmployeeAdmin
 {
   private keyring?: QrKeyring;
@@ -304,6 +316,10 @@ export class EmployeeQrService
     return (await this.repo.list(scope)).map(summary);
   }
 
+  async roster(scope?: Scope): Promise<RosterEntry[]> {
+    return (await this.repo.list(scope)).map(rosterEntry);
+  }
+
   private record(actorId: string, action: string, employeeId: string) {
     return this.audit.append({ actorId, action, target: `employee:${employeeId}`, at: new Date() });
   }
@@ -323,3 +339,14 @@ const summary = ({ id, firstName, lastName, active }: Employee): EmployeeSummary
   lastName,
   active,
 });
+
+/** Drops contact and QR fields before Reporting sees the employee. */
+const rosterEntry = ({
+  id,
+  code,
+  firstName,
+  lastName,
+  active,
+  factoryId,
+  teamId,
+}: Employee): RosterEntry => ({ id, code, firstName, lastName, active, factoryId, teamId });
