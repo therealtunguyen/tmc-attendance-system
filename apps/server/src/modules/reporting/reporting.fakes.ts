@@ -5,6 +5,8 @@ import type { DailyRecord } from '../attendance/index.js';
 import type { EmployeeRoster, RosterEntry } from '../employee-qr/index.js';
 import type { AuditEntry, AuditLog } from '../iam/index.js';
 import type { DateRange } from '../../shared/types.js';
+import type { AccessLogEvent, AccessLogQuery, AccessLogSource } from './reporting.access.js';
+import type { GateLookup, GateRef } from './reporting.gates.js';
 import type { EdgeSync, EdgeSyncStatus } from './reporting.edges.js';
 import type { AlertKind, Notifier } from './reporting.notifier.js';
 import { canClaim } from './reporting.runs.js';
@@ -172,5 +174,39 @@ export class RecordingAudit implements AuditLog {
   }
   async search(): Promise<AuditEntry[]> {
     return this.entries;
+  }
+}
+
+/** AccessLogSource fake: applies the query like the database would; remembers every query. */
+export class FakeAccessSource implements AccessLogSource {
+  queries: AccessLogQuery[] = [];
+  constructor(public events: AccessLogEvent[] = []) {}
+  async accessLog(query: AccessLogQuery): Promise<AccessLogEvent[]> {
+    this.queries.push(query);
+    return this.events
+      .filter(
+        (e) =>
+          e.occurredAt >= query.range.from &&
+          e.occurredAt < query.range.to &&
+          (query.gateIds === undefined || query.gateIds.includes(e.gateId)) &&
+          (query.outcome === undefined || e.outcome === query.outcome),
+      )
+      .sort((a, b) => b.occurredAt.getTime() - a.occurredAt.getTime())
+      .slice(0, query.limit);
+  }
+}
+
+export const GATES: GateRef[] = [
+  { id: 'gate-bd-1', name: 'BD main gate', factoryId: 'binh-duong' },
+  { id: 'gate-bd-old', name: 'BD old gate (inactive)', factoryId: 'binh-duong' },
+  { id: 'gate-la-1', name: 'LA main gate', factoryId: 'long-an' },
+];
+
+/** GateLookup fake: filters on factoryId like the real one; remembers each call. */
+export class FakeGateLookup implements GateLookup {
+  calls: (readonly string[] | undefined)[] = [];
+  async gates(factoryIds?: readonly string[]): Promise<GateRef[]> {
+    this.calls.push(factoryIds);
+    return GATES.filter((g) => factoryIds === undefined || factoryIds.includes(g.factoryId));
   }
 }

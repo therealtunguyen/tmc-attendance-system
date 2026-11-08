@@ -79,6 +79,8 @@ const app = createApp(
     adminRoutes(admin),
     employeeQrRoutes(eqr, admin),
     attendanceRoutes(attendance),
+    // TODO(#85): pass accessLog: new AccessLogService(attendance, gate, eqr) once AttendanceQuery.accessLog()
+    // takes an AccessLogQuery (still todo() in the attendance module); until then GET /api/access-log is 501.
     reportingRoutes({ reports, exports }),
     gateRoutes(gate),
   ],

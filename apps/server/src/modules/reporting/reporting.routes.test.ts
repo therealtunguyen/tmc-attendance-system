@@ -3,9 +3,13 @@ import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../app.js';
 import type { UserRef } from '../iam/index.js';
+import { AccessLogService } from './reporting.access.js';
+import type { AccessLogReader } from './reporting.access.js';
 import {
+  FakeAccessSource,
   FakeAttendance,
   FakeEdgeSyncs,
+  FakeGateLookup,
   FakeRoster,
   InMemoryExportRuns,
   RecordingAudit,
@@ -44,8 +48,11 @@ beforeEach(() => {
     { now: () => NOW, sleep: async () => {}, log: () => {} },
   );
 });
-const app = (user?: UserRef) =>
-  createApp([signedIn(user), reportingRoutes({ reports, exports: exportsSvc, now: () => NOW })]);
+const app = (user?: UserRef, accessLog?: AccessLogReader) =>
+  createApp([
+    signedIn(user),
+    reportingRoutes({ reports, exports: exportsSvc, accessLog, now: () => NOW }),
+  ]);
 
 const user = (role: UserRef['role'], scopes?: string[]): UserRef => ({ id: role, role, scopes });
 const hr = user('HR');
@@ -243,5 +250,135 @@ describe('export routes (FR-4.5, FR-4.6)', () => {
     const none = await request(app(hr)).get('/api/exports/2026-09');
     expect(none.status).toBe(404);
     expect(none.body).toEqual({ error: 'No export for this month' });
+  });
+});
+
+describe('GET /api/access-log (FR-4.4)', () => {
+  const URL = '/api/access-log';
+  const RANGE_QS = 'from=2026-11-01T00:00:00%2B07:00&to=2026-11-02T00:00:00%2B07:00';
+  const guard = user('GRD', ['binh-duong']);
+  const setup = () => {
+    const source = new FakeAccessSource([
+      {
+        eventId: 'ev-1',
+        gateId: 'gate-bd-1',
+        employeeId: 'e-cut',
+        method: 'QR',
+        outcome: 'GRANTED',
+        denyReason: null,
+        occurredAt: new Date('2026-11-01T02:00:00Z'),
+      },
+    ]);
+    const service = new AccessLogService(source, new FakeGateLookup(), new FakeRoster());
+    return { source, service };
+  };
+
+  it('501 when no reader is configured', async () => {
+    expect((await request(app(guard)).get(`${URL}?${RANGE_QS}`)).status).toBe(501);
+  });
+
+  it('401 without a session', async () => {
+    const { service } = setup();
+    expect((await request(app(undefined, service)).get(`${URL}?${RANGE_QS}`)).status).toBe(401);
+  });
+
+  it.each(['HR', 'SUP', 'EXE', 'ADM', 'EMP'] as const)('403 for %s', async (role) => {
+    const { service } = setup();
+    const res = await request(app(user(role), service)).get(`${URL}?${RANGE_QS}`);
+    expect(res.status).toBe(403);
+  });
+
+  it('200 for a guard, with dates as ISO strings', async () => {
+    const { service } = setup();
+    const res = await request(app(guard, service)).get(`${URL}?${RANGE_QS}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      rows: [
+        {
+          eventId: 'ev-1',
+          occurredAt: '2026-11-01T02:00:00.000Z',
+          gateId: 'gate-bd-1',
+          gateName: 'BD main gate',
+          factoryId: 'binh-duong',
+          method: 'QR',
+          outcome: 'GRANTED',
+          denyReason: null,
+          employeeCode: 'E-CUT',
+          firstName: 'Lan',
+        },
+      ],
+    });
+  });
+
+  it.each([
+    [
+      'from=2026-11-01T00:00:00%2B07:00',
+      'missing to',
+      'from and to must be ISO date-times with an offset',
+    ],
+    [
+      'to=2026-11-02T00:00:00%2B07:00',
+      'missing from',
+      'from and to must be ISO date-times with an offset',
+    ],
+    [
+      'from=2026-11-01T00:00:00&to=2026-11-02T00:00:00Z',
+      'no offset',
+      'from and to must be ISO date-times with an offset',
+    ],
+    [
+      'from=2026-11-02T00:00:00Z&to=2026-11-01T00:00:00Z',
+      'to before from',
+      'to must be after from',
+    ],
+    ['from=2026-11-01T00:00:00Z&to=2026-11-01T00:00:00Z', 'empty range', 'to must be after from'],
+    [
+      'from=2026-10-01T00:00:00Z&to=2026-11-02T00:00:00Z',
+      '32 days',
+      'from and to must be at most 31 days apart',
+    ],
+    [`${RANGE_QS}&gateId=a&gateId=b`, 'repeated gateId', 'gateId must be a single gate id'],
+    [`${RANGE_QS}&gateId=`, 'empty gateId', 'gateId must be a single gate id'],
+    [`${RANGE_QS}&outcome=OK`, 'bad outcome', 'outcome must be GRANTED, DENIED or PENDING'],
+    [`${RANGE_QS}&limit=0`, 'limit 0', 'limit must be an integer from 1 to 500'],
+    [`${RANGE_QS}&limit=501`, 'limit 501', 'limit must be an integer from 1 to 500'],
+    [`${RANGE_QS}&limit=abc`, 'limit abc', 'limit must be an integer from 1 to 500'],
+    [`${RANGE_QS}&limit=1.5`, 'limit 1.5', 'limit must be an integer from 1 to 500'],
+  ])('400 for %s (%s)', async (qs, _case, error) => {
+    const { service } = setup();
+    const res = await request(app(guard, service)).get(`${URL}?${qs}`);
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error });
+  });
+
+  it('accepts exactly 31 days', async () => {
+    const { service } = setup();
+    const res = await request(app(guard, service)).get(
+      `${URL}?from=2026-10-01T00:00:00Z&to=2026-11-01T00:00:00Z`,
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it('defaults the limit to 100 and passes gateId, outcome and limit through', async () => {
+    const { service, source } = setup();
+    await request(app(guard, service)).get(`${URL}?${RANGE_QS}`);
+    expect(source.queries[0]!.limit).toBe(100);
+    await request(app(guard, service)).get(
+      `${URL}?${RANGE_QS}&gateId=gate-bd-1&outcome=DENIED&limit=500`,
+    );
+    expect(source.queries[1]).toMatchObject({
+      gateIds: ['gate-bd-1'],
+      outcome: 'DENIED',
+      limit: 500,
+    });
+    expect(source.queries[1]!.range.from).toEqual(new Date('2026-10-31T17:00:00Z'));
+  });
+
+  it('404 for a gate outside the guard scope', async () => {
+    const { service, source } = setup();
+    const res = await request(app(guard, service)).get(`${URL}?${RANGE_QS}&gateId=gate-la-1`);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'Gate not found' });
+    expect(source.queries).toEqual([]);
   });
 });
