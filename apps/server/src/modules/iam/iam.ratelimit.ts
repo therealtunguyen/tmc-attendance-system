@@ -1,19 +1,23 @@
-import type { RequestHandler } from 'express';
+import type { Request, RequestHandler, Response } from 'express';
 
 export interface RateLimitOptions {
   max?: number;
   windowMs?: number;
   clock?: () => number;
+  /** What one budget belongs to. Default req.ip; a route behind requirePermission can key by user. */
+  key?: (req: Request, res: Response) => string;
 }
 
 /**
- * Fixed-window limiter keyed by req.ip. Per process: behind a proxy set Express `trust proxy`,
- * otherwise every client shares the proxy's IP; with several instances a shared store is needed.
+ * Fixed-window limiter keyed by req.ip unless `key` says otherwise. Per process: behind a proxy set
+ * Express `trust proxy`, otherwise every client shares the proxy's IP; with several instances a shared
+ * store is needed.
  */
 export const createRateLimiter = ({
   max = 10,
   windowMs = 60_000,
   clock = Date.now,
+  key: keyOf = (req) => req.ip ?? 'unknown',
 }: RateLimitOptions = {}): RequestHandler => {
   const windows = new Map<string, { count: number; resetAt: number }>();
   return (req, res, next) => {
@@ -23,7 +27,7 @@ export const createRateLimiter = ({
       if (w.resetAt > now) break;
       windows.delete(key);
     }
-    const key = req.ip ?? 'unknown';
+    const key = keyOf(req, res);
     const w = windows.get(key) ?? { count: 0, resetAt: now + windowMs };
     w.count += 1;
     windows.set(key, w);
