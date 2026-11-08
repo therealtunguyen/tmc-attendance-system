@@ -5,7 +5,13 @@ import type { ConfigReader } from '../admin/index.js';
 import type { AttendanceRecorder } from '../attendance/index.js';
 import type { EmployeeDirectory, QrValidation } from '../employee-qr/index.js';
 import type { AuditLog } from '../iam/index.js';
-import type { EdgeSync, EdgeSyncStatus, Notifier } from '../reporting/index.js';
+import type {
+  EdgeSync,
+  EdgeSyncStatus,
+  GateLookup,
+  GateRef,
+  Notifier,
+} from '../reporting/index.js';
 import { HEARTBEAT_TIMEOUT_MS } from '../../shared/contracts/edge.js';
 import {
   connectionStatus,
@@ -148,7 +154,7 @@ export interface Decision {
 }
 
 /** Gate registry, scan flow, kiosk API, heartbeat, manual override (FR-2.x). */
-export class GateService implements EdgeSyncStatus {
+export class GateService implements EdgeSyncStatus, GateLookup {
   private readonly alerted = new Map<string, number>();
   private readonly now: () => Date;
   private readonly timeout: number;
@@ -310,6 +316,14 @@ export class GateService implements EdgeSyncStatus {
   /** Last confirmed sync per edge, for the monthly export check (FR-4.5). */
   edgeSyncs(): Promise<EdgeSync[]> {
     return this.repo.edgeSyncs();
+  }
+
+  /** Gates for the security access log (FR-4.4): inactive ones too, since old events name them. Sorted by id. */
+  async gates(factoryIds?: readonly string[]): Promise<GateRef[]> {
+    const gates = await this.repo.list({}, factoryIds ? [...factoryIds] : undefined);
+    return gates
+      .map(({ id, name, factoryId }) => ({ id, name, factoryId }))
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   }
 
   async checkOffline(): Promise<void> {

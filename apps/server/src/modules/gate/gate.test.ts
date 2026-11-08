@@ -144,6 +144,44 @@ describe('GateService registry (FR-2.1)', () => {
   });
 });
 
+describe('GateService.gates (GateLookup, FR-4.4)', () => {
+  const seed = async () => {
+    const a = await gate.createGate('adm', entrance);
+    const b = await gate.createGate('adm', { ...entrance, turnstileId: 't-bd-02', name: 'Back' });
+    const c = await gate.createGate('adm', otherFactory);
+    await gate.deactivateGate('adm', b.id);
+    return { a, b, c };
+  };
+
+  it('returns every gate, inactive ones included, sorted by id', async () => {
+    const { a, b, c } = await seed();
+    const ids = (await gate.gates()).map((row) => row.id);
+    expect(ids).toEqual([a.id, b.id, c.id].sort());
+  });
+
+  it('limits to the given factories', async () => {
+    const { c } = await seed();
+    expect(await gate.gates(['long-an'])).toEqual([
+      { id: c.id, name: otherFactory.name, factoryId: 'long-an' },
+    ]);
+    expect(new Set((await gate.gates(['binh-duong'])).map((row) => row.factoryId))).toEqual(
+      new Set(['binh-duong']),
+    );
+  });
+
+  it('returns no gates for an empty factory list', async () => {
+    await seed();
+    expect(await gate.gates([])).toEqual([]);
+  });
+
+  it('exposes only id, name and factoryId', async () => {
+    await seed();
+    for (const row of await gate.gates()) {
+      expect(Object.keys(row).sort()).toEqual(['factoryId', 'id', 'name']);
+    }
+  });
+});
+
 const admin: UserRef = { id: 'adm-1', role: 'ADM' };
 const scopedAdmin = (scopes: string[]): UserRef => ({ ...admin, scopes });
 const app = (user: UserRef = admin) =>
