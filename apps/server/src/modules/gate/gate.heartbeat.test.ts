@@ -2,7 +2,7 @@ import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../../app.js';
 import { entrance, InMemoryGates, RecordingGateAudit, registryService } from './gate.fakes.js';
-import { connectionStatus, startGateMonitor } from './gate.heartbeat.js';
+import { connectionStatus, startGateMonitor, UnknownEdgeError } from './gate.heartbeat.js';
 import { gateRoutes } from './gate.routes.js';
 
 const BASE = Date.UTC(2026, 10, 7, 1);
@@ -94,6 +94,47 @@ describe('Gate heartbeat (FR-2.6)', () => {
     expect(notify).toHaveBeenCalledTimes(1);
     await gate.edgeHeartbeat(hb);
     expect(await gate.getGate(id)).toMatchObject({ status: 'ONLINE' });
+  });
+
+  it('moves lastSyncAt only when the edge reports an empty outbox (FR-4.5)', async () => {
+    const gate = service();
+    await gate.edgeHeartbeat({ ...hb, outboxSize: 3 });
+    expect(store.edges.get('edge-bd')).toMatchObject({
+      lastHeartbeatAt: new Date(BASE),
+      lastSyncAt: null,
+    });
+    now += 1_000;
+    await gate.edgeHeartbeat(hb);
+    expect(store.edges.get('edge-bd')!.lastSyncAt).toEqual(new Date(BASE + 1_000));
+    now += 1_000;
+    await gate.edgeHeartbeat({ ...hb, outboxSize: 3 });
+    expect(store.edges.get('edge-bd')).toMatchObject({
+      lastHeartbeatAt: new Date(BASE + 2_000),
+      lastSyncAt: new Date(BASE + 1_000),
+    });
+  });
+
+  it('lists the last sync of every edge', async () => {
+    await service().edgeHeartbeat(hb);
+    expect(await service().edgeSyncs()).toEqual([
+      { edgeId: 'edge-bd', factoryId: 'binh-duong', lastSyncAt: new Date(BASE) },
+      { edgeId: 'edge-la', factoryId: 'long-an', lastSyncAt: null },
+    ]);
+  });
+
+  it('rejects a heartbeat from an unknown edge', async () => {
+    await expect(service().edgeHeartbeat({ ...hb, edgeId: 'nope' })).rejects.toBeInstanceOf(
+      UnknownEdgeError,
+    );
+  });
+
+  it('never moves lastHeartbeatAt or lastSyncAt back (fake mirrors the SQL)', async () => {
+    await store.recordHeartbeat('edge-bd', new Date(BASE), true);
+    await store.recordHeartbeat('edge-bd', new Date(BASE - 5_000), true);
+    expect(store.edges.get('edge-bd')).toMatchObject({
+      lastHeartbeatAt: new Date(BASE),
+      lastSyncAt: new Date(BASE),
+    });
   });
 
   it('retries a failed notifier instead of marking the edge as alerted', async () => {

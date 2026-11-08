@@ -5,7 +5,7 @@ import type { ConfigReader } from '../admin/index.js';
 import type { AttendanceRecorder } from '../attendance/index.js';
 import type { EmployeeDirectory, QrValidation } from '../employee-qr/index.js';
 import type { AuditLog } from '../iam/index.js';
-import type { Notifier } from '../reporting/index.js';
+import type { EdgeSync, EdgeSyncStatus, Notifier } from '../reporting/index.js';
 import { HEARTBEAT_TIMEOUT_MS } from '../../shared/contracts/edge.js';
 import {
   connectionStatus,
@@ -106,7 +106,12 @@ export interface GateStore {
   deactivate(id: string): Promise<Gate | null>;
   findEdge(id: string): Promise<GateEdge | null>;
   heartbeats(edgeIds: string[]): Promise<EdgeState[]>;
-  recordHeartbeat(edgeId: string, receivedAt: Date): Promise<boolean>;
+  /**
+   * When the edge reports an empty outbox it has pushed every event, so lastSyncAt moves to
+   * receivedAt too (ADR-9; the monthly export waits for it, FR-4.5). Both columns only move forward.
+   */
+  recordHeartbeat(edgeId: string, receivedAt: Date, outboxEmpty: boolean): Promise<boolean>;
+  edgeSyncs(): Promise<EdgeSync[]>;
   offlineEdges(cutoff: Date): Promise<OfflineEdge[]>;
 }
 
@@ -143,7 +148,7 @@ export interface Decision {
 }
 
 /** Gate registry, scan flow, kiosk API, heartbeat, manual override (FR-2.x). */
-export class GateService {
+export class GateService implements EdgeSyncStatus {
   private readonly alerted = new Map<string, number>();
   private readonly now: () => Date;
   private readonly timeout: number;
@@ -297,7 +302,14 @@ export class GateService {
 
   /** Marks the edge online; the edge is offline when these stop (ADR-9, FR-2.6). */
   async edgeHeartbeat(hb: EdgeHeartbeat): Promise<void> {
-    if (!(await this.repo.recordHeartbeat(hb.edgeId, this.now()))) throw new UnknownEdgeError();
+    if (!(await this.repo.recordHeartbeat(hb.edgeId, this.now(), hb.outboxSize === 0))) {
+      throw new UnknownEdgeError();
+    }
+  }
+
+  /** Last confirmed sync per edge, for the monthly export check (FR-4.5). */
+  edgeSyncs(): Promise<EdgeSync[]> {
+    return this.repo.edgeSyncs();
   }
 
   async checkOffline(): Promise<void> {
