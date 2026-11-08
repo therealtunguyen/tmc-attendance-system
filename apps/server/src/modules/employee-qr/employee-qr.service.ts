@@ -85,19 +85,30 @@ export interface QrKeyConfig {
   previousPublicKey: string;
 }
 
-/** issueToken refuses an employee who would be denied at the gate anyway. */
 /** The QR keys are missing or malformed (a deployment problem, not a caller one). */
 export class QrNotConfiguredError extends Error {}
 
+/** issueToken refuses an employee who would be denied at the gate anyway. */
 export class QrNotIssuableError extends Error {
   constructor(readonly reason: 'UNKNOWN' | 'INACTIVE' | 'REVOKED') {
     super(`No QR token: employee is ${reason.toLowerCase()}`);
   }
 }
 
+/** The portal's QR page: a token to draw and the name to show above it. */
+export interface LiveQr {
+  token: string;
+  ttlSeconds: number;
+  firstName: string;
+  lastName: string;
+  code: string;
+}
+
 export interface QrIssuer {
   /** Short-lived token for the employee's live QR (ADR-10, FR-1.2). Token format: shared/contracts/qr-token.ts. */
   issueToken(employeeId: string): Promise<string>;
+  /** Same checks, plus whose QR it is, for the portal page (FR-1.3). Throws like issueToken. */
+  liveQr(employeeId: string): Promise<LiveQr>;
 }
 
 export interface EdgeSnapshotSource {
@@ -225,10 +236,24 @@ export class EmployeeQrService
 
   /** Signed with the current key; a fresh jti every call, so a screenshot is useless after TTL (ADR-10). */
   async issueToken(employeeId: string): Promise<string> {
+    return this.sign(await this.issuable(employeeId));
+  }
+
+  async liveQr(employeeId: string): Promise<LiveQr> {
+    const employee = await this.issuable(employeeId);
+    const { firstName, lastName, code } = employee;
+    return { token: this.sign(employee), ttlSeconds: QR_TOKEN_TTL_S, firstName, lastName, code };
+  }
+
+  private async issuable(employeeId: string): Promise<Employee> {
     const employee = await this.repo.find(employeeId);
     if (!employee) throw new QrNotIssuableError('UNKNOWN');
     const { deny } = admission(employee);
     if (deny) throw new QrNotIssuableError(deny);
+    return employee;
+  }
+
+  private sign(employee: Employee): string {
     const exp = Math.floor(this.now().getTime() / 1000) + QR_TOKEN_TTL_S;
     const { kid, signingKey } = this.ring;
     return signQrToken({ sub: employee.id, exp, jti: randomUUID() }, kid, signingKey);

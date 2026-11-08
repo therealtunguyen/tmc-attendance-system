@@ -716,7 +716,10 @@ describe('POST /api/qr/token', () => {
       createApp([signedIn({ id: 'u-1', role: 'ADM' }), employeeQrRoutes(eqr)]),
     ).post('/api/qr/token');
     expect(res.status).toBe(403);
-    expect(res.body).toEqual({ error: 'No employee record linked to this account' });
+    expect(res.body).toEqual({
+      error: 'No employee record linked to this account',
+      reason: 'NO_EMPLOYEE',
+    });
   });
 
   it('every role may view its own QR (self:read)', async () => {
@@ -743,6 +746,90 @@ describe('POST /api/qr/token', () => {
     const res = await request(app(id, 'EMP', { ...keysK1, privateKey: '' })).post('/api/qr/token');
     expect(res.status).toBe(503);
     expect(res.body).toEqual({ error: 'QR signing not configured' });
+  });
+});
+
+describe('GET /api/me/qr (FR-1.3)', () => {
+  const app = (user?: UserRef, keys = keysK1) =>
+    createApp([
+      signedIn(user),
+      employeeQrRoutes(new EmployeeQrService(store, audit, keys, () => NOW)),
+    ]);
+  const me = (id: string): UserRef => ({ id: 'u-1', role: 'EMP', employeeId: id });
+
+  it('returns a live token and whose it is, never cached', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const res = await request(app(me(id))).get('/api/me/qr');
+    expect(res.status).toBe(200);
+    expect(res.headers['cache-control']).toBe('no-store');
+    expect(res.body).toEqual({
+      token: expect.any(String),
+      ttlSeconds: QR_TOKEN_TTL_S,
+      firstName: 'Lan',
+      lastName: 'Nguyen',
+      code: 'BD-0001',
+    });
+    expect(verifyQrToken(res.body.token, new QrKeyring(keysK1).publicKeys(), nowS)).toMatchObject({
+      ok: true,
+      claims: { sub: id },
+    });
+  });
+
+  it('holds nothing else from the profile (NFR-4)', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const { text } = await request(app(me(id))).get('/api/me/qr');
+    for (const value of [lan.email, lan.factoryId, lan.teamId!]) {
+      expect(text).not.toContain(value);
+    }
+  });
+
+  it('gives a new token on every call, so the page can refresh', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const first = await request(app(me(id))).get('/api/me/qr');
+    const second = await request(app(me(id))).get('/api/me/qr');
+    expect(first.body.token).not.toBe(second.body.token);
+  });
+
+  it('is the session employee, whatever the request asks for', async () => {
+    const mine = await eqr.createEmployee('hr-1', lan);
+    const other = await eqr.createEmployee('hr-1', { ...lan, code: 'E2' });
+    const res = await request(app(me(mine.id))).get(`/api/me/qr?employeeId=${other.id}`);
+    expect(verifyQrToken(res.body.token, new QrKeyring(keysK1).publicKeys(), nowS)).toMatchObject({
+      claims: { sub: mine.id },
+    });
+  });
+
+  it('401 when not signed in', async () => {
+    expect((await request(app()).get('/api/me/qr')).status).toBe(401);
+  });
+
+  it('403 with the reason the page shows', async () => {
+    const off = await eqr.createEmployee('hr-1', lan);
+    await eqr.deactivateEmployee('hr-1', off.id);
+    const rev = await eqr.createEmployee('hr-1', { ...lan, code: 'E2' });
+    await eqr.revokeQr('hr-1', rev.id);
+    const reason = async (user: UserRef) => {
+      const res = await request(app(user)).get('/api/me/qr');
+      expect(res.status).toBe(403);
+      return res.body.reason;
+    };
+    expect(await reason(me(off.id))).toBe('INACTIVE');
+    expect(await reason(me(rev.id))).toBe('REVOKED');
+    expect(await reason(me('gone'))).toBe('UNKNOWN');
+    expect(await reason({ id: 'u-2', role: 'HR' })).toBe('NO_EMPLOYEE');
+  });
+
+  it('503 without details when the keys are misconfigured', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const res = await request(app(me(id), { ...keysK1, privateKey: '' })).get('/api/me/qr');
+    expect([res.status, res.body]).toEqual([503, { error: 'QR signing not configured' }]);
+  });
+
+  it('500 when storage fails', async () => {
+    store.find = async () => {
+      throw new Error('db down');
+    };
+    expect((await request(app(me('e-1'))).get('/api/me/qr')).status).toBe(500);
   });
 });
 
