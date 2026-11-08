@@ -58,11 +58,19 @@ describe('exportDecision', () => {
     });
   });
 
-  it('reports a missed month from 12:00 on day 1 and on later days', () => {
-    expect(at('12:00')).toEqual({ action: 'MISSED', month: '2026-10' });
-    expect(exportDecision(vn('2026-11-02T08:00'), '06:00', null)).toEqual({
-      action: 'MISSED',
-      month: '2026-10',
+  it('reports a missed month from 12:00 on day 1 through day 2', () => {
+    const missed = { action: 'MISSED', month: '2026-10' };
+    expect(at('12:00')).toEqual(missed);
+    expect(exportDecision(vn('2026-11-02T00:00'), '06:00', null)).toEqual(missed);
+    expect(exportDecision(vn('2026-11-02T08:00'), '06:00', null)).toEqual(missed);
+    expect(exportDecision(vn('2026-11-02T23:59'), '06:00', null)).toEqual(missed);
+  });
+
+  it('stays quiet from day 3, e.g. a server first started mid-month', () => {
+    expect(exportDecision(vn('2026-11-03T00:00'), '06:00', null)).toEqual({ action: 'NONE' });
+    expect(exportDecision(vn('2026-11-08T09:00'), '06:00', null)).toEqual({ action: 'NONE' });
+    expect(exportDecision(vn('2026-11-03T08:00'), '06:00', run('BLOCKED'))).toEqual({
+      action: 'NONE',
     });
   });
 
@@ -184,6 +192,13 @@ describe('ExportScheduler', () => {
     await scheduler.tick();
     expect(exporter.recordMissed).toHaveBeenCalledWith('2026-10');
     expect(exporter.runScheduled).not.toHaveBeenCalled();
+  });
+
+  it('does nothing on day 8 when the month has no run', async () => {
+    const { exporter, scheduler } = setup('2026-11-08T09:00');
+    await scheduler.tick();
+    expect(exporter.runScheduled).not.toHaveBeenCalled();
+    expect(exporter.recordMissed).not.toHaveBeenCalled();
   });
 
   it('does nothing for a DONE month', async () => {
