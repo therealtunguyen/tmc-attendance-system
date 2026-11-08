@@ -35,11 +35,12 @@ describe('checkQrToken (shared by server and edge)', () => {
     ['emp-off', 'INACTIVE'],
     ['emp-rev', 'REVOKED'],
     ['emp-new', 'UNKNOWN'],
-  ])('denies %s as %s, keeping the jti for the event', async (sub, reason) => {
+  ])('denies %s as %s, keeping the jti and employee for the event', async (sub, reason) => {
     expect(await checkQrToken(tokenFor(sub), ctx)).toEqual({
       ok: false,
       reason,
       jti: `jti-${sub}`,
+      employeeId: sub,
     });
   });
 
@@ -73,6 +74,24 @@ describe('checkQrToken (shared by server and edge)', () => {
       },
     };
     await expect(checkQrToken(tokenFor('emp-ok'), failing)).rejects.toThrow('db down');
+  });
+
+  it('reports a bad token before the employee state, and returns no jti from it', async () => {
+    expect(await checkQrToken(tokenFor('emp-rev', NOW - 11), ctx)).toEqual({
+      ok: false,
+      reason: 'EXPIRED',
+    });
+    const other = generateKeyPairSync('ed25519').privateKey;
+    const forged = signQrToken({ sub: 'emp-rev', exp: NOW + 60, jti: 'j' }, key.kid, other);
+    expect(await checkQrToken(forged, ctx)).toEqual({ ok: false, reason: 'INVALID_SIGNATURE' });
+  });
+
+  it('takes the name from the employee source, not from the token', async () => {
+    const renamed = {
+      ...ctx,
+      findEmployee: () => ({ id: 'emp-ok', firstName: 'Lan B', deny: null }),
+    };
+    expect(await checkQrToken(tokenFor('emp-ok'), renamed)).toMatchObject({ firstName: 'Lan B' });
   });
 
   it('accepts an async employee source (the server reads its database)', async () => {

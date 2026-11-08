@@ -44,8 +44,8 @@ export type NewGate = Pick<
   'name' | 'factoryId' | 'edgeId' | 'location' | 'direction' | 'turnstileId'
 >;
 
-/** Factory and identity are immutable; deactivation has its own operation. */
-export type GateChanges = Partial<Omit<NewGate, 'factoryId'>>;
+/** Factory/identity are immutable. PATCH can reactivate; DELETE deactivates. */
+export type GateChanges = Partial<Omit<NewGate, 'factoryId'>> & { active?: true };
 
 export interface GateFilters {
   factoryId?: string;
@@ -68,6 +68,12 @@ export class DuplicateTurnstileError extends Error {
 export class InvalidGateEdgeError extends Error {
   constructor() {
     super("edgeId must identify an edge in the gate's factory");
+  }
+}
+
+export class InactiveGateError extends Error {
+  constructor() {
+    super('Gate is inactive; reactivate it with active: true');
   }
 }
 
@@ -141,6 +147,7 @@ export class GateService {
   async createGate(actorId: string, data: NewGate): Promise<Gate> {
     await this.requireEdge(data.edgeId, data.factoryId);
     const gate = await this.repo.create(data);
+    // TODO(#45): commit the gate write and audit entry in one transaction.
     await this.record(actorId, 'GATE_CREATE', undefined, gate);
     return gate;
   }
@@ -172,13 +179,17 @@ export class GateService {
   async updateGate(actorId: string, id: string, changes: GateChanges): Promise<Gate | null> {
     const before = await this.repo.find(id);
     if (!before) return null;
-    if (changes.edgeId !== undefined) await this.requireEdge(changes.edgeId, before.factoryId);
+    if (!before.active && changes.active !== true) throw new InactiveGateError();
+    if (changes.edgeId !== undefined || changes.active === true) {
+      await this.requireEdge(changes.edgeId ?? before.edgeId, before.factoryId);
+    }
     if (
       (Object.keys(changes) as (keyof GateChanges)[]).every((key) => changes[key] === before[key])
     ) {
       return before;
     }
     const gate = await this.repo.update(id, changes);
+    // TODO(#45): commit the gate write and audit entry in one transaction; retries can look like no-ops.
     if (gate) await this.record(actorId, 'GATE_UPDATE', before, gate);
     return gate;
   }
@@ -189,6 +200,7 @@ export class GateService {
     const gate = await this.repo.deactivate(id);
     // A concurrent DELETE won; it is responsible for auditing the transition.
     if (!gate) return this.repo.find(id);
+    // TODO(#45): commit deactivation and audit together; repeated DELETE must not lose the audit.
     await this.record(actorId, 'GATE_DEACTIVATE', before, gate);
     return gate;
   }
@@ -196,8 +208,7 @@ export class GateService {
   private async requireEdge(edgeId: string, factoryId: string): Promise<void> {
     const edge = await this.repo.findEdge(edgeId);
     if (!edge || edge.factoryId !== factoryId) throw new InvalidGateEdgeError();
-    // AdminService.orgUnits() is still a stub. Until it is implemented, the provisioned
-    // edge registry is the source of factory membership; never bypass the composite FK.
+    // Factory membership comes from provisioned edges; shared org-unit validation is separate integration work.
   }
 
   private record(actorId: string, action: string, before: Gate | undefined, after: Gate) {

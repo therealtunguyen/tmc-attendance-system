@@ -58,6 +58,14 @@ Gate registry data and CRUD rules (FR-2.1): [docs/gate-registry.md](docs/gate-re
 
 Gate online/offline monitoring and ADM alerts (FR-2.6): [docs/gate-heartbeat.md](docs/gate-heartbeat.md).
 
+## Deployment notes
+
+The server assumes a single instance for now. These in-process caches would go stale across instances:
+
+- the org-unit cache (invalidated only on local writes)
+- the privacy-notice cache (60 s TTL), and any other in-process cache
+- the per-IP login rate limiter (counts are per instance)
+
 ## Team rules
 
 - `main` is protected. Work on a branch: `feat/<short-name>` or `fix/<short-name>`.

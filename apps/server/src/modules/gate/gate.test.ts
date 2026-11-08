@@ -11,7 +11,12 @@ import {
   registryService,
 } from './gate.fakes.js';
 import { gateRoutes } from './gate.routes.js';
-import { DuplicateTurnstileError, InvalidGateEdgeError, type GateService } from './gate.service.js';
+import {
+  DuplicateTurnstileError,
+  InactiveGateError,
+  InvalidGateEdgeError,
+  type GateService,
+} from './gate.service.js';
 
 let store: InMemoryGates;
 let audit: RecordingGateAudit;
@@ -86,6 +91,28 @@ describe('GateService registry (FR-2.1)', () => {
     expect(audit.entries).toHaveLength(2);
   });
 
+  it('reactivates the same gate/device and audits the active transition once', async () => {
+    const created = await gate.createGate('adm', entrance);
+    await gate.deactivateGate('adm', created.id);
+    await expect(
+      gate.updateGate('adm', created.id, { name: 'Hidden edit' }),
+    ).rejects.toBeInstanceOf(InactiveGateError);
+    expect(await gate.updateGate('adm-2', created.id, { active: true })).toMatchObject({
+      ...entrance,
+      id: created.id,
+      active: true,
+    });
+    expect(audit.entries[2]).toMatchObject({
+      actorId: 'adm-2',
+      action: 'GATE_UPDATE',
+      before: { active: false },
+      after: { active: true },
+    });
+    await gate.updateGate('adm-2', created.id, { active: true });
+    expect(audit.entries).toHaveLength(3);
+    expect(store.rows.size).toBe(1);
+  });
+
   it('unchanged updates are no-ops and missing gates produce no audit entries', async () => {
     const created = await gate.createGate('adm', entrance);
     expect(await gate.updateGate('adm', created.id, { name: entrance.name })).toEqual(created);
@@ -129,6 +156,49 @@ const app = (user: UserRef = admin) =>
   ]);
 
 describe('Gate CRUD routes', () => {
+  it('restores a deactivated gate through PATCH active:true and keeps normal editing available', async () => {
+    const { id } = await gate.createGate('adm', entrance);
+    await request(app()).delete(`/api/gates/${id}`);
+    expect(
+      (await request(app()).patch(`/api/gates/${id}`).send({ name: 'Inactive edit' })).status,
+    ).toBe(409);
+    for (const active of [false, 'true', 1, null]) {
+      expect((await request(app()).patch(`/api/gates/${id}`).send({ active })).status).toBe(400);
+    }
+    const restored = await request(app()).patch(`/api/gates/${id}`).send({ active: true });
+    expect(restored.status).toBe(200);
+    expect(restored.body).toMatchObject({ id, active: true, turnstileId: entrance.turnstileId });
+    expect(
+      (await request(app()).patch(`/api/gates/${id}`).send({ name: 'Restored gate' })).status,
+    ).toBe(200);
+    expect(audit.entries.map((entry) => entry.action)).toEqual([
+      'GATE_CREATE',
+      'GATE_DEACTIVATE',
+      'GATE_UPDATE',
+      'GATE_UPDATE',
+    ]);
+  });
+
+  it('reactivation keeps the same permission and factory-scope restrictions as any PATCH', async () => {
+    const { id } = await gate.createGate('adm', entrance);
+    await gate.deactivateGate('adm', id);
+    expect(
+      (
+        await request(app({ id: 'guard', role: 'GRD' }))
+          .patch(`/api/gates/${id}`)
+          .send({ active: true })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await request(app({ id: 'adm-la', role: 'ADM', scopes: ['long-an'] }))
+          .patch(`/api/gates/${id}`)
+          .send({ active: true })
+      ).status,
+    ).toBe(404);
+    expect(await gate.getGate(id)).toMatchObject({ active: false });
+    expect(audit.entries).toHaveLength(2);
+  });
   it('supports create -> list/detail -> edit -> deactivate while retaining the registry row', async () => {
     const created = await request(app()).post('/api/gates').send(entrance);
     expect(created.status).toBe(201);

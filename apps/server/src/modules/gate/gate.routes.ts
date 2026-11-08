@@ -10,6 +10,7 @@ import {
 } from '../iam/index.js';
 import {
   DuplicateTurnstileError,
+  InactiveGateError,
   InvalidGateEdgeError,
   type GateChanges,
   type GateFilters,
@@ -18,7 +19,7 @@ import {
 } from './gate.service.js';
 
 const required = ['name', 'factoryId', 'edgeId', 'location', 'direction', 'turnstileId'] as const;
-const editable = ['name', 'edgeId', 'location', 'direction', 'turnstileId'] as const;
+const editable = ['name', 'edgeId', 'location', 'direction', 'turnstileId', 'active'] as const;
 
 /** Strict field selection prevents identity, scope and lifecycle fields being overwritten. */
 function parseBody(body: unknown, create: true): NewGate | string;
@@ -32,10 +33,15 @@ function parseBody(body: unknown, create: boolean): NewGate | GateChanges | stri
   const unknown = Object.keys(input).find((key) => !allowed.includes(key));
   if (unknown) return `${unknown} is not allowed`;
   if (!create && Object.keys(input).length === 0) return 'no editable fields given';
-  const result: Record<string, string> = {};
+  const result: Record<string, string | true> = {};
   for (const key of allowed) {
     if (!create && !(key in input)) continue;
     const value = input[key];
+    if (key === 'active') {
+      if (value !== true) return 'active can only be true; use DELETE to deactivate';
+      result.active = true;
+      continue;
+    }
     if (typeof value !== 'string' || value.trim() === '') {
       return `${key} must be a non-empty string`;
     }
@@ -84,7 +90,7 @@ const requireGateRead: RequestHandler = (_req, res, next) => {
 
 /** Translate only known domain errors; storage/audit failures remain server errors. */
 const domainError = (error: unknown, res: Response) => {
-  if (error instanceof DuplicateTurnstileError) {
+  if (error instanceof DuplicateTurnstileError || error instanceof InactiveGateError) {
     res.status(409).json({ error: error.message });
   } else if (error instanceof InvalidGateEdgeError) {
     res.status(400).json({ error: error.message });

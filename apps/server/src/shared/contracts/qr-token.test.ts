@@ -1,4 +1,4 @@
-import { generateKeyPairSync } from 'node:crypto';
+import { generateKeyPairSync, sign } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { signQrToken, verifyQrToken } from './qr-token.js';
 
@@ -67,6 +67,54 @@ describe('QR token', () => {
     const token = signQrToken(claims, current.kid, current.privateKey);
     expect(verifyQrToken(token, publicKeys, NOW + 70)).toMatchObject({ ok: true });
     expect(verifyQrToken(token, publicKeys, NOW + 71)).toEqual({ ok: false, reason: 'EXPIRED' });
+  });
+
+  it('accepts exp exactly one TTL plus tolerance ahead', () => {
+    const token = signQrToken({ ...claims, exp: NOW + 70 }, current.kid, current.privateKey);
+    expect(verifyQrToken(token, publicKeys, NOW)).toMatchObject({ ok: true });
+  });
+
+  const forged = { ok: false, reason: 'INVALID_SIGNATURE' };
+  const part = (value: object) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const genuine = () => signQrToken(claims, current.kid, current.privateKey).split('.');
+
+  it('rejects alg none with an empty signature', () => {
+    const [, c] = genuine();
+    const token = `${part({ alg: 'none', kid: 'k2' })}.${c}.`;
+    expect(verifyQrToken(token, publicKeys, NOW)).toEqual(forged);
+  });
+
+  it('rejects a validly signed token that declares another alg', () => {
+    const input = `${part({ alg: 'HS256', kid: 'k2' })}.${part(claims)}`;
+    const signature = sign(null, Buffer.from(input), current.privateKey).toString('base64url');
+    expect(verifyQrToken(`${input}.${signature}`, publicKeys, NOW)).toEqual(forged);
+  });
+
+  it('rejects a header changed after signing, even to another trusted kid', () => {
+    const [, c, s] = genuine();
+    const token = `${part({ alg: 'EdDSA', kid: 'k1' })}.${c}.${s}`;
+    expect(verifyQrToken(token, publicKeys, NOW)).toEqual(forged);
+  });
+
+  it.each([
+    ['empty', () => ''],
+    ['truncated', (s: string) => s.slice(0, 20)],
+    ['with one byte changed', (s: string) => `${s[0] === 'A' ? 'B' : 'A'}${s.slice(1)}`],
+  ])('rejects a signature that is %s', (_name, change) => {
+    const [h, c, s] = genuine();
+    expect(verifyQrToken(`${h}.${c}.${change(s)}`, publicKeys, NOW)).toEqual(forged);
+  });
+
+  it.each(['constructor', 'toString', '__proto__'])(
+    'rejects kid %s, which is not a key even though every object has it',
+    (kid) => {
+      const token = signQrToken(claims, kid, current.privateKey);
+      expect(verifyQrToken(token, publicKeys, NOW)).toEqual(forged);
+    },
+  );
+
+  it('rejects a token with too many parts', () => {
+    expect(verifyQrToken(`${genuine().join('.')}.x`, publicKeys, NOW)).toEqual(forged);
   });
 
   it('rejects a token whose exp is beyond one TTL plus tolerance (edge clock behind)', () => {

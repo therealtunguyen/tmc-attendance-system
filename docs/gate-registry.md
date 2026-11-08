@@ -56,19 +56,19 @@ Ví dụ đầu vào tạo cổng:
 
 ## Quy tắc và nơi thực thi
 
-| Quy tắc                                                                                        | Nơi thực thi                                                                                                                                                                                        |
-| :--------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Tất cả trường cấu hình là bắt buộc; ID, tên và vị trí không được chỉ chứa khoảng trắng.        | `NOT NULL` và các `CHECK` trong migration; service/API trim chuỗi và từ chối dữ liệu sai.                                                                                                           |
-| Một edge thuộc một nhà máy; mỗi nhà máy tối đa một edge.                                       | `Edge.factoryId` có unique index.                                                                                                                                                                   |
-| Gate phải thuộc cùng nhà máy với edge.                                                         | Khóa ngoại ghép `(edgeId, factoryId)` tham chiếu `Edge(id, factoryId)`. Áp dụng cho cả INSERT và UPDATE.                                                                                            |
-| Không xóa edge hoặc đổi ID/nhà máy của edge khi còn Gate tham chiếu, kể cả Gate ngừng sử dụng. | FK với `ON DELETE RESTRICT`, `ON UPDATE RESTRICT`.                                                                                                                                                  |
-| Gate phải dùng nhà máy của một Edge đã được đăng ký.                                           | Service kiểm tra `Edge.factoryId`; FK ghép tiếp tục bảo vệ lúc ghi. Kiểm tra đơn vị loại `FACTORY` qua module admin còn chờ `orgUnits()` được triển khai. Không gọi stub hoặc bỏ qua lỗi của admin. |
-| Một thiết bị chỉ có một bản ghi Gate, kể cả bản ghi ngừng sử dụng.                             | Unique index trên `Gate.turnstileId`. Dựa trên adapter hiện có dùng một `TCS_BASE_URL`; nếu sau này có nhiều TCS namespace hoặc thiết bị hai chiều dùng chung ID, cần đổi thiết kế này.             |
-| Xóa cổng nghĩa là đặt `active = false`; lặp lại vẫn thành công.                                | Service/API; schema cung cấp cờ trạng thái, không tự chặn câu SQL DELETE trực tiếp. Không xóa sự kiện chấm công.                                                                                    |
-| Cổng ngừng sử dụng không được dùng cho lượt quét mới.                                          | Luồng scan/edge sau này phải kiểm tra `active`.                                                                                                                                                     |
-| ID và nhà máy của một Gate không thay đổi qua CRUD.                                            | Service/API; tránh đổi ý nghĩa lịch sử chấm công. Chuyển nhà máy thì ngừng sử dụng cổng cũ và đăng ký cổng/thiết bị phù hợp.                                                                        |
-| Có thể đổi `edgeId` sang edge cùng nhà máy; cấu hình mới chỉ ảnh hưởng lượt quét tương lai.    | Service/API và FK ghép. Với một edge/nhà máy hiện tại, thay máy vật lý có thể giữ nguyên ID logic của edge.                                                                                         |
-| ADM quản trị bằng quyền `gate:manage`; tài khoản có scope chỉ quản lý nhà máy trong scope.     | Service/API dùng public interface của IAM. Ghi audit khi thay đổi thành công.                                                                                                                       |
+| Quy tắc                                                                                        | Nơi thực thi                                                                                                                                                                              |
+| :--------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Tất cả trường cấu hình là bắt buộc; ID, tên và vị trí không được chỉ chứa khoảng trắng.        | `NOT NULL` và các `CHECK` trong migration; service/API trim chuỗi và từ chối dữ liệu sai.                                                                                                 |
+| Một edge thuộc một nhà máy; mỗi nhà máy tối đa một edge.                                       | `Edge.factoryId` có unique index.                                                                                                                                                         |
+| Gate phải thuộc cùng nhà máy với edge.                                                         | Khóa ngoại ghép `(edgeId, factoryId)` tham chiếu `Edge(id, factoryId)`. Áp dụng cho cả INSERT và UPDATE.                                                                                  |
+| Không xóa edge hoặc đổi ID/nhà máy của edge khi còn Gate tham chiếu, kể cả Gate ngừng sử dụng. | FK với `ON DELETE RESTRICT`, `ON UPDATE RESTRICT`.                                                                                                                                        |
+| Gate phải dùng nhà máy của một Edge đã được đăng ký.                                           | Service kiểm tra `Edge.factoryId`; FK ghép tiếp tục bảo vệ lúc ghi. Đối chiếu đơn vị loại `FACTORY` qua module admin chưa được tích hợp ở Gate. Không gọi stub hoặc bỏ qua lỗi của admin. |
+| Một thiết bị chỉ có một bản ghi Gate, kể cả bản ghi ngừng sử dụng.                             | Unique index trên `Gate.turnstileId`. Dựa trên adapter hiện có dùng một `TCS_BASE_URL`; nếu sau này có nhiều TCS namespace hoặc thiết bị hai chiều dùng chung ID, cần đổi thiết kế này.   |
+| Xóa cổng nghĩa là đặt `active = false`; lặp lại vẫn thành công.                                | Service/API; schema cung cấp cờ trạng thái, không tự chặn câu SQL DELETE trực tiếp. Không xóa sự kiện chấm công.                                                                          |
+| Cổng ngừng sử dụng không được dùng cho lượt quét mới.                                          | Luồng scan/edge sau này phải kiểm tra `active`.                                                                                                                                           |
+| ID và nhà máy của một Gate không thay đổi qua CRUD.                                            | Service/API; tránh đổi ý nghĩa lịch sử chấm công. Chuyển nhà máy thì ngừng sử dụng cổng cũ và đăng ký cổng/thiết bị phù hợp.                                                              |
+| Có thể đổi `edgeId` sang edge cùng nhà máy; cấu hình mới chỉ ảnh hưởng lượt quét tương lai.    | Service/API và FK ghép. Với một edge/nhà máy hiện tại, thay máy vật lý có thể giữ nguyên ID logic của edge.                                                                               |
+| ADM quản trị bằng quyền `gate:manage`; tài khoản có scope chỉ quản lý nhà máy trong scope.     | Service/API dùng public interface của IAM. Ghi audit khi thay đổi thành công.                                                                                                             |
 
 `AttendanceEvent.gateId` vẫn là string, theo quy tắc module không tạo quan hệ
 chéo. Giữ bản ghi Gate bằng cách ngừng sử dụng giúp tra cứu lịch sử; cấu hình
@@ -89,9 +89,11 @@ của phiên đã đăng nhập đầy đủ. ADM phải hoàn thành MFA trư�
 
 POST yêu cầu đủ sáu trường trong ví dụ JSON bên trên. ID, trạng thái và thời
 gian do hệ thống quản lý. PATCH nhận một hoặc nhiều trường `name`, `edgeId`,
-`location`, `direction`, `turnstileId`. Không nhận `factoryId`, `id`, `active`,
-timestamp hoặc trường ngoài danh sách. Chuỗi được trim; body rỗng của PATCH,
-array, sai kiểu hoặc chiều ngoài `IN`/`OUT` bị từ chối.
+`location`, `direction`, `turnstileId`, hoặc `active: true` để khôi phục cổng đã
+ngừng sử dụng. `active: false` không được nhận qua PATCH; dùng DELETE để ngừng
+sử dụng. Cổng inactive chỉ được sửa khi request đồng thời có `active: true`,
+nếu không trả `409`. Không nhận `factoryId`, `id`, timestamp hoặc trường ngoài
+danh sách. Chuỗi được trim; body rỗng, array và sai kiểu/chiều bị từ chối.
 
 GET danh sách hỗ trợ `factoryId`, `edgeId`, `active=true|false`; có thể kết hợp.
 Mặc định trả cả cổng đang dùng và ngừng sử dụng. Muốn chỉ cổng đang dùng, truyền
@@ -103,19 +105,20 @@ ADM/GRD có scope chỉ thấy cổng thuộc các nhà máy trong scope. Không
 sách với `factoryId` ngoài scope trả `403`. Đọc/sửa/xóa một cổng ngoài scope trả
 `404` giống cổng không tồn tại; không tiết lộ sự tồn tại của bản ghi đó.
 
-| Status | Trường hợp                                                              |
-| :----- | :---------------------------------------------------------------------- |
-| `400`  | Dữ liệu/query không hợp lệ, Edge không tồn tại hoặc thuộc nhà máy khác. |
-| `401`  | Chưa đăng nhập, phiên không hợp lệ hoặc chưa hoàn thành MFA.            |
-| `403`  | Thiếu quyền hoặc yêu cầu tạo/lọc danh sách ngoài scope nhà máy.         |
-| `404`  | Gate không tồn tại hoặc không thuộc scope được phép.                    |
-| `409`  | `turnstileId` đã được đăng ký, kể cả trên Gate ngừng sử dụng.           |
-| `500`  | Lỗi database hoặc audit; không chuyển thành phản hồi thành công.        |
+| Status | Trường hợp                                                                |
+| :----- | :------------------------------------------------------------------------ |
+| `400`  | Dữ liệu/query không hợp lệ, Edge không tồn tại hoặc thuộc nhà máy khác.   |
+| `401`  | Chưa đăng nhập, phiên không hợp lệ hoặc chưa hoàn thành MFA.              |
+| `403`  | Thiếu quyền hoặc yêu cầu tạo/lọc danh sách ngoài scope nhà máy.           |
+| `404`  | Gate không tồn tại hoặc không thuộc scope được phép.                      |
+| `409`  | `turnstileId` đã được đăng ký, hoặc sửa cổng inactive mà không khôi phục. |
+| `500`  | Lỗi database hoặc audit; không chuyển thành phản hồi thành công.          |
 
 Các thay đổi tạo/sửa/ngừng sử dụng ghi audit với actor của phiên, target
 `gate:<id>`, action `GATE_CREATE`/`GATE_UPDATE`/`GATE_DEACTIVATE` và cấu hình
 before/after. PATCH không làm thay đổi giá trị và DELETE lặp lại không thêm
-audit. Hai yêu cầu DELETE đồng thời chỉ ghi một lần chuyển trạng thái.
+audit. Khôi phục qua `active: true` ghi `GATE_UPDATE` với before/after của trạng
+thái active. Hai yêu cầu DELETE đồng thời chỉ ghi một lần chuyển trạng thái.
 
 Giới hạn hiện tại giống module employee-qr (#45): ghi Gate và append audit là
 hai transaction riêng. Nếu audit lỗi sau khi Gate đã được ghi, API trả `500`
@@ -169,6 +172,10 @@ Migration `20261107000000_gate_registry` có transaction và kiểm tra trước
 thay đổi. Nếu `Edge` hoặc `Gate` đã có dữ liệu, migration dừng và rollback:
 schema cũ không chứa thông tin để suy ra đúng nhà máy, chiều và mã thiết bị.
 Không tự gán nhà máy, không mặc định chiều và không xóa dữ liệu cũ.
+
+Repo không cấu hình Prisma seed và không có script seed/demo tự tạo Edge/Gate.
+Các script tạo tài khoản/publish notice không ghi các bảng này; ví dụ đăng ký
+Edge ở phần thử API phải chạy sau migration.
 
 Với database mới hoặc chưa có Edge/Gate, chạy từ thư mục gốc:
 

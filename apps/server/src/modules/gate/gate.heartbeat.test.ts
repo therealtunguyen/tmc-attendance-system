@@ -82,6 +82,20 @@ describe('Gate heartbeat (FR-2.6)', () => {
     expect(notify).not.toHaveBeenCalled();
   });
 
+  it('keeps heartbeat state and monitoring when a gate is reactivated after DELETE', async () => {
+    const gate = service();
+    const { id } = await gate.createGate('adm', entrance);
+    await gate.deactivateGate('adm', id);
+    await gate.edgeHeartbeat(hb);
+    now += 90_001;
+    expect(await gate.updateGate('adm', id, { active: true })).toMatchObject({ active: true });
+    expect(await gate.getGate(id)).toMatchObject({ status: 'OFFLINE' });
+    await gate.checkOffline();
+    expect(notify).toHaveBeenCalledTimes(1);
+    await gate.edgeHeartbeat(hb);
+    expect(await gate.getGate(id)).toMatchObject({ status: 'ONLINE' });
+  });
+
   it('retries a failed notifier instead of marking the edge as alerted', async () => {
     const gate = service();
     await gate.createGate('adm', entrance);
