@@ -13,6 +13,8 @@ const event = (id: string, extra: Partial<AccessLogEvent> = {}): AccessLogEvent 
   method: 'QR',
   outcome: 'GRANTED',
   denyReason: null,
+  guardId: null,
+  reason: null,
   occurredAt: at(8),
   ...extra,
 });
@@ -80,6 +82,30 @@ describe('AccessLogService', () => {
     expect(row).toMatchObject({ outcome: 'DENIED', denyReason: 'REVOKED' });
   });
 
+  it('returns the guard and written reason of a MANUAL override, null for QR scans', async () => {
+    const { service } = setup([
+      event('ev-qr'),
+      event('ev-man', { method: 'MANUAL', guardId: 'guard-1', reason: 'Forgot phone at home' }),
+    ]);
+    const rows = await service.list(grd(), { range: RANGE, limit: 100 });
+    expect(rows.find((r) => r.eventId === 'ev-man')).toMatchObject({
+      method: 'MANUAL',
+      outcome: 'GRANTED',
+      guardId: 'guard-1',
+      overrideReason: 'Forgot phone at home',
+    });
+    expect(rows.find((r) => r.eventId === 'ev-qr')).toMatchObject({
+      guardId: null,
+      overrideReason: null,
+    });
+  });
+
+  it('keeps the deny reason of a denied QR scan apart from the override reason', async () => {
+    const { service } = setup([event('ev-1', { outcome: 'DENIED', denyReason: 'REVOKED' })]);
+    const [row] = await service.list(grd(), { range: RANGE, limit: 100 });
+    expect(row).toMatchObject({ denyReason: 'REVOKED', guardId: null, overrideReason: null });
+  });
+
   it('gives null code and name for no employee and for an unknown one', async () => {
     const { service } = setup([
       event('ev-1', { employeeId: null, outcome: 'DENIED', denyReason: 'INVALID_SIGNATURE' }),
@@ -96,7 +122,7 @@ describe('AccessLogService', () => {
     expect(roster.calls).toEqual([undefined]);
   });
 
-  it('exposes exactly ten fields, never the last name', async () => {
+  it('exposes exactly twelve fields, never the last name', async () => {
     const { service } = setup();
     const [row] = await service.list(grd(), { range: RANGE, limit: 100 });
     expect(Object.keys(row!).sort()).toEqual(
@@ -108,9 +134,11 @@ describe('AccessLogService', () => {
         'firstName',
         'gateId',
         'gateName',
+        'guardId',
         'method',
         'occurredAt',
         'outcome',
+        'overrideReason',
       ].sort(),
     );
   });

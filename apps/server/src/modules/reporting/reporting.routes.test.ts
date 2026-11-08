@@ -266,7 +266,20 @@ describe('GET /api/access-log (FR-4.4)', () => {
         method: 'QR',
         outcome: 'GRANTED',
         denyReason: null,
+        guardId: null,
+        reason: null,
         occurredAt: new Date('2026-11-01T02:00:00Z'),
+      },
+      {
+        eventId: 'ev-2',
+        gateId: 'gate-bd-1',
+        employeeId: 'e-cut',
+        method: 'MANUAL',
+        outcome: 'GRANTED',
+        denyReason: null,
+        guardId: 'guard-1',
+        reason: 'Forgot phone at home',
+        occurredAt: new Date('2026-11-01T03:00:00Z'),
       },
     ]);
     const service = new AccessLogService(source, new FakeGateLookup(), new FakeRoster());
@@ -295,6 +308,20 @@ describe('GET /api/access-log (FR-4.4)', () => {
     expect(res.body).toEqual({
       rows: [
         {
+          eventId: 'ev-2',
+          occurredAt: '2026-11-01T03:00:00.000Z',
+          gateId: 'gate-bd-1',
+          gateName: 'BD main gate',
+          factoryId: 'binh-duong',
+          method: 'MANUAL',
+          outcome: 'GRANTED',
+          denyReason: null,
+          guardId: 'guard-1',
+          overrideReason: 'Forgot phone at home',
+          employeeCode: 'E-CUT',
+          firstName: 'Lan',
+        },
+        {
           eventId: 'ev-1',
           occurredAt: '2026-11-01T02:00:00.000Z',
           gateId: 'gate-bd-1',
@@ -303,6 +330,8 @@ describe('GET /api/access-log (FR-4.4)', () => {
           method: 'QR',
           outcome: 'GRANTED',
           denyReason: null,
+          guardId: null,
+          overrideReason: null,
           employeeCode: 'E-CUT',
           firstName: 'Lan',
         },

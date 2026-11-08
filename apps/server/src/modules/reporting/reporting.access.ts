@@ -28,6 +28,10 @@ export interface AccessLogEvent {
   method: 'QR' | 'MANUAL';
   outcome: AccessOutcome;
   denyReason: EdgeDenyReason | null;
+  /** The guard who made a MANUAL override (FR-2.5); null for QR scans. */
+  guardId: string | null;
+  /** The guard's justification for a MANUAL override (FR-2.5); null for QR scans. Not the deny reason. */
+  reason: string | null;
   occurredAt: Date;
 }
 
@@ -49,6 +53,8 @@ export interface AccessLogRow {
   method: 'QR' | 'MANUAL';
   outcome: AccessOutcome;
   denyReason: EdgeDenyReason | null;
+  guardId: string | null;
+  overrideReason: string | null;
   employeeCode: string | null;
   firstName: string | null;
 }
@@ -121,6 +127,8 @@ export class AccessLogService implements AccessLogReader {
         method: e.method,
         outcome: e.outcome,
         denyReason: e.denyReason,
+        guardId: e.guardId,
+        overrideReason: e.reason,
         employeeCode: person?.code ?? null,
         firstName: person?.firstName ?? null,
       };
