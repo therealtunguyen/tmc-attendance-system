@@ -36,6 +36,7 @@ const attendance = new AttendanceService(new AttendanceRepo(db), eqr);
 const reporting = new ReportingService(new ReportingRepo(db), attendance, admin, hrs, iam);
 const gate = new GateService(new GateRepo(db), eqr, attendance, turnstile, admin, reporting, iam, {
   heartbeatTimeoutMs: config.heartbeatTimeoutMs,
+  directory: eqr,
 });
 
 const app = createApp(

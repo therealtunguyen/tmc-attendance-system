@@ -3,7 +3,7 @@ import type { EdgeHeartbeat } from '../../shared/contracts/edge.js';
 import { todo } from '../../shared/errors.js';
 import type { ConfigReader } from '../admin/index.js';
 import type { AttendanceRecorder } from '../attendance/index.js';
-import type { QrValidation } from '../employee-qr/index.js';
+import type { EmployeeDirectory, QrValidation } from '../employee-qr/index.js';
 import type { AuditLog } from '../iam/index.js';
 import type { Notifier } from '../reporting/index.js';
 import { HEARTBEAT_TIMEOUT_MS } from '../../shared/contracts/edge.js';
@@ -34,7 +34,25 @@ export interface GateView extends Gate {
   lastHeartbeatAt: Date | null;
 }
 
+export interface OverrideRequest {
+  eventId: string;
+  employeeId: string;
+  reason: string;
+  mode: 'OPEN' | 'BACKFILL';
+  occurredAt?: Date;
+}
+
+export class OverrideError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 export interface GateOptions {
+  directory?: EmployeeDirectory;
   now?: () => Date;
   heartbeatTimeoutMs?: number;
 }
@@ -129,6 +147,7 @@ export class GateService {
   private readonly alerted = new Map<string, number>();
   private readonly now: () => Date;
   private readonly timeout: number;
+  private readonly directory?: EmployeeDirectory;
 
   constructor(
     private repo: GateStore,
@@ -140,6 +159,7 @@ export class GateService {
     private audit: AuditLog,
     options: GateOptions = {},
   ) {
+    this.directory = options.directory;
     this.now = options.now ?? (() => new Date());
     this.timeout = options.heartbeatTimeoutMs ?? HEARTBEAT_TIMEOUT_MS;
   }
@@ -227,6 +247,48 @@ export class GateService {
   /** validate -> record (commit) -> open -> setOutcome. See report, gate scan sequence diagram. */
   async scan(_req: ScanRequest): Promise<Decision> {
     return todo();
+  }
+
+  async override(actorId: string, gateId: string, req: OverrideRequest) {
+    const gate = await this.repo.find(gateId);
+    if (!gate) throw new OverrideError(404, 'Gate not found');
+    if (!this.directory) throw new Error('Employee directory is not configured');
+    const employee = await this.directory.find(req.employeeId);
+    if (!employee) throw new OverrideError(404, 'Employee not found');
+    if (req.mode === 'OPEN' && (!gate.active || !employee.active)) {
+      throw new OverrideError(409, 'Gate and employee must be active');
+    }
+    const now = this.now();
+    const occurredAt = req.mode === 'BACKFILL' ? req.occurredAt : now;
+    if (!occurredAt || !Number.isFinite(occurredAt.getTime()) || occurredAt > now) {
+      throw new OverrideError(400, 'A valid past occurredAt is required');
+    }
+    const event = {
+      eventId: req.eventId,
+      employeeId: employee.id,
+      gateId,
+      method: 'MANUAL' as const,
+      guardId: actorId,
+      reason: req.reason,
+      occurredAt,
+    };
+    if (!(await this.recorder.record(event))) {
+      // Never repeat a physical open, including after a crash or a concurrent request.
+      throw new OverrideError(409, 'Event already recorded; do not repeat the override');
+    }
+    // TODO(#45): commit the attendance event and audit together. On failure the event stays
+    // PENDING; do not open or retry automatically. It requires operator reconciliation.
+    await this.audit.append({
+      actorId,
+      action: 'GATE_OVERRIDE',
+      target: `attendance-event:${req.eventId}`,
+      at: now,
+      after: { ...event, occurredAt: occurredAt.toISOString(), mode: req.mode },
+    });
+    const result = req.mode === 'BACKFILL' ? 'OPENED' : await this.turnstile.open(gate.turnstileId);
+    const outcome = result === 'OPENED' ? 'GRANTED' : 'DENIED';
+    await this.recorder.setOutcome(req.eventId, outcome);
+    return { eventId: req.eventId, outcome };
   }
 
   async heartbeat(_gateId: string): Promise<void> {
