@@ -3,7 +3,7 @@ import type { DateRange } from '../../shared/types.js';
 
 const HOUR_MS = 3_600_000;
 /** Both factories are in Vietnam: Asia/Ho_Chi_Minh is UTC+7 all year (no daylight saving). */
-const VN_OFFSET_MS = 7 * HOUR_MS;
+export const VN_OFFSET_MS = 7 * HOUR_MS;
 
 /** A report month: 'YYYY-MM' and its Vietnam local days, first to last, both included (like AttendanceQuery.dailyRecords). */
 export interface ReportMonth {

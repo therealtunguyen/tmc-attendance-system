@@ -19,6 +19,19 @@ export const parseMailMode = (value: string | undefined): 'mock' | 'smtp' => {
   throw new Error(`MAIL_MODE must be mock or smtp, not "${value}"`);
 };
 
+/** Comma-separated email list from env. Unset or blank = none. A malformed address stops the server (a typo must not silently drop alerts). */
+export const parseEmailList = (value: string | undefined, key: string): string[] =>
+  (value ?? '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item !== '')
+    .map((item) => {
+      if (!/^[^\s@,]+@[^\s@,]+\.[^\s@,]+$/.test(item)) {
+        throw new Error(`${key} has an invalid email address: "${item}"`);
+      }
+      return item;
+    });
+
 export const config = {
   port: Number(process.env.PORT ?? 3000),
   databaseUrl: process.env.DATABASE_URL ?? '',
@@ -27,6 +40,11 @@ export const config = {
   hrsMode: mode(process.env.HRS_MODE),
   hrsBaseUrl: process.env.HRS_BASE_URL ?? '',
   mailMode: parseMailMode(process.env.MAIL_MODE),
+  // Who gets EXPORT_FAILED (HR, ADM) and GATE_OFFLINE (ADM) alerts (FR-4.6, FR-2.6).
+  alertEmails: {
+    hr: parseEmailList(process.env.ALERT_EMAILS_HR, 'ALERT_EMAILS_HR'),
+    adm: parseEmailList(process.env.ALERT_EMAILS_ADM, 'ALERT_EMAILS_ADM'),
+  },
   smtpUrl: process.env.SMTP_URL ?? '',
   mailFrom: process.env.MAIL_FROM ?? 'TMC Attendance <no-reply@tmc.local>',
   /** Where employees open the portal; emails link to it (FR-1.3). */
