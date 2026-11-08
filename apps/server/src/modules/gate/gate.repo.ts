@@ -11,9 +11,40 @@ import {
 
 const errorCode = (error: unknown) => (error as { code?: unknown } | null)?.code;
 
+const constraintMatches = (error: unknown, fields: string[], name: string): boolean => {
+  const meta = (
+    error as {
+      meta?: {
+        target?: unknown;
+        field_name?: unknown;
+        driverAdapterError?: { cause?: { constraint?: { index?: unknown; fields?: unknown } } };
+      };
+    } | null
+  )?.meta;
+  const constraint = meta?.driverAdapterError?.cause?.constraint;
+  const target = meta?.target ?? constraint?.index ?? constraint?.fields ?? meta?.field_name;
+  return (
+    target === name ||
+    target === `${name} (index)` ||
+    (Array.isArray(target) &&
+      target.length === fields.length &&
+      fields.every((field) => target.includes(field)))
+  );
+};
+
 const writeError = (error: unknown): never => {
-  if (errorCode(error) === 'P2002') throw new DuplicateTurnstileError();
-  if (errorCode(error) === 'P2003') throw new InvalidGateEdgeError();
+  if (
+    errorCode(error) === 'P2002' &&
+    constraintMatches(error, ['turnstileId'], 'Gate_turnstileId_key')
+  ) {
+    throw new DuplicateTurnstileError();
+  }
+  if (
+    errorCode(error) === 'P2003' &&
+    constraintMatches(error, ['edgeId', 'factoryId'], 'Gate_edgeId_factoryId_fkey')
+  ) {
+    throw new InvalidGateEdgeError();
+  }
   throw error;
 };
 

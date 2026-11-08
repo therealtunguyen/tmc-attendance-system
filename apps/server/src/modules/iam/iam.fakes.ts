@@ -1,9 +1,18 @@
 import { randomUUID } from 'node:crypto';
 import { LOCKOUT_MS, MAX_FAILED_LOGINS } from './iam.auth.js';
-import type { NewUser, SessionRecord, UserRecord, UserStore } from './iam.service.js';
+import type {
+  NewUser,
+  Notice,
+  NoticeStore,
+  SessionRecord,
+  UserRecord,
+  UserStore,
+} from './iam.service.js';
 
-/** In-memory UserStore for tests, same semantics as IamRepo. */
-export class InMemoryUsers implements UserStore {
+/** In-memory UserStore and NoticeStore for tests, same semantics as IamRepo. */
+export class InMemoryUsers implements UserStore, NoticeStore {
+  notices: (Notice & { publishedBy: string })[] = [];
+  acks = new Set<string>();
   users = new Map<string, UserRecord>();
   sessions = new Map<string, SessionRecord>();
 
@@ -77,5 +86,32 @@ export class InMemoryUsers implements UserStore {
     for (const [id, s] of this.sessions) {
       if (s.expiresAt < before || (s.revokedAt && s.revokedAt < before)) this.sessions.delete(id);
     }
+  }
+
+  async currentNotice() {
+    return this.notices.at(-1) ?? null;
+  }
+
+  // Synchronous between reading the max and pushing, so concurrent calls get distinct versions.
+  async publishNotice(text: string, by: string) {
+    const notice = {
+      version: (this.notices.at(-1)?.version ?? 0) + 1,
+      text,
+      publishedAt: new Date(),
+      publishedBy: by,
+    };
+    this.notices.push(notice);
+    return notice;
+  }
+
+  async hasAcked(userId: string, version: number) {
+    return this.acks.has(`${userId}:${version}`);
+  }
+
+  async ack(userId: string, version: number) {
+    const key = `${userId}:${version}`;
+    if (this.acks.has(key)) return false;
+    this.acks.add(key);
+    return true;
   }
 }
