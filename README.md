@@ -54,6 +54,8 @@ apps/web/               React + Vite single app
   src/pages/staff/      HR, supervisors, guards, admins, executives
 ```
 
+Gate registry data and CRUD rules (FR-2.1): [docs/gate-registry.md](docs/gate-registry.md).
+
 ## Deployment notes
 
 The server assumes a single instance for now. These in-process caches would go stale across instances:
