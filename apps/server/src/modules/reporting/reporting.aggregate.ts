@@ -19,7 +19,10 @@ export interface ReportEmployee {
 export interface Totals {
   /** Local days with at least one granted scan. */
   daysPresent: number;
-  /** Sum of the daily hours, rounded to 2 decimals. */
+  /**
+   * Employee row: the daily hours summed and rounded once to 2 decimals. Group row: the sum of
+   * its employees' rounded hours (so it equals the rows shown), rounded again only to drop float noise.
+   */
   hours: number;
   /** Days with a single granted scan (FR-3.5). */
   missingPunchDays: number;
@@ -70,7 +73,11 @@ export const departmentOf = (units: readonly OrgUnit[], teamId: string | null): 
   return parent?.kind === 'DEPARTMENT' ? parent.id : null;
 };
 
-/** Sums the totals of `rows`; the hours are rounded once, at the end. */
+/**
+ * Sums the totals of employee rows. Their hours are already rounded per employee and are added
+ * as shown, so a group total equals the sum of the rows in the same report; the result is rounded
+ * again only to drop float noise.
+ */
 const sumTotals = (rows: readonly Totals[]): Totals => {
   let hours = 0;
   let daysPresent = 0;
@@ -122,7 +129,8 @@ export const employeeRows = (
 };
 
 /**
- * Employee rows grouped by factory and department (FR-4.1). Employees without a department form
+ * Employee rows grouped by factory and department (FR-4.1). Hours are the sum of the employees'
+ * rounded hours (see sumTotals). Employees without a department form
  * one group per factory (department null). Sorted by factory, then department name (unnamed
  * last), then department id.
  */
@@ -157,7 +165,7 @@ export const departmentRows = (
     );
 };
 
-/** Employee rows grouped by factory (FR-4.1). Sorted by factory id. */
+/** Employee rows grouped by factory (FR-4.1), hours summed as in departmentRows. Sorted by factory id. */
 export const factoryRows = (
   rows: readonly EmployeeRow[],
   units: readonly OrgUnit[],

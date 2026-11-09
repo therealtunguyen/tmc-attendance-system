@@ -14,6 +14,20 @@ describe('parseMonth (FR-4.1)', () => {
     expect(parsed).toEqual({ month, range: { from: new Date(from), to: new Date(to) } });
   });
 
+  it.each([['0000-01'], ['0099-12'], ['1999-12']])('rejects %s (before 2000)', (value) => {
+    expect(parseMonth(value, NOW)).toBe('month must be YYYY-MM from 2000 on');
+  });
+
+  it('accepts 2000-01 with its exact range', () => {
+    expect(parseMonth('2000-01', NOW)).toEqual({
+      month: '2000-01',
+      range: {
+        from: new Date('1999-12-31T17:00:00.000Z'),
+        to: new Date('2000-01-30T17:00:00.000Z'),
+      },
+    });
+  });
+
   it('accepts the current month (a partial month)', () => {
     expect(parseMonth('2026-11', NOW)).toMatchObject({ month: '2026-11' });
   });

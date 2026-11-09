@@ -75,23 +75,40 @@ export const RECORDS: DailyRecord[] = [
 /** Roster fake: filters on factoryId or teamId, like the real one. */
 export class FakeRoster implements EmployeeRoster {
   calls: (string | undefined)[] = [];
+  constructor(private entries: RosterEntry[] = ROSTER) {}
   async roster(scope?: string): Promise<RosterEntry[]> {
     this.calls.push(scope);
-    return ROSTER.filter((e) => scope === undefined || e.factoryId === scope || e.teamId === scope);
+    return this.entries.filter(
+      (e) => scope === undefined || e.factoryId === scope || e.teamId === scope,
+    );
   }
 }
 
 /** Attendance fake: records of the employees listed in the scope; remembers each call. */
 export class FakeAttendance {
   calls: { range: DateRange; scope: string }[] = [];
+  constructor(
+    private entries: RosterEntry[] = ROSTER,
+    private records: DailyRecord[] = RECORDS,
+  ) {}
   async dailyRecords(range: DateRange, scope: string): Promise<DailyRecord[]> {
     this.calls.push({ range, scope });
     const ids = new Set(
-      ROSTER.filter((e) => e.factoryId === scope || e.teamId === scope).map((e) => e.id),
+      this.entries.filter((e) => e.factoryId === scope || e.teamId === scope).map((e) => e.id),
     );
-    return RECORDS.filter((r) => ids.has(r.employeeId));
+    return this.records.filter((r) => ids.has(r.employeeId));
   }
 }
+
+/** Long An with 5 employees in la-pack, so it passes the EXE minimum group (FR-4.3). */
+export const BIG_ROSTER: RosterEntry[] = [
+  ...ROSTER.filter((e) => e.factoryId !== 'long-an'),
+  ...['a', 'b', 'c', 'd', 'e'].map((n) => emp(`e-la-${n}`, 'long-an', 'la-pack')),
+];
+export const BIG_RECORDS: DailyRecord[] = [
+  ...RECORDS.filter((r) => r.employeeId !== 'e-pack'),
+  ...['a', 'b', 'c', 'd', 'e'].map((n) => day(`e-la-${n}`, 1, 8)),
+];
 
 export const fakeConfig = { orgUnits: async () => UNITS };
 

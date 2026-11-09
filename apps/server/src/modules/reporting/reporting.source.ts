@@ -10,15 +10,15 @@ export interface MonthData {
   records: DailyRecord[];
 }
 
-/** Roster and daily records of these factories for the range: two calls per factory, in parallel; employees de-duplicated by id. */
+/** Roster and daily records of these org units (factories or teams) for the range: two calls per unit, in parallel; employees de-duplicated by id. */
 export const readMonth = async (
   roster: EmployeeRoster,
   attendance: Pick<AttendanceQuery, 'dailyRecords'>,
-  factoryIds: readonly string[],
+  scopes: readonly string[],
   range: DateRange,
 ): Promise<MonthData> => {
   const perFactory = await Promise.all(
-    factoryIds.map(async (f) => {
+    scopes.map(async (f) => {
       const [entries, records] = await Promise.all([
         roster.roster(f),
         attendance.dailyRecords(range, f),
