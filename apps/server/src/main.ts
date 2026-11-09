@@ -22,7 +22,12 @@ import {
   iamRoutes,
   requireNoticeAck,
 } from './modules/iam/index.js';
-import { ReportingRepo, ReportingService, reportingRoutes } from './modules/reporting/index.js';
+import {
+  MonthlyReportService,
+  ReportingRepo,
+  ReportingService,
+  reportingRoutes,
+} from './modules/reporting/index.js';
 import { config } from './shared/config.js';
 import { createPrisma } from './shared/prisma.js';
 
@@ -44,6 +49,7 @@ const eqr = new EmployeeQrService(
   new QrLinkMail(mailer, config.portalUrl),
 );
 const attendance = new AttendanceService(new AttendanceRepo(db), eqr);
+const reports = new MonthlyReportService(eqr, attendance, admin);
 const reporting = new ReportingService(new ReportingRepo(db), attendance, admin, hrs, iam);
 const gate = new GateService(new GateRepo(db), eqr, attendance, turnstile, admin, reporting, iam, {
   heartbeatTimeoutMs: config.heartbeatTimeoutMs,
@@ -59,7 +65,7 @@ const app = createApp(
     adminRoutes(admin),
     employeeQrRoutes(eqr, admin, { qrToken: { max: config.qrTokenRateLimitPerMin } }),
     attendanceRoutes(attendance),
-    reportingRoutes(reporting),
+    reportingRoutes({ reports }),
     gateRoutes(gate),
   ],
   { before: [authenticate(iam, admin), requireNoticeAck(iam)] },
