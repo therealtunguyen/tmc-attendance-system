@@ -58,6 +58,21 @@ describe('report routes: RBAC (FR-4.3)', () => {
   });
 });
 
+describe('report routes: personal data is not cached', () => {
+  it.each([JSON_URL, CSV_URL])('Cache-Control: no-store on 200: %s', async (url) => {
+    const res = await request(app(hr)).get(`${url}?month=2026-10`);
+    expect(res.status).toBe(200);
+    expect(res.headers['cache-control']).toBe('no-store');
+  });
+
+  it('the JSON says how many rows were suppressed', async () => {
+    const res = await request(app(hr)).get(`${JSON_URL}?month=2026-10`);
+    expect(res.body.suppressed).toBe(0);
+    const exe = await request(app(user('EXE'))).get(`${JSON_URL}?month=2026-10&by=factory`);
+    expect(exe.body).toMatchObject({ suppressed: 2, rows: [] });
+  });
+});
+
 describe('report routes: bad input', () => {
   it.each([
     ['', 'missing month', 'month must be YYYY-MM'],

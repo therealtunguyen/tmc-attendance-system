@@ -1,6 +1,6 @@
 // Monthly attendance reports (FR-4.1, FR-4.3): who may see what, and the data to aggregate.
 import type { Scope } from '../../shared/types.js';
-import type { ConfigReader } from '../admin/index.js';
+import type { ConfigReader, OrgUnit } from '../admin/index.js';
 import { descendants, factoryOf } from '../admin/index.js';
 import type { AttendanceQuery, DailyRecord } from '../attendance/index.js';
 import type { EmployeeRoster, RosterEntry } from '../employee-qr/index.js';
@@ -18,9 +18,46 @@ export interface ReportQuery {
 }
 
 export type MonthlyReport =
-  | { month: string; by: 'employee'; scope: Scope | null; rows: EmployeeRow[] }
-  | { month: string; by: 'department'; scope: Scope | null; rows: DepartmentRow[] }
-  | { month: string; by: 'factory'; scope: Scope | null; rows: FactoryRow[] };
+  | { month: string; by: 'employee'; scope: Scope | null; suppressed: number; rows: EmployeeRow[] }
+  | {
+      month: string;
+      by: 'department';
+      scope: Scope | null;
+      suppressed: number;
+      rows: DepartmentRow[];
+    }
+  | { month: string; by: 'factory'; scope: Scope | null; suppressed: number; rows: FactoryRow[] };
+
+/**
+ * Smallest group an executive may see (FR-4.3, data minimisation): a department or factory row
+ * with fewer employees is effectively one person's data, so it is left out for EXE.
+ */
+export const EXE_MIN_GROUP = 5;
+
+/**
+ * The narrowest org units to read so that every target is covered (employees carry only
+ * factoryId and teamId): a factory or team is itself, a department is its teams. A team whose
+ * factory is also queried is dropped, since the factory already covers it. Sorted, no duplicates.
+ */
+export const queryUnits = (units: readonly OrgUnit[], targets: readonly Scope[]): Scope[] => {
+  const byId = new Map(units.map((u) => [u.id, u]));
+  const picked = new Set<Scope>();
+  for (const t of targets) {
+    const unit = byId.get(t);
+    if (unit?.kind === 'FACTORY' || unit?.kind === 'TEAM') picked.add(unit.id);
+    else if (unit?.kind === 'DEPARTMENT') {
+      for (const u of units) if (u.kind === 'TEAM' && u.parentId === unit.id) picked.add(u.id);
+    }
+  }
+  return [...picked]
+    .filter((id) => {
+      const unit = byId.get(id);
+      if (unit?.kind !== 'TEAM') return true;
+      const factory = factoryOf(units, id);
+      return !(factory && picked.has(factory.id));
+    })
+    .sort();
+};
 
 /** The viewer may not see this report (FR-4.3): out of scope, or per-employee rows for EXE. */
 export class ReportForbiddenError extends Error {}
@@ -63,16 +100,11 @@ export class MonthlyReportService implements MonthlyReports {
     }
     const allowed = new Set(descendants(units, targets));
 
-    const factoryIds = new Set<string>();
-    for (const t of targets) {
-      const factory = factoryOf(units, t);
-      if (factory) factoryIds.add(factory.id);
-    }
-    const perFactory = await Promise.all(
-      [...factoryIds].map(async (f) => {
+    const perUnit = await Promise.all(
+      queryUnits(units, targets).map(async (u) => {
         const [entries, records] = await Promise.all([
-          this.roster.roster(f),
-          this.attendance.dailyRecords(month.range, f),
+          this.roster.roster(u),
+          this.attendance.dailyRecords(month.range, u),
         ]);
         return { entries, records };
       }),
@@ -80,7 +112,7 @@ export class MonthlyReportService implements MonthlyReports {
 
     const employees = new Map<string, RosterEntry>();
     const records: DailyRecord[] = [];
-    for (const { entries, records: recs } of perFactory) {
+    for (const { entries, records: recs } of perUnit) {
       records.push(...recs);
       for (const e of entries) {
         if (allowed.has(e.factoryId) || (e.teamId !== null && allowed.has(e.teamId))) {
@@ -91,8 +123,17 @@ export class MonthlyReportService implements MonthlyReports {
 
     const rows = employeeRows([...employees.values()], records, units);
     const base = { month: month.month, scope: scope ?? null };
-    if (by === 'department') return { ...base, by, rows: departmentRows(rows, units) };
-    if (by === 'factory') return { ...base, by, rows: factoryRows(rows, units) };
-    return { ...base, by, rows };
+    const minGroup = viewer.role === 'EXE' ? EXE_MIN_GROUP : 0;
+    if (by === 'department') {
+      const all = departmentRows(rows, units);
+      const kept = all.filter((r) => r.employees >= minGroup);
+      return { ...base, by, suppressed: all.length - kept.length, rows: kept };
+    }
+    if (by === 'factory') {
+      const all = factoryRows(rows, units);
+      const kept = all.filter((r) => r.employees >= minGroup);
+      return { ...base, by, suppressed: all.length - kept.length, rows: kept };
+    }
+    return { ...base, by, suppressed: 0, rows };
   }
 }

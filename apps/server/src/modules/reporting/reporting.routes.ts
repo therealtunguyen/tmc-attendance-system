@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import type { Request, Response } from 'express';
+import type { Request, RequestHandler, Response } from 'express';
 import { notImplemented } from '../../shared/errors.js';
 import { requirePermission } from '../iam/index.js';
 import type { UserRef } from '../iam/index.js';
@@ -62,6 +62,12 @@ const csvOf = (report: MonthlyReport): string => {
   }
 };
 
+/** Reports hold personal data: browsers and proxies must not keep them. */
+const noStore: RequestHandler = (_req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
+};
+
 export const reportingRoutes = ({ reports, now = () => new Date() }: ReportingRouteDeps) => {
   /** Parses the query and runs the report; answers the error itself and returns null. */
   const run = async (req: Request, res: Response): Promise<MonthlyReport | null> => {
@@ -99,11 +105,11 @@ export const reportingRoutes = ({ reports, now = () => new Date() }: ReportingRo
   };
 
   return Router()
-    .get('/reports/monthly', requirePermission('report:read'), async (req, res) => {
+    .get('/reports/monthly', requirePermission('report:read'), noStore, async (req, res) => {
       const report = await run(req, res);
       if (report) res.json(report);
     })
-    .get('/reports/monthly.csv', requirePermission('report:read'), async (req, res) => {
+    .get('/reports/monthly.csv', requirePermission('report:read'), noStore, async (req, res) => {
       const report = await run(req, res);
       if (!report) return;
       res
