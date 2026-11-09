@@ -15,6 +15,7 @@ export type {
   EmployeeAdmin,
   EmployeeChanges,
   EmployeeDirectory,
+  EmployeeRoster,
   EmployeeStore,
   EmployeeSummary,
   LiveQr,
@@ -24,5 +25,6 @@ export type {
   QrLinkSender,
   QrRevocation,
   QrValidation,
+  RosterEntry,
   ValidationResult,
 } from './employee-qr.service.js';

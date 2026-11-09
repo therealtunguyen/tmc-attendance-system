@@ -1633,3 +1633,64 @@ describe('employee routes: team scope through the org tree (#47, BR-15)', () => 
     expect(res.status).toBe(201);
   });
 });
+
+describe('roster (EmployeeRoster)', () => {
+  const ROSTER_FIELDS = ['active', 'code', 'factoryId', 'firstName', 'id', 'lastName', 'teamId'];
+  let lanId: string;
+  let binhId: string;
+  let anId: string;
+
+  beforeEach(async () => {
+    lanId = (await eqr.createEmployee('hr-1', lan)).id;
+    binhId = (
+      await eqr.createEmployee('hr-1', {
+        ...lan,
+        code: 'BD-0002',
+        firstName: 'Binh',
+        email: 'binh@tmc.vn',
+        teamId: 'bd-line-2',
+      })
+    ).id;
+    anId = (
+      await eqr.createEmployee('hr-1', {
+        ...lan,
+        code: 'LA-0001',
+        firstName: 'An',
+        email: 'an@tmc.vn',
+        factoryId: 'long-an',
+        teamId: null,
+      })
+    ).id;
+  });
+
+  it('returns exactly the seven roster fields, never email or QR state', async () => {
+    const [entry] = await eqr.roster('bd-line-1');
+    expect(entry).toEqual({
+      id: lanId,
+      code: 'BD-0001',
+      firstName: 'Lan',
+      lastName: 'Nguyen',
+      active: true,
+      factoryId: 'binh-duong',
+      teamId: 'bd-line-1',
+    });
+    expect(Object.keys(entry!).sort()).toEqual(ROSTER_FIELDS);
+  });
+
+  it('filters by factory id and by team id, and returns everyone without a scope', async () => {
+    expect((await eqr.roster('binh-duong')).map((e) => e.id)).toEqual([lanId, binhId]);
+    expect((await eqr.roster('long-an')).map((e) => e.id)).toEqual([anId]);
+    expect((await eqr.roster('bd-line-2')).map((e) => e.id)).toEqual([binhId]);
+    expect((await eqr.roster()).map((e) => e.id)).toEqual([lanId, binhId, anId]);
+  });
+
+  it('keeps deactivated employees, marked inactive', async () => {
+    await eqr.deactivateEmployee('hr-1', binhId);
+    const entries = await eqr.roster('binh-duong');
+    expect(entries.map((e) => [e.id, e.active])).toEqual([
+      [lanId, true],
+      [binhId, false],
+    ]);
+    expect(Object.keys(entries[1]!).sort()).toEqual(ROSTER_FIELDS);
+  });
+});
