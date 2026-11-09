@@ -32,6 +32,13 @@ export class AttendanceRepo implements AttendanceStore {
     });
   }
 
+  grantedEventsOf(employeeId: string): Promise<DailyInput[]> {
+    return this.db.attendanceEvent.findMany({
+      where: { outcome: 'GRANTED', employeeId },
+      select: { employeeId: true, occurredAt: true, outcome: true },
+    });
+  }
+
   async decide(eventId: string, outcome: ScanOutcome): Promise<boolean> {
     // Conditional, so a decided outcome is never flipped by a late or concurrent call.
     const { count } = await this.db.attendanceEvent.updateMany({

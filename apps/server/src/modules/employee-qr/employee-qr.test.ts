@@ -1633,3 +1633,37 @@ describe('employee routes: team scope through the org tree (#47, BR-15)', () => 
     expect(res.status).toBe(201);
   });
 });
+
+describe('GET /api/me/profile (FR-1.6)', () => {
+  const app = (user?: UserRef) => createApp([signedIn(user), employeeQrRoutes(eqr)]);
+  const me = (id: string): UserRef => ({ id: 'u-1', role: 'EMP', employeeId: id });
+
+  it('returns own profile, never cached', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const res = await request(app(me(id))).get('/api/me/profile');
+    expect(res.status).toBe(200);
+    expect(res.headers['cache-control']).toBe('no-store');
+    expect(res.body).toEqual({ ...lan, id, active: true, qrRevoked: false });
+  });
+
+  it('ignores an id in the request: nobody reads another person', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    const other = await eqr.createEmployee('hr-1', { ...lan, code: 'BD-0002', firstName: 'Binh' });
+    const res = await request(app(me(id))).get(`/api/me/profile?id=${other.id}`);
+    expect(res.body.id).toBe(id);
+  });
+
+  it('401 when not signed in', async () => {
+    expect((await request(app()).get('/api/me/profile')).status).toBe(401);
+  });
+
+  it('403 NO_EMPLOYEE for an account with no employee record', async () => {
+    const res = await request(app({ id: 'u-2', role: 'ADM' })).get('/api/me/profile');
+    expect(res.status).toBe(403);
+    expect(res.body.reason).toBe('NO_EMPLOYEE');
+  });
+
+  it('404 when the linked employee does not exist', async () => {
+    expect((await request(app(me('gone'))).get('/api/me/profile')).status).toBe(404);
+  });
+});

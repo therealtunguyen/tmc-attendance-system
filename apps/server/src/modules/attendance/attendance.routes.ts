@@ -5,6 +5,7 @@ import {
   type PushEventsRequest,
 } from '../../shared/contracts/edge.js';
 import { notImplemented } from '../../shared/errors.js';
+import { requirePermission, type UserRef } from '../iam/index.js';
 import type { AttendanceService } from './attendance.service.js';
 
 const isText = (value: unknown): value is string =>
@@ -68,7 +69,16 @@ const parseBatch = (req: Request): PushEventsRequest | string => {
 
 export const attendanceRoutes = (attendance: AttendanceService) =>
   Router()
-    .get('/me/attendance', notImplemented)
+    // Own history only (FR-1.6): the employee comes from the verified session, never a request field.
+    .get('/me/attendance', requirePermission('self:read'), async (_req, res) => {
+      const { employeeId } = res.locals.user as UserRef;
+      if (!employeeId) {
+        return void res
+          .status(403)
+          .json({ error: 'No employee record linked to this account', reason: 'NO_EMPLOYEE' });
+      }
+      res.set('Cache-Control', 'no-store').json({ records: await attendance.history(employeeId) });
+    })
     .post('/attendance/:recordId/corrections', notImplemented)
     // Edge outbox (ADR-9). Body: PushEventsRequest. Response: PushEventsResponse.
     // TODO(#44): authenticate the edge agent.

@@ -64,6 +64,8 @@ export interface AttendanceStore {
   insertMany(events: StoredEvent[]): Promise<void>;
   /** GRANTED events with an employee, occurredAt in [from, to); only these employees if given. */
   grantedEvents(from: Date, to: Date, employeeIds?: string[]): Promise<DailyInput[]>;
+  /** Every GRANTED event of one employee, whatever the date. */
+  grantedEventsOf(employeeId: string): Promise<DailyInput[]>;
   /** Sets the outcome only while it is PENDING or already equal; true if the row now has it. */
   decide(eventId: string, outcome: ScanOutcome): Promise<boolean>;
   /** Null when there is no such event. */
@@ -178,8 +180,9 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
     return buildDailyRecords(await this.repo.grantedEvents(from, to, employeeIds));
   }
 
-  async history(): Promise<DailyRecord[]> {
-    return todo();
+  /** One employee's daily records, newest day first (FR-1.6, UC-3). */
+  async history(employeeId: string): Promise<DailyRecord[]> {
+    return buildDailyRecords(await this.repo.grantedEventsOf(employeeId)).reverse();
   }
 
   async accessLog(): Promise<ScanEvent[]> {

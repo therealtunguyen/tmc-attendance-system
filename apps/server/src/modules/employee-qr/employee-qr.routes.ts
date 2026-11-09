@@ -216,6 +216,18 @@ export const employeeQrRoutes = (
         qrLimit,
         ownQr((id) => eqr.liveQr(id)),
       )
+      // Own profile only (FR-1.6): the employee comes from the verified session, never a request field.
+      .get('/me/profile', requirePermission('self:read'), async (_req, res) => {
+        const { employeeId } = userOf(res);
+        if (!employeeId) {
+          return void res
+            .status(403)
+            .json({ error: 'No employee record linked to this account', reason: 'NO_EMPLOYEE' });
+        }
+        const employee = await eqr.getProfile(employeeId);
+        if (!employee) return void res.status(404).json({ error: 'Employee not found' });
+        res.set('Cache-Control', 'no-store').json(employee);
+      })
       .post('/employees/:id/qr/revoke', requirePermission('qr:revoke'), async (req, res) => {
         const current = await eqr.getProfile(idOf(req));
         if (!current || !canSeeEmployee(userOf(res), current)) {
