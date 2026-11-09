@@ -867,6 +867,30 @@ describe('POST /api/qr/token', () => {
     });
   });
 
+  it('429 on the 11th call in a minute across /qr/token and /me/qr, while another user keeps getting tokens', async () => {
+    const me = await eqr.createEmployee('hr-1', lan);
+    const other = await eqr.createEmployee('hr-1', { ...lan, code: 'E2' });
+    // One router for both users, as in production, so they share one limiter.
+    const limited = createApp([
+      Router().use((req, res, next) => {
+        const employeeId = req.get('x-employee') as string;
+        res.locals.user = { id: `user-${employeeId}`, role: 'EMP', employeeId } as UserRef;
+        next();
+      }),
+      employeeQrRoutes(new EmployeeQrService(store, audit, keysK1, () => NOW)),
+    ]);
+    const post = (employeeId: string) =>
+      request(limited).post('/api/qr/token').set('x-employee', employeeId);
+    const get = (employeeId: string) =>
+      request(limited).get('/api/me/qr').set('x-employee', employeeId);
+    // One shared budget: alternate the two routes.
+    for (let i = 0; i < 10; i++) expect((await (i % 2 ? get : post)(me.id)).status).toBe(200);
+    expect((await post(me.id)).status).toBe(429);
+    expect((await get(me.id)).status).toBe(429);
+    expect((await post(other.id)).status).toBe(200);
+    expect((await get(other.id)).status).toBe(200);
+  });
+
   it('503 without leaking the reason when the keys are misconfigured', async () => {
     const { id } = await eqr.createEmployee('hr-1', lan);
     const res = await request(app(id, 'EMP', { ...keysK1, privateKey: '' })).post('/api/qr/token');
