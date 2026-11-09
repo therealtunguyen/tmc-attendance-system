@@ -97,7 +97,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(
     signal,
     () =>
-      void Promise.all([stopMonitor(), stopExports()]).then(() => {
+      void Promise.all([stopMonitor(), exports.stop(), stopExports()]).then(() => {
         server.close(() => void db.$disconnect());
       }),
   );

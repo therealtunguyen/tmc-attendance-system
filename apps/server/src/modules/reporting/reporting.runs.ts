@@ -22,6 +22,12 @@ export interface ExportResult {
 }
 
 /**
+ * A RUNNING run older than this is treated as crashed (server stopped mid-run): the store lets it be taken
+ * over and the scheduler alerts about it. Longer than one run with all retries (about 21 min plus the read).
+ */
+export const STALE_AFTER_MS = 2 * 3_600_000;
+
+/**
  * Finished states a trigger may start again. The schedule only resumes a BLOCKED month (waiting for edges);
  * a DONE or FAILED month is re-run by HR only (FR-4.6), so a failure alerts once instead of every tick.
  */

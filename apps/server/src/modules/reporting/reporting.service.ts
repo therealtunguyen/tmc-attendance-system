@@ -6,6 +6,7 @@ import { unsyncedEdges } from './reporting.edges.js';
 import type { EdgeSync, EdgeSyncStatus } from './reporting.edges.js';
 import { parseMonth } from './reporting.month.js';
 import type { Notifier } from './reporting.notifier.js';
+import { STALE_AFTER_MS } from './reporting.runs.js';
 import type { ExportRun, ExportRunStore, ExportTrigger } from './reporting.runs.js';
 import { previousMonth } from './reporting.schedule.js';
 import { hrsRows } from './reporting.source.js';
@@ -48,15 +49,38 @@ export interface ExportRerun {
   status(month: string): Promise<ExportRun | null>;
 }
 
+/** What the server shutdown needs: abort the retry sleeps and wait for the runs in flight. */
+export interface ExportLifecycle {
+  stop(): Promise<void>;
+}
+
 export interface ExportOptions {
   /** Waits between attempts; 1 + length attempts in all. Default [60_000, 300_000, 900_000]. */
   retryDelaysMs?: readonly number[];
   /** A RUNNING run older than this is taken over (a crashed server). Default 2 h. */
   staleAfterMs?: number;
-  sleep?: (ms: number) => Promise<void>;
+  /** Waits between attempts; must reject once the signal aborts (shutdown). */
+  sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   now?: () => Date;
   log?: (message: string, error?: unknown) => void;
 }
+
+const abortError = (): Error => new DOMException('The export was interrupted', 'AbortError');
+
+/** setTimeout that rejects, and clears its timer, as soon as the signal aborts. */
+const abortableSleep = (ms: number, signal: AbortSignal): Promise<void> =>
+  new Promise<void>((resolve, reject) => {
+    if (signal.aborted) return reject(abortError());
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 
 const messageOf = (error: unknown): string =>
   (error instanceof Error ? error.message : String(error)).slice(0, MAX_ERROR_LENGTH);
@@ -72,10 +96,13 @@ const describeEdges = (edges: readonly EdgeSync[]): string =>
     .join(', ');
 
 /** Monthly HRS export with retry, edge-sync check and alerts (FR-4.5, FR-4.6, ADR-9). */
-export class HrExportService implements ScheduledExport, ExportRerun {
+export class HrExportService implements ScheduledExport, ExportRerun, ExportLifecycle {
   private retryDelaysMs: readonly number[];
   private staleAfterMs: number;
-  private sleep: (ms: number) => Promise<void>;
+  private sleep: (ms: number, signal: AbortSignal) => Promise<void>;
+  private abort = new AbortController();
+  private inFlight = new Set<Promise<unknown>>();
+  private stopped = false;
   private now: () => Date;
   private log: (message: string, error?: unknown) => void;
 
@@ -89,8 +116,8 @@ export class HrExportService implements ScheduledExport, ExportRerun {
     options: ExportOptions = {},
   ) {
     this.retryDelaysMs = options.retryDelaysMs ?? [60_000, 300_000, 900_000];
-    this.staleAfterMs = options.staleAfterMs ?? 2 * 3_600_000;
-    this.sleep = options.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    this.staleAfterMs = options.staleAfterMs ?? STALE_AFTER_MS;
+    this.sleep = options.sleep ?? abortableSleep;
     this.now = options.now ?? (() => new Date());
     this.log = options.log ?? ((m, e) => console.error(m, e));
   }
@@ -99,11 +126,26 @@ export class HrExportService implements ScheduledExport, ExportRerun {
     return this.runs.find(month);
   }
 
+  /** Shutdown: stops sending (retry sleeps end at once), then waits for every run in flight to store its outcome. */
+  async stop(): Promise<void> {
+    this.stopped = true;
+    this.abort.abort();
+    while (this.inFlight.size > 0) await Promise.allSettled([...this.inFlight]);
+  }
+
+  private track<T>(promise: Promise<T>): Promise<T> {
+    this.inFlight.add(promise);
+    const forget = () => void this.inFlight.delete(promise);
+    promise.then(forget, forget);
+    return promise;
+  }
+
   async rerun(
     actorId: string,
     month: string,
     { ignoreUnsyncedEdges }: { ignoreUnsyncedEdges: boolean },
   ) {
+    if (this.stopped) throw new ExportBusyError('The server is shutting down');
     const now = this.now();
     const parsed = parseMonth(month, now);
     if (typeof parsed === 'string') throw new InvalidExportMonthError(parsed);
@@ -115,6 +157,7 @@ export class HrExportService implements ScheduledExport, ExportRerun {
       const unsynced = unsyncedEdges(await this.edges.edgeSyncs(), this.monthEnd(parsed.range));
       if (unsynced.length > 0) throw new EdgesNotSyncedError(unsynced);
     }
+    const previous = await this.runs.find(month);
     const run = await this.claim(month, 'MANUAL', now);
     if (!run) throw new ExportBusyError('An export of this month is already running');
     try {
@@ -126,20 +169,35 @@ export class HrExportService implements ScheduledExport, ExportRerun {
         after: { ignoreUnsyncedEdges },
       });
     } catch (error) {
+      // Put back what the claim overwrote: HRS may already have this month (a DONE run must not turn FAILED).
+      const outcome =
+        previous && previous.status !== 'RUNNING'
+          ? {
+              status: previous.status,
+              attempts: previous.attempts,
+              lastError: previous.lastError,
+              at: previous.finishedAt ?? this.now(),
+            }
+          : {
+              status: 'FAILED' as const,
+              attempts: 0,
+              lastError: messageOf(error),
+              at: this.now(),
+            };
       await this.runs
-        .finish(month, {
-          status: 'FAILED',
-          attempts: 0,
-          lastError: messageOf(error),
-          at: this.now(),
-        })
+        .finish(month, outcome)
         .catch((e) => this.log('Could not release the export run', e));
       throw error;
     }
-    return { run, finished: this.send(month, parsed.range, actorId, run) };
+    return { run, finished: this.track(this.send(month, parsed.range, actorId, run)) };
   }
 
-  async runScheduled(month: string, lastChance: boolean): Promise<ExportRun | null> {
+  runScheduled(month: string, lastChance: boolean): Promise<ExportRun | null> {
+    if (this.stopped) return Promise.resolve(null);
+    return this.track(this.doRunScheduled(month, lastChance));
+  }
+
+  private async doRunScheduled(month: string, lastChance: boolean): Promise<ExportRun | null> {
     const run = await this.claim(month, 'SCHEDULE', this.now());
     if (!run) return null;
     const parsed = parseMonth(month, this.now());
@@ -177,15 +235,42 @@ export class HrExportService implements ScheduledExport, ExportRerun {
     return this.send(month, parsed.range, SYSTEM_ACTOR, run);
   }
 
-  async recordMissed(month: string): Promise<ExportRun | null> {
+  recordMissed(month: string): Promise<ExportRun | null> {
+    if (this.stopped) return Promise.resolve(null);
+    return this.track(this.doRecordMissed(month));
+  }
+
+  private async doRecordMissed(month: string): Promise<ExportRun | null> {
+    // The claim wipes lastError, so read what the previous run said first (it names the unsynced edges).
+    const previous = await this.runs.find(month);
     const run = await this.claim(month, 'SCHEDULE', this.now());
     if (!run) return null;
+    const rerunHint = `Re-run it with POST /api/exports/${month}/rerun.`;
+    if (previous?.status === 'RUNNING') {
+      const since = previous.startedAt.toISOString();
+      return this.fail(
+        month,
+        SYSTEM_ACTOR,
+        0,
+        `Started at ${since} and never finished (the server stopped during the run)`,
+        `HRS export of ${month} did not finish: it started at ${since} and the server stopped before it ended. ${rerunHint}`,
+      );
+    }
+    if (previous?.status === 'BLOCKED' && previous.lastError) {
+      return this.fail(
+        month,
+        SYSTEM_ACTOR,
+        0,
+        `Missed the export window (day 1 before 12:00). ${previous.lastError}`,
+        `HRS export of ${month} did not run in its window (day 1 before 12:00): ${previous.lastError}. ${rerunHint}`,
+      );
+    }
     return this.fail(
       month,
       SYSTEM_ACTOR,
       0,
       'Missed the export window (day 1 before 12:00)',
-      `HRS export of ${month} did not run in its window (day 1 before 12:00). Re-run it with POST /api/exports/${month}/rerun.`,
+      `HRS export of ${month} did not run in its window (day 1 before 12:00). ${rerunHint}`,
     );
   }
 
@@ -208,16 +293,31 @@ export class HrExportService implements ScheduledExport, ExportRerun {
     try {
       const data = await this.source.company(range);
       const batch = { month, rows: hrsRows(data.employees, data.records) };
+      if (batch.rows.length === 0) {
+        const error = `No attendance records for ${month}; nothing was sent to HRS`;
+        return await this.fail(month, actorId, 0, error, this.failedText(month, 0, error));
+      }
       const maxAttempts = 1 + this.retryDelaysMs.length;
       let lastError: string | null = null;
       while (attempts < maxAttempts) {
+        if (this.abort.signal.aborted)
+          return await this.interrupted(month, actorId, attempts, claimed);
         attempts++;
         let answer: Awaited<ReturnType<HrsClient['send']>>;
         try {
           answer = await this.hrs.send(batch);
         } catch (error) {
           lastError = messageOf(error);
-          if (attempts < maxAttempts) await this.sleep(this.retryDelaysMs[attempts - 1]!);
+          if (attempts < maxAttempts) {
+            try {
+              await this.sleep(this.retryDelaysMs[attempts - 1]!, this.abort.signal);
+            } catch (sleepError) {
+              if (this.abort.signal.aborted) {
+                return await this.interrupted(month, actorId, attempts, claimed);
+              }
+              throw sleepError;
+            }
+          }
           continue;
         }
         if (answer === 'ACCEPTED') {
@@ -255,6 +355,34 @@ export class HrExportService implements ScheduledExport, ExportRerun {
     }
   }
 
+  /**
+   * Shutdown reached the send loop. A scheduled run goes back to BLOCKED (the schedule resumes it in the window and
+   * alerts it as missed afterwards); a manual run fails with one alert, since HR started it and must hear about it.
+   */
+  private async interrupted(
+    month: string,
+    actorId: string,
+    attempts: number,
+    claimed: ExportRun,
+  ): Promise<ExportRun> {
+    const error = `Interrupted by shutdown after ${attempts} attempt(s)`;
+    if (claimed.trigger === 'SCHEDULE') {
+      return this.runs.finish(month, {
+        status: 'BLOCKED',
+        attempts,
+        lastError: error,
+        at: this.now(),
+      });
+    }
+    return this.fail(
+      month,
+      actorId,
+      attempts,
+      error,
+      `HRS export of ${month} did not finish: the server shut down after ${attempts} attempt(s). Re-run it with POST /api/exports/${month}/rerun.`,
+    );
+  }
+
   private failedText(month: string, attempts: number, error: string): string {
     return `HRS export of ${month} failed after ${attempts} attempt(s): ${error}. Re-run it with POST /api/exports/${month}/rerun.`;
   }
@@ -267,6 +395,7 @@ export class HrExportService implements ScheduledExport, ExportRerun {
     error: unknown,
     lastKnown: ExportRun,
   ): Promise<ExportRun> {
+    // If storing FAILED fails too, the run stays RUNNING; the scheduler treats a stale RUNNING run as missed and alerts.
     this.log(`Export of ${month} hit an unexpected error`, error);
     const text = messageOf(error);
     try {
