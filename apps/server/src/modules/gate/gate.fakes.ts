@@ -91,20 +91,19 @@ export class InMemoryGates implements GateStore {
     return [...this.edges.values()].filter((edge) => edgeIds.includes(edge.id));
   }
 
-  async recordHeartbeat(id: string, at: Date, outboxEmpty: boolean) {
+  async recordHeartbeat(id: string, at: Date, syncedAt: Date | null) {
     const edge = this.edges.get(id);
     if (!edge) return false;
     if (!edge.lastHeartbeatAt || edge.lastHeartbeatAt < at) edge.lastHeartbeatAt = at;
-    if (outboxEmpty && (!edge.lastSyncAt || edge.lastSyncAt < at)) edge.lastSyncAt = at;
+    if (syncedAt && (!edge.lastSyncAt || edge.lastSyncAt < syncedAt)) edge.lastSyncAt = syncedAt;
     return true;
   }
 
   async edgeSyncs() {
-    return [...this.edges.values()].map(({ id, factoryId, lastSyncAt }) => ({
-      edgeId: id,
-      factoryId,
-      lastSyncAt,
-    }));
+    const active = new Set([...this.rows.values()].filter((g) => g.active).map((g) => g.edgeId));
+    return [...this.edges.values()]
+      .filter((edge) => active.has(edge.id))
+      .map(({ id, factoryId, lastSyncAt }) => ({ edgeId: id, factoryId, lastSyncAt }));
   }
 
   async offlineEdges(cutoff: Date) {

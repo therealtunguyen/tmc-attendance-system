@@ -77,7 +77,7 @@ const app = createApp(
       mfa: { max: config.authRateLimitPerMin },
     }),
     adminRoutes(admin),
-    employeeQrRoutes(eqr, admin),
+    employeeQrRoutes(eqr, admin, { qrToken: { max: config.qrTokenRateLimitPerMin } }),
     attendanceRoutes(attendance),
     // TODO(#85): pass accessLog: new AccessLogService(attendance, gate, eqr) once AttendanceQuery.accessLog()
     // takes an AccessLogQuery (still todo() in the attendance module); until then GET /api/access-log is 501.
@@ -99,7 +99,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(
     signal,
     () =>
-      void Promise.all([stopMonitor(), stopExports()]).then(() => {
+      void Promise.all([stopMonitor(), exports.stop(), stopExports()]).then(() => {
         server.close(() => void db.$disconnect());
       }),
   );

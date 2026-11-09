@@ -105,11 +105,11 @@ export class GateRepo implements GateStore {
     });
   }
 
-  async recordHeartbeat(edgeId: string, receivedAt: Date, outboxEmpty: boolean): Promise<boolean> {
-    // GREATEST ignores NULL, so the first heartbeat or sync sets the column.
+  async recordHeartbeat(edgeId: string, receivedAt: Date, syncedAt: Date | null): Promise<boolean> {
+    // GREATEST ignores NULL: the first heartbeat or sync sets the column, a null syncedAt leaves it.
     const count = await this.db.$executeRaw`
       UPDATE "Edge" SET "lastHeartbeatAt" = GREATEST("lastHeartbeatAt", ${receivedAt}),
-        "lastSyncAt" = CASE WHEN ${outboxEmpty} THEN GREATEST("lastSyncAt", ${receivedAt}) ELSE "lastSyncAt" END
+        "lastSyncAt" = GREATEST("lastSyncAt", ${syncedAt})
       WHERE "id" = ${edgeId}
     `;
     return count > 0;
@@ -117,6 +117,7 @@ export class GateRepo implements GateStore {
 
   async edgeSyncs(): Promise<EdgeSync[]> {
     const edges = await this.db.edge.findMany({
+      where: { gates: { some: { active: true } } },
       select: { id: true, factoryId: true, lastSyncAt: true },
       orderBy: { id: 'asc' },
     });

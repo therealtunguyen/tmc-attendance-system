@@ -32,6 +32,17 @@ export const parseEmailList = (value: string | undefined, key: string): string[]
       return item;
     });
 
+/** Env var as a positive integer, or the fallback when unset. A bad value stops the server: NaN would silently disable a rate limit. */
+export const positiveInt = (name: string, fallback: number): number => {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  if (!/^[1-9]\d*$/.test(raw)) throw new Error(`${name} must be a positive integer, not "${raw}"`);
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n))
+    throw new Error(`${name} must be a safe positive integer, not "${raw}"`);
+  return n;
+};
+
 export const config = {
   port: Number(process.env.PORT ?? 3000),
   databaseUrl: process.env.DATABASE_URL ?? '',
@@ -57,7 +68,9 @@ export const config = {
     previousPublicKey: process.env.QR_PREVIOUS_PUBLIC_KEY ?? '',
   },
   // login and MFA attempts per IP per minute (FR-5.2)
-  authRateLimitPerMin: Number(process.env.AUTH_RATE_LIMIT_PER_MIN ?? 10),
+  authRateLimitPerMin: positiveInt('AUTH_RATE_LIMIT_PER_MIN', 10),
+  // POST /api/qr/token and GET /api/me/qr calls per user per minute, shared; the portal needs 2
+  qrTokenRateLimitPerMin: positiveInt('QR_TOKEN_RATE_LIMIT_PER_MIN', 10),
   heartbeatTimeoutMs: positiveMs('EDGE_HEARTBEAT_TIMEOUT_MS', HEARTBEAT_TIMEOUT_MS),
   heartbeatCheckMs: positiveMs('EDGE_HEARTBEAT_CHECK_MS', HEARTBEAT_CHECK_INTERVAL_MS),
 };

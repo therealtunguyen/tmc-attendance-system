@@ -101,18 +101,16 @@ describe('GateRepo scope and deactivation guarantees', () => {
   it('records the heartbeat and the sync in one parameterised UPDATE (FR-4.5)', async () => {
     const executeRaw = vi.fn().mockResolvedValue(1);
     const repo = new GateRepo({ $executeRaw: executeRaw } as unknown as PrismaClient);
-    const receivedAt = new Date('2026-11-07T01:00:00Z');
-    expect(await repo.recordHeartbeat('edge-bd', receivedAt, true)).toBe(true);
+    const receivedAt = new Date('2026-11-07T01:00:05Z');
+    const syncedAt = new Date('2026-11-07T01:00:00Z');
+    expect(await repo.recordHeartbeat('edge-bd', receivedAt, syncedAt)).toBe(true);
     const [strings, ...values] = executeRaw.mock.calls[0]!;
     const sql = (strings as string[]).join('?');
-    expect(sql).toContain('"lastSyncAt"');
-    expect(sql).toContain('CASE WHEN');
-    expect(values).toContain(true);
-    expect(values).toContain(receivedAt);
-    expect(values).toContain('edge-bd');
+    expect(sql).toContain('GREATEST("lastSyncAt"');
+    expect(values).toEqual([receivedAt, syncedAt, 'edge-bd']);
     executeRaw.mockResolvedValue(0);
-    expect(await repo.recordHeartbeat('missing', receivedAt, false)).toBe(false);
-    expect(executeRaw.mock.calls[1]!.slice(1)).toContain(false);
+    expect(await repo.recordHeartbeat('missing', receivedAt, null)).toBe(false);
+    expect(executeRaw.mock.calls[1]!.slice(1)).toEqual([receivedAt, null, 'missing']);
   });
 
   it('maps edges to EdgeSync ordered by id', async () => {
@@ -125,6 +123,7 @@ describe('GateRepo scope and deactivation guarantees', () => {
       { edgeId: 'edge-bd', factoryId: 'binh-duong', lastSyncAt },
     ]);
     expect(findMany).toHaveBeenCalledWith({
+      where: { gates: { some: { active: true } } },
       select: { id: true, factoryId: true, lastSyncAt: true },
       orderBy: { id: 'asc' },
     });

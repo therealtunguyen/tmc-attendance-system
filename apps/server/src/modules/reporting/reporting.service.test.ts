@@ -11,6 +11,7 @@ import {
   ScriptedHrs,
   fakeConfig,
 } from './reporting.fakes.js';
+import type { ExportOptions } from './reporting.service.js';
 import {
   EdgesNotSyncedError,
   ExportBusyError,
@@ -38,7 +39,10 @@ let log: Mock<(message: string, error?: unknown) => void>;
 let now: Date;
 let source: MonthSource;
 
-const build = (script: ConstructorParameters<typeof ScriptedHrs>[0] = ['ACCEPTED']) => {
+const build = (
+  script: ConstructorParameters<typeof ScriptedHrs>[0] = ['ACCEPTED'],
+  options: ExportOptions = {},
+) => {
   hrs = new ScriptedHrs(script);
   return new HrExportService(runs, source, hrs, edges, notifier, audit, {
     sleep: async (ms) => {
@@ -46,6 +50,7 @@ const build = (script: ConstructorParameters<typeof ScriptedHrs>[0] = ['ACCEPTED
     },
     now: () => now,
     log,
+    ...options,
   });
 };
 
@@ -232,6 +237,52 @@ describe('recordMissed', () => {
   });
 });
 
+describe('recordMissed keeps what the previous run said', () => {
+  it('after BLOCKED: the unsynced edges stay in lastError and in the alert', async () => {
+    edges.edges = [{ edgeId: 'edge-la', factoryId: 'long-an', lastSyncAt: null }];
+    const svc = build();
+    await svc.runScheduled('2026-10', false);
+    const run = await svc.recordMissed('2026-10');
+    const waiting = 'Waiting for edge sync: edge-la (long-an, never synced)';
+    expect(run).toMatchObject({
+      status: 'FAILED',
+      lastError: `Missed the export window (day 1 before 12:00). ${waiting}`,
+    });
+    expect(notifier.alerts).toEqual([
+      {
+        kind: 'EXPORT_FAILED',
+        message: `HRS export of 2026-10 did not run in its window (day 1 before 12:00): ${waiting}. Re-run it with POST /api/exports/2026-10/rerun.`,
+      },
+    ]);
+    expect(audit.entries.map((e) => e.action)).toEqual(['EXPORT_FAILED']);
+  });
+
+  it('after a stale RUNNING run: says it never finished, with the start time', async () => {
+    const startedAt = new Date(NOW.getTime() - 3 * 3_600_000);
+    runs.rows.set('2026-10', {
+      month: '2026-10',
+      status: 'RUNNING',
+      trigger: 'SCHEDULE',
+      attempts: 0,
+      lastError: null,
+      startedAt,
+      finishedAt: null,
+    });
+    const run = await build().recordMissed('2026-10');
+    const since = startedAt.toISOString();
+    expect(run).toMatchObject({
+      status: 'FAILED',
+      lastError: `Started at ${since} and never finished (the server stopped during the run)`,
+    });
+    expect(notifier.alerts).toEqual([
+      {
+        kind: 'EXPORT_FAILED',
+        message: `HRS export of 2026-10 did not finish: it started at ${since} and the server stopped before it ended. Re-run it with POST /api/exports/2026-10/rerun.`,
+      },
+    ]);
+  });
+});
+
 describe('rerun (FR-4.6)', () => {
   const NOV_15 = new Date('2026-11-15T09:00:00+07:00');
 
@@ -311,6 +362,147 @@ describe('rerun (FR-4.6)', () => {
     source = new CompanyMonthSource(new FakeRoster(), new FakeAttendance(), fakeConfig);
     const { finished } = await build().rerun('hr-1', '2026-09', { ignoreUnsyncedEdges: false });
     expect((await finished).status).toBe('DONE');
+  });
+});
+
+describe('rerun when the audit write fails', () => {
+  const NOV_15 = new Date('2026-11-15T09:00:00+07:00');
+  const failRerunAudit = () => {
+    const append = audit.append.bind(audit);
+    vi.spyOn(audit, 'append').mockImplementation(async (entry) => {
+      if (entry.action === 'EXPORT_RERUN') throw new Error('audit down');
+      return append(entry);
+    });
+  };
+
+  it('puts the previous DONE outcome back', async () => {
+    const svc = build(['throw', 'ACCEPTED']);
+    await svc.runScheduled('2026-10', false);
+    const before = await svc.status('2026-10');
+    expect(before).toMatchObject({ status: 'DONE', attempts: 2 });
+    now = NOV_15;
+    failRerunAudit();
+    await expect(svc.rerun('hr-1', '2026-10', { ignoreUnsyncedEdges: false })).rejects.toThrow(
+      'audit down',
+    );
+    expect(await svc.status('2026-10')).toMatchObject({
+      status: 'DONE',
+      attempts: 2,
+      lastError: null,
+      finishedAt: before!.finishedAt,
+    });
+    expect(hrs.batches).toHaveLength(2);
+    expect(notifier.alerts).toEqual([]);
+  });
+
+  it('ends FAILED when there was no previous run', async () => {
+    now = NOV_15;
+    const svc = build();
+    failRerunAudit();
+    await expect(svc.rerun('hr-1', '2026-10', { ignoreUnsyncedEdges: false })).rejects.toThrow(
+      'audit down',
+    );
+    expect(await svc.status('2026-10')).toMatchObject({
+      status: 'FAILED',
+      attempts: 0,
+      lastError: 'audit down',
+    });
+    expect(hrs.batches).toEqual([]);
+  });
+});
+
+describe('empty month', () => {
+  it('sends nothing, ends FAILED with one alert and an audit entry', async () => {
+    source = { company: async () => ({ employees: [], records: [] }) };
+    const run = await build().runScheduled('2026-10', false);
+    expect(run).toMatchObject({
+      status: 'FAILED',
+      attempts: 0,
+      lastError: 'No attendance records for 2026-10; nothing was sent to HRS',
+    });
+    expect(hrs.batches).toEqual([]);
+    expect(notifier.alerts).toHaveLength(1);
+    expect(audit.entries.map((e) => e.action)).toEqual(['EXPORT_RUN', 'EXPORT_FAILED']);
+    expect(audit.entries[1]!.after).toMatchObject({ attempts: 0 });
+  });
+
+  it('fails a manual rerun the same way', async () => {
+    source = { company: async () => ({ employees: [], records: [] }) };
+    now = new Date('2026-11-15T09:00:00+07:00');
+    const { finished } = await build().rerun('hr-1', '2026-10', { ignoreUnsyncedEdges: false });
+    expect((await finished).status).toBe('FAILED');
+    expect(hrs.batches).toEqual([]);
+    expect(notifier.alerts).toHaveLength(1);
+  });
+});
+
+describe('stop (shutdown)', () => {
+  // The default sleep (60 s) is used on purpose: stop() must cut it short.
+  const sleeping = () => build(['throw'], { sleep: undefined, retryDelaysMs: [60_000] });
+  const inRetrySleep = () => vi.waitFor(() => expect(hrs.batches).toHaveLength(1));
+
+  it('ends a scheduled run BLOCKED, quietly, without waiting for the retry sleep', async () => {
+    const svc = sleeping();
+    const pending = svc.runScheduled('2026-10', false);
+    await inRetrySleep();
+    const started = Date.now();
+    await svc.stop();
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(await pending).toMatchObject({
+      status: 'BLOCKED',
+      attempts: 1,
+      lastError: 'Interrupted by shutdown after 1 attempt(s)',
+    });
+    expect(hrs.batches).toHaveLength(1);
+    expect(notifier.alerts).toEqual([]);
+    expect(audit.entries.some((e) => e.action === 'EXPORT_FAILED')).toBe(false);
+  });
+
+  it('ends an interrupted manual rerun FAILED with audit and one alert', async () => {
+    now = new Date('2026-11-15T09:00:00+07:00');
+    const svc = sleeping();
+    const { finished } = await svc.rerun('hr-1', '2026-10', { ignoreUnsyncedEdges: false });
+    await inRetrySleep();
+    await svc.stop();
+    expect(await finished).toMatchObject({
+      status: 'FAILED',
+      attempts: 1,
+      lastError: 'Interrupted by shutdown after 1 attempt(s)',
+    });
+    expect(notifier.alerts).toHaveLength(1);
+    expect(notifier.alerts[0]!.message).toContain('2026-10');
+    expect(audit.entries.filter((e) => e.action === 'EXPORT_FAILED')).toHaveLength(1);
+  });
+
+  it('refuses new work after stop', async () => {
+    now = new Date('2026-11-15T09:00:00+07:00');
+    const svc = build();
+    await svc.stop();
+    expect(await svc.runScheduled('2026-10', false)).toBeNull();
+    expect(await svc.recordMissed('2026-10')).toBeNull();
+    await expect(svc.rerun('hr-1', '2026-10', { ignoreUnsyncedEdges: false })).rejects.toThrow(
+      ExportBusyError,
+    );
+    expect(runs.rows.size).toBe(0);
+  });
+
+  it('waits for a manual rerun that is still running', async () => {
+    now = new Date('2026-11-15T09:00:00+07:00');
+    let release!: () => void;
+    source = {
+      company: () =>
+        new Promise<MonthData>((r) => (release = () => r({ employees: [], records: [] }))),
+    };
+    const svc = build();
+    const { finished } = await svc.rerun('hr-1', '2026-10', { ignoreUnsyncedEdges: false });
+    let stopped = false;
+    const stopping = svc.stop().then(() => (stopped = true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(stopped).toBe(false);
+    release();
+    await stopping;
+    expect((await runs.find('2026-10'))?.status).not.toBe('RUNNING');
+    expect((await finished).status).toBe('FAILED');
   });
 });
 

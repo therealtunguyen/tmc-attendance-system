@@ -2,9 +2,11 @@ import { Router, type Request, type RequestHandler, type Response } from 'expres
 import { QR_TOKEN_TTL_S } from '../../shared/contracts/qr-token.js';
 import {
   canSeeEmployee,
+  createRateLimiter,
   inScope,
   isRestricted,
   requirePermission,
+  type RateLimitOptions,
   type UserRef,
 } from '../iam/index.js';
 import {
@@ -93,144 +95,159 @@ const teamProblem = async (
   return owner === factoryId ? null : 'teamId belongs to another factory';
 };
 
-export const employeeQrRoutes = (eqr: EmployeeQrService, teams?: TeamDirectory) =>
-  Router()
-    // ?scope=<factoryId or teamId>. Unrestricted users may omit it; restricted ones are held to their own scopes (BR-15).
-    .get('/employees', requirePermission('employee:read'), async (req, res) => {
-      const user = userOf(res);
-      let scope = typeof req.query.scope === 'string' ? req.query.scope : undefined;
-      if (scope === '') return void res.status(400).json({ error: 'scope must not be empty' });
-      if (isRestricted(user)) {
-        if (scope === undefined && user.scopes?.length === 1) scope = user.scopes[0];
-        if (scope === undefined) return void res.status(400).json({ error: 'scope is required' });
-        if (!inScope(user, scope)) return void res.status(403).json({ error: 'Forbidden' });
-      }
-      res.json(await eqr.listProfiles(scope));
-    })
-    .get('/employees/:id', requirePermission('employee:read'), async (req, res) => {
-      const employee = await eqr.getProfile(idOf(req));
-      // Out of scope looks the same as missing, so existence does not leak.
-      if (!employee || !canSeeEmployee(userOf(res), employee)) {
-        return void res.status(404).json({ error: 'Employee not found' });
-      }
-      res.json(employee);
-    })
-    .post('/employees', requirePermission('employee:manage'), async (req, res) => {
-      const body = bodyOf(req);
-      if (!body) return void res.status(400).json({ error: 'body must be a JSON object' });
-      const missing = required.find((key) => !isText(body[key]));
-      const error = missing ? `${missing} is required` : invalid(body);
-      if (error) return void res.status(400).json({ error });
-      if (!inScope(userOf(res), trimmed(body.factoryId) as string)) {
-        return void res.status(403).json({ error: 'Forbidden' });
-      }
-      if (body.teamId && !inScope(userOf(res), trimmed(body.teamId) as string)) {
-        return void res.status(403).json({ error: 'Forbidden' });
-      }
-      if (teams && typeof body.teamId === 'string') {
-        const problem = await teamProblem(
-          teams,
-          trimmed(body.teamId) as string,
-          trimmed(body.factoryId) as string,
-        );
-        if (problem) return void res.status(400).json({ error: problem });
-      }
-      const data = { teamId: null, ...pick(body), code: trimmed(body.code) } as NewEmployee;
-      try {
-        res.status(201).json(await eqr.createEmployee(userOf(res).id, data));
-      } catch (e) {
-        if (!(e instanceof DuplicateEmployeeCodeError)) throw e;
-        res.status(409).json({ error: e.message });
-      }
-    })
-    .patch('/employees/:id', requirePermission('employee:manage'), async (req, res) => {
-      const body = bodyOf(req);
-      if (!body) return void res.status(400).json({ error: 'body must be a JSON object' });
-      if ('code' in body) return void res.status(400).json({ error: 'code cannot change' });
-      const error = invalid(body);
-      if (error) return void res.status(400).json({ error });
-      const changes = pick(body);
-      if (Object.keys(changes).length === 0) {
-        return void res.status(400).json({ error: 'no editable fields given' });
-      }
-      const current = await eqr.getProfile(idOf(req));
-      if (!current || !canSeeEmployee(userOf(res), current)) {
-        return void res.status(404).json({ error: 'Employee not found' });
-      }
-      // Moving an employee out of the user's scope is as forbidden as creating one there.
-      // Scopes are expanded down the org tree, so a factory scope covers its teams (BR-15).
-      if (changes.factoryId !== undefined && !inScope(userOf(res), changes.factoryId)) {
-        return void res.status(403).json({ error: 'Forbidden' });
-      }
-      if (changes.teamId && !inScope(userOf(res), changes.teamId)) {
-        return void res.status(403).json({ error: 'Forbidden' });
-      }
-      if (teams) {
-        // A factory change alone must not leave the employee in a team of the old factory.
-        const teamId = 'teamId' in changes ? changes.teamId : current.teamId;
-        const factoryId = changes.factoryId ?? current.factoryId;
-        if (teamId && (changes.factoryId !== undefined || 'teamId' in changes)) {
-          const problem = await teamProblem(teams, teamId, factoryId);
+/** /qr/token and /me/qr share one budget per user: 10 calls a minute by default (portal needs 2; a loop would flood the edge outbox); false disables. */
+export const employeeQrRoutes = (
+  eqr: EmployeeQrService,
+  teams?: TeamDirectory,
+  limits: { qrToken?: RateLimitOptions | false } = {},
+) => {
+  // One instance, so both token routes draw on the same per-user count. Per user, not per IP: a factory shares one IP.
+  const qrLimit: RequestHandler =
+    limits.qrToken === false
+      ? (_req, _res, next) => next()
+      : createRateLimiter({ key: (_req, res) => userOf(res).id, ...limits.qrToken });
+  return (
+    Router()
+      // ?scope=<factoryId or teamId>. Unrestricted users may omit it; restricted ones are held to their own scopes (BR-15).
+      .get('/employees', requirePermission('employee:read'), async (req, res) => {
+        const user = userOf(res);
+        let scope = typeof req.query.scope === 'string' ? req.query.scope : undefined;
+        if (scope === '') return void res.status(400).json({ error: 'scope must not be empty' });
+        if (isRestricted(user)) {
+          if (scope === undefined && user.scopes?.length === 1) scope = user.scopes[0];
+          if (scope === undefined) return void res.status(400).json({ error: 'scope is required' });
+          if (!inScope(user, scope)) return void res.status(403).json({ error: 'Forbidden' });
+        }
+        res.json(await eqr.listProfiles(scope));
+      })
+      .get('/employees/:id', requirePermission('employee:read'), async (req, res) => {
+        const employee = await eqr.getProfile(idOf(req));
+        // Out of scope looks the same as missing, so existence does not leak.
+        if (!employee || !canSeeEmployee(userOf(res), employee)) {
+          return void res.status(404).json({ error: 'Employee not found' });
+        }
+        res.json(employee);
+      })
+      .post('/employees', requirePermission('employee:manage'), async (req, res) => {
+        const body = bodyOf(req);
+        if (!body) return void res.status(400).json({ error: 'body must be a JSON object' });
+        const missing = required.find((key) => !isText(body[key]));
+        const error = missing ? `${missing} is required` : invalid(body);
+        if (error) return void res.status(400).json({ error });
+        if (!inScope(userOf(res), trimmed(body.factoryId) as string)) {
+          return void res.status(403).json({ error: 'Forbidden' });
+        }
+        if (body.teamId && !inScope(userOf(res), trimmed(body.teamId) as string)) {
+          return void res.status(403).json({ error: 'Forbidden' });
+        }
+        if (teams && typeof body.teamId === 'string') {
+          const problem = await teamProblem(
+            teams,
+            trimmed(body.teamId) as string,
+            trimmed(body.factoryId) as string,
+          );
           if (problem) return void res.status(400).json({ error: problem });
         }
-      }
-      const employee = await eqr.updateEmployee(userOf(res).id, idOf(req), changes);
-      if (!employee) return void res.status(404).json({ error: 'Employee not found' });
-      res.json(employee);
-    })
-    // Soft delete: attendance history keeps pointing at the row (FR-1.5).
-    .post('/employees/:id/deactivate', requirePermission('employee:manage'), async (req, res) => {
-      const current = await eqr.getProfile(idOf(req));
-      if (!current || !canSeeEmployee(userOf(res), current)) {
-        return void res.status(404).json({ error: 'Employee not found' });
-      }
-      const employee = await eqr.deactivateEmployee(userOf(res).id, idOf(req));
-      if (!employee) return void res.status(404).json({ error: 'Employee not found' });
-      res.json(employee);
-    })
-    // The signed-in employee's own token (FR-1.2, ADR-10). The portal asks again before it expires.
-    // Every role views its own QR (self:read). Identity comes from the verified session, never a request field.
-    .post(
-      '/qr/token',
-      requirePermission('self:read'),
-      ownQr(async (id) => ({ token: await eqr.issueToken(id), ttlSeconds: QR_TOKEN_TTL_S })),
-    )
-    // The portal's QR page (FR-1.3). A GET: issuing is stateless, it stores nothing.
-    .get(
-      '/me/qr',
-      requirePermission('self:read'),
-      ownQr((id) => eqr.liveQr(id)),
-    )
-    .post('/employees/:id/qr/revoke', requirePermission('qr:revoke'), async (req, res) => {
-      const current = await eqr.getProfile(idOf(req));
-      if (!current || !canSeeEmployee(userOf(res), current)) {
-        return void res.status(404).json({ error: 'Employee not found' });
-      }
-      const employee = await eqr.revokeQr(userOf(res).id, idOf(req));
-      if (!employee) return void res.status(404).json({ error: 'Employee not found' });
-      res.json(employee);
-    })
-    .post('/employees/:id/qr/reissue', requirePermission('qr:revoke'), async (req, res) => {
-      const current = await eqr.getProfile(idOf(req));
-      if (!current || !canSeeEmployee(userOf(res), current)) {
-        return void res.status(404).json({ error: 'Employee not found' });
-      }
-      try {
-        const employee = await eqr.reissueQr(userOf(res).id, idOf(req));
+        const data = { teamId: null, ...pick(body), code: trimmed(body.code) } as NewEmployee;
+        try {
+          res.status(201).json(await eqr.createEmployee(userOf(res).id, data));
+        } catch (e) {
+          if (!(e instanceof DuplicateEmployeeCodeError)) throw e;
+          res.status(409).json({ error: e.message });
+        }
+      })
+      .patch('/employees/:id', requirePermission('employee:manage'), async (req, res) => {
+        const body = bodyOf(req);
+        if (!body) return void res.status(400).json({ error: 'body must be a JSON object' });
+        if ('code' in body) return void res.status(400).json({ error: 'code cannot change' });
+        const error = invalid(body);
+        if (error) return void res.status(400).json({ error });
+        const changes = pick(body);
+        if (Object.keys(changes).length === 0) {
+          return void res.status(400).json({ error: 'no editable fields given' });
+        }
+        const current = await eqr.getProfile(idOf(req));
+        if (!current || !canSeeEmployee(userOf(res), current)) {
+          return void res.status(404).json({ error: 'Employee not found' });
+        }
+        // Moving an employee out of the user's scope is as forbidden as creating one there.
+        // Scopes are expanded down the org tree, so a factory scope covers its teams (BR-15).
+        if (changes.factoryId !== undefined && !inScope(userOf(res), changes.factoryId)) {
+          return void res.status(403).json({ error: 'Forbidden' });
+        }
+        if (changes.teamId && !inScope(userOf(res), changes.teamId)) {
+          return void res.status(403).json({ error: 'Forbidden' });
+        }
+        if (teams) {
+          // A factory change alone must not leave the employee in a team of the old factory.
+          const teamId = 'teamId' in changes ? changes.teamId : current.teamId;
+          const factoryId = changes.factoryId ?? current.factoryId;
+          if (teamId && (changes.factoryId !== undefined || 'teamId' in changes)) {
+            const problem = await teamProblem(teams, teamId, factoryId);
+            if (problem) return void res.status(400).json({ error: problem });
+          }
+        }
+        const employee = await eqr.updateEmployee(userOf(res).id, idOf(req), changes);
         if (!employee) return void res.status(404).json({ error: 'Employee not found' });
         res.json(employee);
-      } catch (e) {
-        if (!(e instanceof QrNotIssuableError)) throw e;
-        res.status(409).json({ error: e.message, reason: e.reason });
-      }
-    })
-    // Edge agent (ADR-9). Response: EdgeSnapshot.
-    // An edge has no user session, so no requirePermission. TODO(#44): authenticate the edge agent.
-    .get('/edge/snapshot', async (_req, res) => {
-      try {
-        res.set('Cache-Control', 'no-store').json(await eqr.snapshot());
-      } catch (e) {
-        if (!(e instanceof QrNotConfiguredError)) throw e;
-        res.status(503).json({ error: 'QR signing not configured' });
-      }
-    });
+      })
+      // Soft delete: attendance history keeps pointing at the row (FR-1.5).
+      .post('/employees/:id/deactivate', requirePermission('employee:manage'), async (req, res) => {
+        const current = await eqr.getProfile(idOf(req));
+        if (!current || !canSeeEmployee(userOf(res), current)) {
+          return void res.status(404).json({ error: 'Employee not found' });
+        }
+        const employee = await eqr.deactivateEmployee(userOf(res).id, idOf(req));
+        if (!employee) return void res.status(404).json({ error: 'Employee not found' });
+        res.json(employee);
+      })
+      // The signed-in employee's own token (FR-1.2, ADR-10). The portal asks again before it expires.
+      // Every role views its own QR (self:read). Identity comes from the verified session, never a request field.
+      .post(
+        '/qr/token',
+        requirePermission('self:read'),
+        qrLimit,
+        ownQr(async (id) => ({ token: await eqr.issueToken(id), ttlSeconds: QR_TOKEN_TTL_S })),
+      )
+      // The portal's QR page (FR-1.3). A GET: issuing is stateless, it stores nothing.
+      .get(
+        '/me/qr',
+        requirePermission('self:read'),
+        qrLimit,
+        ownQr((id) => eqr.liveQr(id)),
+      )
+      .post('/employees/:id/qr/revoke', requirePermission('qr:revoke'), async (req, res) => {
+        const current = await eqr.getProfile(idOf(req));
+        if (!current || !canSeeEmployee(userOf(res), current)) {
+          return void res.status(404).json({ error: 'Employee not found' });
+        }
+        const employee = await eqr.revokeQr(userOf(res).id, idOf(req));
+        if (!employee) return void res.status(404).json({ error: 'Employee not found' });
+        res.json(employee);
+      })
+      .post('/employees/:id/qr/reissue', requirePermission('qr:revoke'), async (req, res) => {
+        const current = await eqr.getProfile(idOf(req));
+        if (!current || !canSeeEmployee(userOf(res), current)) {
+          return void res.status(404).json({ error: 'Employee not found' });
+        }
+        try {
+          const employee = await eqr.reissueQr(userOf(res).id, idOf(req));
+          if (!employee) return void res.status(404).json({ error: 'Employee not found' });
+          res.json(employee);
+        } catch (e) {
+          if (!(e instanceof QrNotIssuableError)) throw e;
+          res.status(409).json({ error: e.message, reason: e.reason });
+        }
+      })
+      // Edge agent (ADR-9). Response: EdgeSnapshot.
+      // An edge has no user session, so no requirePermission. TODO(#44): authenticate the edge agent.
+      .get('/edge/snapshot', async (_req, res) => {
+        try {
+          res.set('Cache-Control', 'no-store').json(await eqr.snapshot());
+        } catch (e) {
+          if (!(e instanceof QrNotConfiguredError)) throw e;
+          res.status(503).json({ error: 'QR signing not configured' });
+        }
+      })
+  );
+};
