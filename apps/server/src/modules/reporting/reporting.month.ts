@@ -20,6 +20,8 @@ export const parseMonth = (value: unknown, now: Date): ReportMonth | string => {
   if (!match) return 'month must be YYYY-MM';
   const year = Number(match[1]);
   const month = Number(match[2]);
+  // Date.UTC maps years 0-99 to 1900-1999, which would not match the month echoed back.
+  if (year < 2000) return 'month must be YYYY-MM from 2000 on';
 
   const local = new Date(now.getTime() + VN_OFFSET_MS);
   const current = local.getUTCFullYear() * 12 + local.getUTCMonth();

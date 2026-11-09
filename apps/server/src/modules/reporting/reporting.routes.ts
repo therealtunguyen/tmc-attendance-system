@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import type { Request, Response } from 'express';
+import type { Request, RequestHandler, Response } from 'express';
 import { notImplemented } from '../../shared/errors.js';
 import { requirePermission } from '../iam/index.js';
 import type { UserRef } from '../iam/index.js';
@@ -69,6 +69,12 @@ const csvOf = (report: MonthlyReport): string => {
   }
 };
 
+/** Reports hold personal data: browsers and proxies must not keep them. */
+const noStore: RequestHandler = (_req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
+};
+
 export const reportingRoutes = ({
   reports,
   exports,
@@ -110,11 +116,11 @@ export const reportingRoutes = ({
   };
 
   return Router()
-    .get('/reports/monthly', requirePermission('report:read'), async (req, res) => {
+    .get('/reports/monthly', requirePermission('report:read'), noStore, async (req, res) => {
       const report = await run(req, res);
       if (report) res.json(report);
     })
-    .get('/reports/monthly.csv', requirePermission('report:read'), async (req, res) => {
+    .get('/reports/monthly.csv', requirePermission('report:read'), noStore, async (req, res) => {
       const report = await run(req, res);
       if (!report) return;
       res
@@ -127,7 +133,7 @@ export const reportingRoutes = ({
         .send(`\uFEFF${csvOf(report)}`);
     })
     .get('/access-log', notImplemented)
-    .get('/exports/:month', requirePermission('export:hr'), async (req, res) => {
+    .get('/exports/:month', requirePermission('export:hr'), noStore, async (req, res) => {
       const month = parseMonth(req.params.month, now());
       if (typeof month === 'string') {
         res.status(400).json({ error: month });
@@ -140,7 +146,7 @@ export const reportingRoutes = ({
       }
       res.json(run);
     })
-    .post('/exports/:month/rerun', requirePermission('export:hr'), async (req, res) => {
+    .post('/exports/:month/rerun', requirePermission('export:hr'), noStore, async (req, res) => {
       const ignore = req.body?.ignoreUnsyncedEdges;
       if (ignore !== undefined && typeof ignore !== 'boolean') {
         res.status(400).json({ error: 'ignoreUnsyncedEdges must be a boolean' });

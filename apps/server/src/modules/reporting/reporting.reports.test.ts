@@ -1,12 +1,21 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { UserRef } from '../iam/index.js';
-import { FakeAttendance, FakeRoster, fakeConfig } from './reporting.fakes.js';
+import {
+  BIG_RECORDS,
+  BIG_ROSTER,
+  FakeAttendance,
+  FakeRoster,
+  UNITS,
+  fakeConfig,
+} from './reporting.fakes.js';
 import { parseMonth } from './reporting.month.js';
 import type { ReportMonth } from './reporting.month.js';
 import {
+  EXE_MIN_GROUP,
   MonthlyReportService,
   ReportForbiddenError,
   UnknownScopeError,
+  queryUnits,
 } from './reporting.reports.js';
 import type { ReportQuery } from './reporting.reports.js';
 
@@ -79,6 +88,26 @@ describe('MonthlyReportService (FR-4.1, FR-4.3)', () => {
     expect(roster.calls.sort()).toEqual(['binh-duong', 'long-an']);
   });
 
+  describe('narrowest query', () => {
+    it('SUP of bd-cut reads only bd-cut', async () => {
+      await svc.monthly(sup(['bd-cut']), q('employee'));
+      expect(roster.calls).toEqual(['bd-cut']);
+      expect(attendance.calls.map((c) => c.scope)).toEqual(['bd-cut']);
+    });
+
+    it('scope=bd-prod reads its two teams', async () => {
+      await svc.monthly(hr, q('employee', 'bd-prod'));
+      expect(roster.calls.sort()).toEqual(['bd-cut', 'bd-sew']);
+      expect(attendance.calls.map((c) => c.scope).sort()).toEqual(['bd-cut', 'bd-sew']);
+    });
+
+    it('HR scoped to binh-duong (expanded scopes) reads the factory only', async () => {
+      await svc.monthly(hrBd, q('employee'));
+      expect(roster.calls).toEqual(['binh-duong']);
+      expect(attendance.calls.map((c) => c.scope)).toEqual(['binh-duong']);
+    });
+  });
+
   describe('HR scoped to a factory', () => {
     it('sees only that factory', async () => {
       const report = await svc.monthly(hrBd, q('employee'));
@@ -125,7 +154,39 @@ describe('MonthlyReportService (FR-4.1, FR-4.3)', () => {
     });
 
     it.each(['department', 'factory'] as const)('gets by=%s', async (by) => {
-      expect((await svc.monthly(exe, q(by))).rows.length).toBeGreaterThan(0);
+      const big = new MonthlyReportService(
+        new FakeRoster(BIG_ROSTER),
+        new FakeAttendance(BIG_ROSTER, BIG_RECORDS),
+        fakeConfig,
+      );
+      expect((await big.monthly(exe, q(by))).rows.length).toBeGreaterThan(0);
+    });
+
+    it('does not see a department with fewer than the minimum group; suppressed counts it', async () => {
+      const report = await svc.monthly(exe, q('department'));
+      // Default fixtures: bd-prod 2, no department 1, la-prod 1: all too small.
+      expect(report.rows).toEqual([]);
+      expect(report.suppressed).toBe(3);
+    });
+
+    it('keeps a group of exactly EXE_MIN_GROUP, drops the smaller one', async () => {
+      expect(EXE_MIN_GROUP).toBe(5);
+      const big = new MonthlyReportService(
+        new FakeRoster(BIG_ROSTER),
+        new FakeAttendance(BIG_ROSTER, BIG_RECORDS),
+        fakeConfig,
+      );
+      const report = await big.monthly(exe, q('factory'));
+      if (report.by !== 'factory') throw new Error('expected a factory report');
+      // long-an has exactly 5; binh-duong has 3.
+      expect(report.rows.map((r) => [r.factoryId, r.employees])).toEqual([['long-an', 5]]);
+      expect(report.suppressed).toBe(1);
+    });
+
+    it('HR sees the same small rows, with nothing suppressed', async () => {
+      const report = await svc.monthly(hr, q('department'));
+      expect(report.rows).toHaveLength(3);
+      expect(report.suppressed).toBe(0);
     });
   });
 
@@ -141,5 +202,19 @@ describe('MonthlyReportService (FR-4.1, FR-4.3)', () => {
         ReportForbiddenError,
       );
     });
+  });
+});
+
+describe('queryUnits', () => {
+  it.each([
+    ['a team', ['bd-cut'], ['bd-cut']],
+    ['a department: its teams', ['bd-prod'], ['bd-cut', 'bd-sew']],
+    ['a factory', ['binh-duong'], ['binh-duong']],
+    ['a factory and one of its teams: the factory', ['binh-duong', 'bd-cut'], ['binh-duong']],
+    ['two teams in different factories', ['la-pack', 'bd-cut'], ['bd-cut', 'la-pack']],
+    ['an unknown id', ['nowhere'], []],
+    ['duplicates', ['bd-cut', 'bd-cut'], ['bd-cut']],
+  ])('%s', (_name, targets, expected) => {
+    expect(queryUnits(UNITS, targets)).toEqual(expected);
   });
 });
