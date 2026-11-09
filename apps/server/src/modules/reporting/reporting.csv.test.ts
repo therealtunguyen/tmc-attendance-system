@@ -53,8 +53,18 @@ describe('toCsv (FR-4.2)', () => {
     ['-1', "'-1"],
     ['@cmd', "'@cmd"],
     ['\tx', "'\tx"],
-  ])('prefixes %j with an apostrophe', (name, written) => {
+    [' =1+1', "' =1+1"],
+    ['   @SUM(A1)', "'   @SUM(A1)"],
+    ['\u00a0=1', "'\u00a0=1"],
+    [' -', "' -"],
+    [' plain', ' plain'],
+  ])('writes %j as the guarded cell', (name, written) => {
     expect(toCsv(columns, [{ name, n: 1 }])).toBe(`Name,N\r\n${written},1\r\n`);
+  });
+
+  it('guards a header cell with a leading space before =', () => {
+    const cols: CsvColumn<Row>[] = [{ header: ' =evil', value: (r) => r.n }];
+    expect(toCsv(cols, [])).toBe("' =evil\r\n");
   });
 
   it('guards the header cells too', () => {

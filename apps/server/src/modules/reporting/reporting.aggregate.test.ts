@@ -250,3 +250,17 @@ describe('factoryRows (FR-4.1)', () => {
     expect(rows).toEqual(snapshot);
   });
 });
+
+describe('group hours add up to the rows shown (FR-4.3)', () => {
+  it("sums the employees' rounded hours, not the raw ones", () => {
+    const three = [
+      emp('a1', 'A001', 'binh-duong', 'team-s1'),
+      emp('a2', 'A002', 'binh-duong', 'team-s1'),
+      emp('a3', 'A003', 'binh-duong', 'team-s1'),
+    ];
+    const rows = employeeRows(three, [day('a1', 0.333), day('a2', 0.333), day('a3', 0.333)], units);
+    expect(rows.map((r) => r.hours)).toEqual([0.33, 0.33, 0.33]);
+    expect(departmentRows(rows, units)[0]!.hours).toBe(0.99); // raw sum would round to 1
+    expect(factoryRows(rows, units)[0]!.hours).toBe(0.99);
+  });
+});

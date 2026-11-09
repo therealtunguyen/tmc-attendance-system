@@ -7,12 +7,15 @@ export interface CsvColumn<T> {
 
 /** Characters that make a spreadsheet read a text cell as a formula (OWASP "CSV injection"). */
 const FORMULA_START = /^[=+\-@\t\r]/;
+/** Spreadsheets may skip leading whitespace before the formula character (" =1+1"). */
+const isFormula = (text: string): boolean =>
+  FORMULA_START.test(text) || /^[=+\-@]/.test(text.trimStart());
 
 /** Text cells are guarded against formula injection; numbers, booleans and null never are. */
 const cell = (value: string | number | boolean | null, isText: boolean): string => {
   if (value === null) return '';
   const text = String(value);
-  const safe = isText && FORMULA_START.test(text) ? `'${text}` : text;
+  const safe = isText && isFormula(text) ? `'${text}` : text;
   return /[",\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 };
 
