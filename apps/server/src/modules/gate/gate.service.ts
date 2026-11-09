@@ -107,10 +107,12 @@ export interface GateStore {
   findEdge(id: string): Promise<GateEdge | null>;
   heartbeats(edgeIds: string[]): Promise<EdgeState[]>;
   /**
-   * When the edge reports an empty outbox it has pushed every event, so lastSyncAt moves to
-   * receivedAt too (ADR-9; the monthly export waits for it, FR-4.5). Both columns only move forward.
+   * lastHeartbeatAt moves to receivedAt. lastSyncAt moves to syncedAt, the edge clock's send time of
+   * a heartbeat with an empty outbox, never later than receipt; null when the outbox was not empty
+   * (ADR-9; the monthly export waits for it, FR-4.5). Both columns only move forward.
    */
-  recordHeartbeat(edgeId: string, receivedAt: Date, outboxEmpty: boolean): Promise<boolean>;
+  recordHeartbeat(edgeId: string, receivedAt: Date, syncedAt: Date | null): Promise<boolean>;
+  /** Only edges serving an active gate count; a decommissioned edge does not hold the export back. */
   edgeSyncs(): Promise<EdgeSync[]>;
   offlineEdges(cutoff: Date): Promise<OfflineEdge[]>;
 }
@@ -302,7 +304,12 @@ export class GateService implements EdgeSyncStatus {
 
   /** Marks the edge online; the edge is offline when these stop (ADR-9, FR-2.6). */
   async edgeHeartbeat(hb: EdgeHeartbeat): Promise<void> {
-    if (!(await this.repo.recordHeartbeat(hb.edgeId, this.now(), hb.outboxSize === 0))) {
+    const receivedAt = this.now();
+    // Scans made after sentAt may still be in the outbox, so the sync is dated by the edge's send
+    // time, clamped so an edge clock running ahead cannot push it into the future.
+    const syncedAt =
+      hb.outboxSize === 0 ? new Date(Math.min(Date.parse(hb.sentAt), receivedAt.getTime())) : null;
+    if (!(await this.repo.recordHeartbeat(hb.edgeId, receivedAt, syncedAt))) {
       throw new UnknownEdgeError();
     }
   }

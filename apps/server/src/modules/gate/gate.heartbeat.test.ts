@@ -114,12 +114,61 @@ describe('Gate heartbeat (FR-2.6)', () => {
     });
   });
 
-  it('lists the last sync of every edge', async () => {
-    await service().edgeHeartbeat(hb);
-    expect(await service().edgeSyncs()).toEqual([
+  it('dates the sync by the heartbeat send time, not receipt (FR-4.5)', async () => {
+    now = Date.parse('2026-10-31T17:00:05Z');
+    await service().edgeHeartbeat({ ...hb, sentAt: '2026-10-31T16:59:50Z' });
+    expect(store.edges.get('edge-bd')).toMatchObject({
+      lastHeartbeatAt: new Date('2026-10-31T17:00:05Z'),
+      lastSyncAt: new Date('2026-10-31T16:59:50Z'),
+    });
+  });
+
+  it('clamps a send time ahead of the server clock to the server time', async () => {
+    await service().edgeHeartbeat({ ...hb, sentAt: new Date(BASE + 600_000).toISOString() });
+    expect(store.edges.get('edge-bd')!.lastSyncAt).toEqual(new Date(BASE));
+  });
+
+  it('does not move lastSyncAt back on a later heartbeat with an older send time', async () => {
+    const gate = service();
+    await gate.edgeHeartbeat({ ...hb, sentAt: new Date(BASE).toISOString() });
+    now += 5_000;
+    await gate.edgeHeartbeat({ ...hb, sentAt: new Date(BASE - 60_000).toISOString() });
+    expect(store.edges.get('edge-bd')).toMatchObject({
+      lastHeartbeatAt: new Date(BASE + 5_000),
+      lastSyncAt: new Date(BASE),
+    });
+  });
+
+  it('lists the last sync of edges that serve an active gate only', async () => {
+    const gate = service();
+    await gate.createGate('adm', entrance);
+    const closed = await gate.createGate('adm', {
+      ...entrance,
+      edgeId: 'edge-la',
+      factoryId: 'long-an',
+      turnstileId: 'la-device',
+    });
+    await gate.edgeHeartbeat(hb);
+    await gate.edgeHeartbeat({ ...hb, edgeId: 'edge-la' });
+    expect(await gate.edgeSyncs()).toEqual([
       { edgeId: 'edge-bd', factoryId: 'binh-duong', lastSyncAt: new Date(BASE) },
-      { edgeId: 'edge-la', factoryId: 'long-an', lastSyncAt: null },
+      { edgeId: 'edge-la', factoryId: 'long-an', lastSyncAt: new Date(BASE) },
     ]);
+    await gate.deactivateGate('adm', closed.id);
+    expect((await gate.edgeSyncs()).map((e) => e.edgeId)).toEqual(['edge-bd']);
+  });
+
+  it('lists an edge with an active gate even if it never synced', async () => {
+    const gate = service();
+    await gate.createGate('adm', entrance);
+    expect(await gate.edgeSyncs()).toEqual([
+      { edgeId: 'edge-bd', factoryId: 'binh-duong', lastSyncAt: null },
+    ]);
+  });
+
+  it('lists no edge that has no gates', async () => {
+    await service().edgeHeartbeat(hb);
+    expect(await service().edgeSyncs()).toEqual([]);
   });
 
   it('rejects a heartbeat from an unknown edge', async () => {
@@ -129,8 +178,8 @@ describe('Gate heartbeat (FR-2.6)', () => {
   });
 
   it('never moves lastHeartbeatAt or lastSyncAt back (fake mirrors the SQL)', async () => {
-    await store.recordHeartbeat('edge-bd', new Date(BASE), true);
-    await store.recordHeartbeat('edge-bd', new Date(BASE - 5_000), true);
+    await store.recordHeartbeat('edge-bd', new Date(BASE), new Date(BASE));
+    await store.recordHeartbeat('edge-bd', new Date(BASE - 5_000), new Date(BASE - 5_000));
     expect(store.edges.get('edge-bd')).toMatchObject({
       lastHeartbeatAt: new Date(BASE),
       lastSyncAt: new Date(BASE),
