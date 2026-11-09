@@ -76,8 +76,15 @@ class InMemoryEmployees implements Pick<
 }
 
 /** Same contract as AttendanceRepo for what ingest and dailyRecords call: a known eventId is skipped. */
-class InMemoryEvents implements Pick<AttendanceStore, 'insert' | 'insertMany' | 'grantedEvents'> {
+class InMemoryEvents implements Pick<
+  AttendanceStore,
+  'insert' | 'insertMany' | 'grantedEvents' | 'corrections'
+> {
   rows = new Map<string, StoredEvent>();
+
+  async corrections() {
+    return [];
+  }
 
   async insert(event: StoredEvent) {
     if (this.rows.has(event.eventId)) return false;
@@ -183,7 +190,7 @@ beforeEach(() => {
     qrKeys,
     () => new Date(nowMs),
   );
-  attendance = new AttendanceService(events as unknown as AttendanceStore, eqr);
+  attendance = new AttendanceService(events as unknown as AttendanceStore, eqr, iam);
   app = createApp(
     [
       iamRoutes(iam, { login: false, mfa: false }),

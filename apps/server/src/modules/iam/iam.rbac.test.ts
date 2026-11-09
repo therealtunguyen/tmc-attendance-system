@@ -20,7 +20,7 @@ const matrix: Record<Permission, Role[]> = {
   'employee:manage': ['HR', 'ADM'],
   'qr:revoke': ['HR', 'ADM'],
   'attendance:read:team': ['SUP', 'HR'],
-  'attendance:correct': ['HR', 'SUP'],
+  'attendance:correct': ['HR'],
   'attendance:request-correction': ['EMP', 'SUP'],
   'export:hr': ['HR'],
   'report:read': ['HR', 'SUP', 'EXE'],

@@ -3,13 +3,18 @@ export { AttendanceRepo } from './attendance.repo.js';
 export { attendanceRoutes } from './attendance.routes.js';
 export {
   AttendanceService,
+  InvalidCorrectionError,
   OutcomeConflictError,
+  RecordNotFoundError,
   UnknownEventError,
 } from './attendance.service.js';
 export type {
   AttendanceQuery,
   AttendanceRecorder,
   AttendanceStore,
+  Correction,
+  CorrectionField,
+  CorrectionRequest,
   DailyRecord,
   EdgeIngest,
   ScanEvent,

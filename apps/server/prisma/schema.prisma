@@ -39,6 +39,30 @@ enum ScanMethod {
   MANUAL
 }
 
+enum CorrectionField {
+  FIRST_IN
+  LAST_OUT
+}
+
+// One HR change to a daily record (FR-3.6, UC-8). Only added, never changed or deleted. Daily records
+// are computed on read, so this names the employee and the day; the scans stay as they were.
+model Correction {
+  id             String          @id @default(uuid())
+  employeeId     String
+  // Start of the Vietnam local day.
+  day            DateTime
+  field          CorrectionField
+  // The value just before this correction; null when the day had no last out.
+  originalValue  DateTime?
+  correctedValue DateTime
+  reason         String
+  // The HR user.
+  correctedBy    String
+  createdAt      DateTime        @default(now())
+
+  @@index([employeeId, day])
+}
+
 enum ScanOutcome {
   PENDING
   GRANTED

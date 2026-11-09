@@ -43,7 +43,7 @@ const eqr = new EmployeeQrService(
   () => new Date(),
   new QrLinkMail(mailer, config.portalUrl),
 );
-const attendance = new AttendanceService(new AttendanceRepo(db), eqr);
+const attendance = new AttendanceService(new AttendanceRepo(db), eqr, iam);
 const reporting = new ReportingService(new ReportingRepo(db), attendance, admin, hrs, iam);
 const gate = new GateService(new GateRepo(db), eqr, attendance, turnstile, admin, reporting, iam, {
   heartbeatTimeoutMs: config.heartbeatTimeoutMs,

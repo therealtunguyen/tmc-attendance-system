@@ -2,7 +2,13 @@ import { useState, type FormEvent } from 'react';
 import { passMfa, saveSession, signIn, type Session, type SignIn } from '../../session';
 
 /** Stays on the page it was opened from, so the link in the email lands on the QR (FR-1.3). */
-export function SignInForm({ onSignedIn }: { onSignedIn: (session: Session) => void }) {
+export function SignInForm({
+  onSignedIn,
+  title = 'Sign in to see your QR code',
+}: {
+  onSignedIn: (session: Session) => void;
+  title?: string;
+}) {
   const [pendingToken, setPendingToken] = useState<string | null>(null);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -38,7 +44,7 @@ export function SignInForm({ onSignedIn }: { onSignedIn: (session: Session) => v
 
   return (
     <form onSubmit={(event) => void submit(event)} style={{ maxWidth: 320 }}>
-      <h2>Sign in to see your QR code</h2>
+      <h2>{title}</h2>
       {pendingToken ? (
         <label>
           Authenticator code

@@ -1,8 +1,13 @@
 import type { PrismaClient } from '../../shared/prisma.js';
 import type { DailyInput } from './attendance.daily.js';
-import type { AttendanceStore, ScanOutcome, StoredEvent } from './attendance.service.js';
+import type {
+  AttendanceStore,
+  Correction,
+  ScanOutcome,
+  StoredEvent,
+} from './attendance.service.js';
 
-/** Owns: AttendanceEvent, DailyRecord, Correction. */
+/** Owns: AttendanceEvent, Correction. Daily records are computed on read, so they have no table. */
 export class AttendanceRepo implements AttendanceStore {
   constructor(private db: PrismaClient) {}
 
@@ -37,6 +42,29 @@ export class AttendanceRepo implements AttendanceStore {
       where: { outcome: 'GRANTED', employeeId },
       select: { employeeId: true, occurredAt: true, outcome: true },
     });
+  }
+
+  corrections(from: Date, to: Date, employeeIds?: string[]): Promise<Correction[]> {
+    return this.db.correction.findMany({
+      where: {
+        day: { gte: from, lt: to },
+        ...(employeeIds ? { employeeId: { in: employeeIds } } : {}),
+      },
+      orderBy: { createdAt: 'asc' },
+      omit: { id: true },
+    });
+  }
+
+  correctionsOf(employeeId: string): Promise<Correction[]> {
+    return this.db.correction.findMany({
+      where: { employeeId },
+      orderBy: { createdAt: 'asc' },
+      omit: { id: true },
+    });
+  }
+
+  async insertCorrection(correction: Correction): Promise<void> {
+    await this.db.correction.create({ data: correction });
   }
 
   async decide(eventId: string, outcome: ScanOutcome): Promise<boolean> {

@@ -2,7 +2,17 @@ import type { PushEventsRequest, PushEventsResponse } from '../../shared/contrac
 import { todo } from '../../shared/errors.js';
 import type { DateRange, Scope } from '../../shared/types.js';
 import type { EmployeeDirectory } from '../employee-qr/index.js';
-import { buildDailyRecords, localDayStart, nextDay, type DailyInput } from './attendance.daily.js';
+import type { AuditLog } from '../iam/index.js';
+import {
+  buildDailyRecords,
+  localDayStart,
+  nextDay,
+  parseRecordId,
+  recordIdOf,
+  type DailyInput,
+} from './attendance.daily.js';
+
+const MAX_REASON_LENGTH = 500;
 
 export type ScanOutcome = 'GRANTED' | 'DENIED';
 
@@ -37,7 +47,42 @@ export interface DailyRecord {
   lastOut: Date | null;
   hours: number;
   missingPunch: boolean;
+  /** Present and true when HR changed a value of this day (FR-3.6). */
+  corrected?: boolean;
 }
+
+export type CorrectionField = 'FIRST_IN' | 'LAST_OUT';
+
+/** One HR change to a daily record (FR-3.6). Only added, never changed or deleted. */
+export interface Correction {
+  employeeId: string;
+  /** The Vietnam local day start of the record. */
+  day: Date;
+  field: CorrectionField;
+  /** The value just before this correction; null when the day had no last out. */
+  originalValue: Date | null;
+  correctedValue: Date;
+  reason: string;
+  /** The HR user. */
+  correctedBy: string;
+  createdAt: Date;
+}
+
+export interface CorrectionRequest {
+  field: CorrectionField;
+  value: Date;
+  reason: string;
+}
+
+/** The daily record does not exist: a bad ID, or a day with no granted scan (UC-8 precondition). */
+export class RecordNotFoundError extends Error {
+  constructor(readonly recordId: string) {
+    super(`No daily record ${recordId}`);
+  }
+}
+
+/** The correction breaks a rule, so nothing was stored. The message says which, for HR. */
+export class InvalidCorrectionError extends Error {}
 
 /** setOutcome() for an eventId that was never recorded. */
 export class UnknownEventError extends Error {
@@ -66,6 +111,11 @@ export interface AttendanceStore {
   grantedEvents(from: Date, to: Date, employeeIds?: string[]): Promise<DailyInput[]>;
   /** Every GRANTED event of one employee, whatever the date. */
   grantedEventsOf(employeeId: string): Promise<DailyInput[]>;
+  /** Corrections of the days in [from, to), oldest first; only these employees if given. */
+  corrections(from: Date, to: Date, employeeIds?: string[]): Promise<Correction[]>;
+  /** Every correction of one employee, oldest first. */
+  correctionsOf(employeeId: string): Promise<Correction[]>;
+  insertCorrection(correction: Correction): Promise<void>;
   /** Sets the outcome only while it is PENDING or already equal; true if the row now has it. */
   decide(eventId: string, outcome: ScanOutcome): Promise<boolean>;
   /** Null when there is no such event. */
@@ -104,6 +154,7 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
   constructor(
     private repo: AttendanceStore,
     private directory: EmployeeDirectory,
+    private audit: AuditLog,
   ) {}
 
   /**
@@ -177,12 +228,108 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
     if (employeeIds.length === 0) return [];
     const from = localDayStart(range.from);
     const to = nextDay(localDayStart(range.to));
-    return buildDailyRecords(await this.repo.grantedEvents(from, to, employeeIds));
+    return this.build(from, to, employeeIds);
   }
 
   /** One employee's daily records, newest day first (FR-1.6, UC-3). */
   async history(employeeId: string): Promise<DailyRecord[]> {
-    return buildDailyRecords(await this.repo.grantedEventsOf(employeeId)).reverse();
+    const [events, corrections] = await Promise.all([
+      this.repo.grantedEventsOf(employeeId),
+      this.repo.correctionsOf(employeeId),
+    ]);
+    return buildDailyRecords(events, corrections).reverse();
+  }
+
+  /** What HR opens to correct a day (UC-8 step 1), each record with its ID. Local days, both included. */
+  async employeeRecords(
+    employeeId: string,
+    range: DateRange,
+  ): Promise<(DailyRecord & { recordId: string })[]> {
+    const from = localDayStart(range.from);
+    const to = nextDay(localDayStart(range.to));
+    const records = await this.build(from, to, [employeeId]);
+    return records.map((record) => ({ ...record, recordId: recordIdOf(record) }));
+  }
+
+  /** Every correction of one daily record, oldest first: the original values stay visible. */
+  async recordCorrections(recordId: string): Promise<Correction[]> {
+    const key = parseRecordId(recordId);
+    if (!key) throw new RecordNotFoundError(recordId);
+    return this.repo.corrections(key.day, nextDay(key.day), [key.employeeId]);
+  }
+
+  /**
+   * HR changes one value of a daily record, with a reason (FR-3.6, UC-8). The scans are not touched:
+   * the correction is stored beside them, with the value it replaced. Returns the recomputed record.
+   * Audited first, because the two writes belong to two modules and cannot share a transaction: a
+   * failure in between leaves a spare audit entry, never a change that was not audited.
+   */
+  async correct(
+    actorId: string,
+    recordId: string,
+    { field, value, reason }: CorrectionRequest,
+  ): Promise<DailyRecord> {
+    const key = parseRecordId(recordId);
+    if (!key) throw new RecordNotFoundError(recordId);
+    const { employeeId, day } = key;
+    const trimmed = reason.trim();
+    if (!trimmed) throw new InvalidCorrectionError('reason is required');
+    if (trimmed.length > MAX_REASON_LENGTH) {
+      throw new InvalidCorrectionError(`reason must be at most ${MAX_REASON_LENGTH} characters`);
+    }
+
+    const to = nextDay(day);
+    const [events, corrections] = await Promise.all([
+      this.repo.grantedEvents(day, to, [employeeId]),
+      this.repo.corrections(day, to, [employeeId]),
+    ]);
+    const [before] = buildDailyRecords(events, corrections);
+    if (!before) throw new RecordNotFoundError(recordId);
+    if (localDayStart(value).getTime() !== day.getTime()) {
+      throw new InvalidCorrectionError('value must be on the day of the record');
+    }
+    const firstIn = field === 'FIRST_IN' ? value : before.firstIn;
+    const lastOut = field === 'LAST_OUT' ? value : before.lastOut;
+    if (firstIn && lastOut && firstIn.getTime() >= lastOut.getTime()) {
+      throw new InvalidCorrectionError('first in must be before last out');
+    }
+
+    const correction: Correction = {
+      employeeId,
+      day,
+      field,
+      originalValue: field === 'FIRST_IN' ? before.firstIn : before.lastOut,
+      correctedValue: value,
+      reason: trimmed,
+      correctedBy: actorId,
+      createdAt: new Date(),
+    };
+    const [after] = buildDailyRecords(events, [...corrections, correction]);
+    await this.audit.append({
+      actorId,
+      action: 'ATTENDANCE_CORRECT',
+      target: `attendance:${recordId}`,
+      at: correction.createdAt,
+      before,
+      after: { ...after, field, reason: trimmed },
+    });
+    await this.repo.insertCorrection(correction);
+    return after as DailyRecord;
+  }
+
+  /** Whether the employee belongs to one of these factories or teams (BR-15). */
+  async inScopes(employeeId: string, scopes: Scope[]): Promise<boolean> {
+    const lists = await Promise.all(scopes.map((scope) => this.directory.list(scope)));
+    return lists.some((list) => list.some((e) => e.id === employeeId));
+  }
+
+  /** The one path to a daily record, so reports, exports and the portal all see corrections. */
+  private async build(from: Date, to: Date, employeeIds: string[]): Promise<DailyRecord[]> {
+    const [events, corrections] = await Promise.all([
+      this.repo.grantedEvents(from, to, employeeIds),
+      this.repo.corrections(from, to, employeeIds),
+    ]);
+    return buildDailyRecords(events, corrections);
   }
 
   async accessLog(): Promise<ScanEvent[]> {

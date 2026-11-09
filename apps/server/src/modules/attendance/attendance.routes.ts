@@ -1,12 +1,16 @@
-import { Router, type Request } from 'express';
+import { Router, type Request, type Response } from 'express';
 import {
   MAX_EDGE_BATCH,
   type EdgeEvent,
   type PushEventsRequest,
 } from '../../shared/contracts/edge.js';
-import { notImplemented } from '../../shared/errors.js';
-import { requirePermission, type UserRef } from '../iam/index.js';
-import type { AttendanceService } from './attendance.service.js';
+import { isRestricted, requirePermission, type UserRef } from '../iam/index.js';
+import { parseRecordId } from './attendance.daily.js';
+import {
+  InvalidCorrectionError,
+  RecordNotFoundError,
+  type AttendanceService,
+} from './attendance.service.js';
 
 const isText = (value: unknown): value is string =>
   typeof value === 'string' && value.trim() !== '';
@@ -67,6 +71,12 @@ const parseBatch = (req: Request): PushEventsRequest | string => {
   return { edgeId: body.edgeId, events: body.events as EdgeEvent[] };
 };
 
+/** A user limited to some factories or teams only reaches employees in them (BR-15). */
+const reachable = async (attendance: AttendanceService, res: Response, employeeId: string) => {
+  const user = res.locals.user as UserRef;
+  return !isRestricted(user) || attendance.inScopes(employeeId, user.scopes ?? []);
+};
+
 export const attendanceRoutes = (attendance: AttendanceService) =>
   Router()
     // Own history only (FR-1.6): the employee comes from the verified session, never a request field.
@@ -79,7 +89,78 @@ export const attendanceRoutes = (attendance: AttendanceService) =>
       }
       res.set('Cache-Control', 'no-store').json({ records: await attendance.history(employeeId) });
     })
-    .post('/attendance/:recordId/corrections', notImplemented)
+    // HR opens an employee's daily records to correct them (UC-8 step 1).
+    .get('/attendance/records', requirePermission('attendance:correct'), async (req, res) => {
+      const { employeeId, from, to } = req.query;
+      if (!isText(employeeId)) {
+        return void res.status(400).json({ error: 'employeeId is required' });
+      }
+      if (!isIsoDate(from) || !isIsoDate(to)) {
+        return void res.status(400).json({ error: 'from and to must be ISO dates with an offset' });
+      }
+      if (Date.parse(from) > Date.parse(to)) {
+        return void res.status(400).json({ error: 'from must not be after to' });
+      }
+      // Out of scope looks the same as no records, so existence does not leak.
+      const records = (await reachable(attendance, res, employeeId))
+        ? await attendance.employeeRecords(employeeId, {
+            from: new Date(from),
+            to: new Date(to),
+          })
+        : [];
+      res.set('Cache-Control', 'no-store').json({ records });
+    })
+    // The original value of every change stays readable (FR-3.6).
+    .get(
+      '/attendance/:recordId/corrections',
+      requirePermission('attendance:correct'),
+      async (req, res) => {
+        const recordId = req.params.recordId as string;
+        const key = parseRecordId(recordId);
+        if (!key || !(await reachable(attendance, res, key.employeeId))) {
+          return void res.status(404).json({ error: 'Daily record not found' });
+        }
+        res
+          .set('Cache-Control', 'no-store')
+          .json({ corrections: await attendance.recordCorrections(recordId) });
+      },
+    )
+    // Only HR, with a reason; the original is kept and the change is audited (FR-3.6, UC-8).
+    .post(
+      '/attendance/:recordId/corrections',
+      requirePermission('attendance:correct'),
+      async (req, res) => {
+        const recordId = req.params.recordId as string;
+        const key = parseRecordId(recordId);
+        if (!key || !(await reachable(attendance, res, key.employeeId))) {
+          return void res.status(404).json({ error: 'Daily record not found' });
+        }
+        const { field, value, reason } = (req.body ?? {}) as Record<string, unknown>;
+        if (field !== 'FIRST_IN' && field !== 'LAST_OUT') {
+          return void res.status(400).json({ error: 'field must be FIRST_IN or LAST_OUT' });
+        }
+        if (!isIsoDate(value)) {
+          return void res.status(400).json({ error: 'value must be an ISO date with an offset' });
+        }
+        if (typeof reason !== 'string') {
+          return void res.status(400).json({ error: 'reason is required' });
+        }
+        try {
+          const record = await attendance.correct((res.locals.user as UserRef).id, recordId, {
+            field,
+            value: new Date(value),
+            reason,
+          });
+          res.status(201).set('Cache-Control', 'no-store').json(record);
+        } catch (e) {
+          if (e instanceof RecordNotFoundError) {
+            return void res.status(404).json({ error: 'Daily record not found' });
+          }
+          if (!(e instanceof InvalidCorrectionError)) throw e;
+          res.status(400).json({ error: e.message });
+        }
+      },
+    )
     // Edge outbox (ADR-9). Body: PushEventsRequest. Response: PushEventsResponse.
     // TODO(#44): authenticate the edge agent.
     .post('/edge/events', async (req, res) => {

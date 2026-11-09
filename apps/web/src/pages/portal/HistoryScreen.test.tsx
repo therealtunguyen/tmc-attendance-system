@@ -62,6 +62,20 @@ describe('HistoryScreen', () => {
     expect(page).toContain('–');
   });
 
+  it('marks a day HR corrected, and only that day', () => {
+    const day = {
+      day: '2026-11-06T17:00:00.000Z',
+      firstIn: '2026-11-07T00:58:00.000Z',
+      lastOut: '2026-11-07T10:03:00.000Z',
+      hours: 9.08,
+      missingPunch: false,
+    };
+    expect(render({ kind: 'ok', profile, records: [{ ...day, corrected: true }] })).toContain(
+      'Corrected by HR',
+    );
+    expect(render({ kind: 'ok', profile, records: [day] })).not.toContain('Corrected by HR');
+  });
+
   it('says so when there is nothing yet, still showing the profile', () => {
     const page = render({ kind: 'ok', profile, records: [] });
     expect(page).toContain('No attendance recorded yet.');
