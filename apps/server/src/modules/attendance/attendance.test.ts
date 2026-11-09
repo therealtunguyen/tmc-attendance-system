@@ -9,6 +9,7 @@ import {
   AttendanceService,
   OutcomeConflictError,
   UnknownEventError,
+  type AccessLogQuery,
   type AttendanceStore,
   type ScanEvent,
   type ScanOutcome,
@@ -38,6 +39,26 @@ class InMemoryEvents implements AttendanceStore {
 
   async outcomeOf(eventId: string) {
     return this.rows.get(eventId)?.outcome ?? null;
+  }
+
+  accessLogCalls = 0;
+
+  async accessLog({ range, gateIds, outcome, limit }: AccessLogQuery) {
+    this.accessLogCalls++;
+    return [...this.rows.values()]
+      .filter(
+        (e) =>
+          e.occurredAt >= range.from &&
+          e.occurredAt < range.to &&
+          (!gateIds || gateIds.includes(e.gateId)) &&
+          (!outcome || e.outcome === outcome),
+      )
+      .sort(
+        (a, b) =>
+          b.occurredAt.getTime() - a.occurredAt.getTime() || a.eventId.localeCompare(b.eventId),
+      )
+      .slice(0, limit)
+      .map((e) => ({ ...e }));
   }
 
   async grantedEvents(from: Date, to: Date, employeeIds?: string[]) {
@@ -422,5 +443,88 @@ describe('AttendanceService.dailyRecords (FR-3.4, FR-3.5)', () => {
       'nowhere',
     );
     expect(records).toEqual([]);
+  });
+});
+
+describe('AttendanceService.accessLog (FR-4.4)', () => {
+  const at = (iso: string) => new Date(iso);
+  const day = { from: at('2026-11-07T00:00:00Z'), to: at('2026-11-08T00:00:00Z') };
+  const seed = async (eventId: string, occurredAt: string, changes: Partial<ScanEvent> = {}) =>
+    attendance.record({ ...scan, eventId, occurredAt: at(occurredAt), ...changes });
+
+  it('includes occurredAt at range.from and excludes it at range.to', async () => {
+    await seed('a', '2026-11-06T23:59:59.999Z');
+    await seed('b', '2026-11-07T00:00:00Z');
+    await seed('c', '2026-11-07T23:59:59.999Z');
+    await seed('d', '2026-11-08T00:00:00Z');
+    const rows = await attendance.accessLog({ range: day, limit: 10 });
+    expect(rows.map((r) => r.eventId)).toEqual(['c', 'b']);
+  });
+
+  it('an empty gateIds list matches nothing and never reaches the store', async () => {
+    await seed('a', '2026-11-07T01:00:00Z');
+    expect(await attendance.accessLog({ range: day, gateIds: [], limit: 10 })).toEqual([]);
+    expect(store.accessLogCalls).toBe(0);
+  });
+
+  it('combines gateIds and outcome', async () => {
+    await seed('a', '2026-11-07T01:00:00Z', { gateId: 'g1', outcome: 'DENIED' });
+    await seed('b', '2026-11-07T02:00:00Z', { gateId: 'g1' });
+    await seed('c', '2026-11-07T03:00:00Z', { gateId: 'g2', outcome: 'DENIED' });
+    await seed('d', '2026-11-07T04:00:00Z', { gateId: 'g3', outcome: 'DENIED' });
+    const rows = await attendance.accessLog({
+      range: day,
+      gateIds: ['g1', 'g2'],
+      outcome: 'DENIED',
+      limit: 10,
+    });
+    expect(rows.map((r) => r.eventId)).toEqual(['c', 'a']);
+  });
+
+  it('lists newest first, equal times by eventId ascending', async () => {
+    await seed('b', '2026-11-07T02:00:00Z');
+    await seed('a', '2026-11-07T02:00:00Z');
+    await seed('old', '2026-11-07T01:00:00Z');
+    await seed('new', '2026-11-07T03:00:00Z');
+    const rows = await attendance.accessLog({ range: day, limit: 10 });
+    expect(rows.map((r) => r.eventId)).toEqual(['new', 'a', 'b', 'old']);
+  });
+
+  it('returns at most limit rows, the newest ones', async () => {
+    await seed('a', '2026-11-07T01:00:00Z');
+    await seed('b', '2026-11-07T02:00:00Z');
+    await seed('c', '2026-11-07T03:00:00Z');
+    const rows = await attendance.accessLog({ range: day, limit: 2 });
+    expect(rows.map((r) => r.eventId)).toEqual(['c', 'b']);
+  });
+
+  it('includes DENIED and PENDING scans, as stored', async () => {
+    await seed('a', '2026-11-07T01:00:00Z', { outcome: 'DENIED' });
+    await seed('b', '2026-11-07T02:00:00Z');
+    await attendance.setOutcome('b', 'GRANTED');
+    await seed('c', '2026-11-07T03:00:00Z');
+    const rows = await attendance.accessLog({ range: day, limit: 10 });
+    expect(rows.map((r) => [r.eventId, r.outcome])).toEqual([
+      ['c', 'PENDING'],
+      ['b', 'GRANTED'],
+      ['a', 'DENIED'],
+    ]);
+    expect(rows[0]).toMatchObject({ edgeId: null, jti: null, stale: false });
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects limit %s with a RangeError',
+    async (limit) => {
+      await expect(attendance.accessLog({ range: day, limit })).rejects.toThrow(RangeError);
+    },
+  );
+
+  it('an empty or inverted range gives no rows', async () => {
+    await seed('a', '2026-11-07T01:00:00Z');
+    const t = at('2026-11-07T01:00:00Z');
+    expect(await attendance.accessLog({ range: { from: t, to: t }, limit: 10 })).toEqual([]);
+    expect(
+      await attendance.accessLog({ range: { from: day.to, to: day.from }, limit: 10 }),
+    ).toEqual([]);
   });
 });

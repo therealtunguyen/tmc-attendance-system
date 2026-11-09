@@ -23,11 +23,27 @@ export interface ScanEvent {
 }
 
 /** A row in AttendanceEvent. Edge ingest (#32) fills the extra fields; record() leaves the defaults. */
-export interface StoredEvent extends Omit<ScanEvent, 'outcome'> {
+export interface StoredEvent extends Omit<ScanEvent, 'outcome' | 'guardId' | 'reason'> {
+  /** Null when read back from the database without a value. */
+  guardId?: string | null;
+  reason?: string | null;
   outcome: ScanOutcome | 'PENDING';
   edgeId: string | null;
   jti: string | null;
   stale: boolean;
+}
+
+export type AccessOutcome = StoredEvent['outcome']; // 'GRANTED' | 'DENIED' | 'PENDING'
+
+/** What the security access log asks for (FR-4.4). Filters, order and limit run in the database. */
+export interface AccessLogQuery {
+  /** occurredAt from range.from (inclusive) to range.to (exclusive). */
+  range: DateRange;
+  /** Only these gates; undefined = every gate. An empty list matches nothing. */
+  gateIds?: readonly string[];
+  outcome?: AccessOutcome;
+  /** Newest first, at most this many rows (a positive integer). */
+  limit: number;
 }
 
 export interface DailyRecord {
@@ -68,6 +84,8 @@ export interface AttendanceStore {
   decide(eventId: string, outcome: ScanOutcome): Promise<boolean>;
   /** Null when there is no such event. */
   outcomeOf(eventId: string): Promise<StoredEvent['outcome'] | null>;
+  /** Every scan matching the query, denied ones included, newest first by occurredAt then eventId ascending; rows as stored. */
+  accessLog(query: AccessLogQuery): Promise<StoredEvent[]>;
 }
 
 export interface AttendanceRecorder {
@@ -94,7 +112,8 @@ export interface EdgeIngest {
 export interface AttendanceQuery {
   dailyRecords(range: DateRange, scope: Scope): Promise<DailyRecord[]>;
   history(employeeId: string): Promise<DailyRecord[]>;
-  accessLog(range: DateRange): Promise<ScanEvent[]>;
+  /** Every scan, denied ones included, newest first by occurredAt then eventId ascending; rows as stored. */
+  accessLog(query: AccessLogQuery): Promise<StoredEvent[]>;
 }
 
 /** Event store, daily records, missing punches, HR corrections (FR-1.6, FR-3.x). */
@@ -182,7 +201,12 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
     return todo();
   }
 
-  async accessLog(): Promise<ScanEvent[]> {
-    return todo();
+  async accessLog(query: AccessLogQuery): Promise<StoredEvent[]> {
+    if (!Number.isSafeInteger(query.limit) || query.limit < 1) {
+      throw new RangeError('limit must be a positive integer');
+    }
+    if (query.gateIds?.length === 0) return [];
+    if (query.range.to <= query.range.from) return [];
+    return this.repo.accessLog(query);
   }
 }
