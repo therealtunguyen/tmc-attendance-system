@@ -71,6 +71,9 @@ model AttendanceEvent {
   receivedAt DateTime    @default(now())
 
   @@index([jti])
+  // The security access log filters by gate and time, newest first (FR-4.4).
+  @@index([gateId, occurredAt])
+  @@index([occurredAt])
 }
 
 // Owned by the gate module. One edge agent per factory (ADR-9).
