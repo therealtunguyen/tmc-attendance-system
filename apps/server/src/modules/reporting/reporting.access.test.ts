@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { UserRef } from '../iam/index.js';
 import { AccessLogGateNotFoundError, AccessLogService } from './reporting.access.js';
-import type { AccessLogEvent } from './reporting.access.js';
 import { FakeAccessSource, FakeGateLookup, FakeRoster } from './reporting.fakes.js';
+import type { AccessFixture } from './reporting.fakes.js';
 
 const RANGE = { from: new Date('2026-11-01T00:00:00Z'), to: new Date('2026-11-02T00:00:00Z') };
 const at = (h: number) => new Date(Date.UTC(2026, 10, 1, h));
-const event = (id: string, extra: Partial<AccessLogEvent> = {}): AccessLogEvent => ({
+const event = (id: string, extra: Partial<AccessFixture> = {}): AccessFixture => ({
   eventId: id,
   gateId: 'gate-bd-1',
   employeeId: 'e-cut',
@@ -20,7 +20,7 @@ const event = (id: string, extra: Partial<AccessLogEvent> = {}): AccessLogEvent 
 });
 const grd = (scopes?: string[]): UserRef => ({ id: 'g', role: 'GRD', scopes });
 
-const setup = (events: AccessLogEvent[] = [event('ev-1')]) => {
+const setup = (events: AccessFixture[] = [event('ev-1')]) => {
   const source = new FakeAccessSource(events);
   const gates = new FakeGateLookup();
   const roster = new FakeRoster();

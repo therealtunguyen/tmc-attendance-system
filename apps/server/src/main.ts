@@ -23,6 +23,7 @@ import {
   requireNoticeAck,
 } from './modules/iam/index.js';
 import {
+  AccessLogService,
   CompanyMonthSource,
   ExportScheduler,
   HrExportService,
@@ -79,9 +80,7 @@ const app = createApp(
     adminRoutes(admin),
     employeeQrRoutes(eqr, admin, { qrToken: { max: config.qrTokenRateLimitPerMin } }),
     attendanceRoutes(attendance),
-    // TODO(#85): pass accessLog: new AccessLogService(attendance, gate, eqr) once AttendanceQuery.accessLog()
-    // takes an AccessLogQuery (still todo() in the attendance module); until then GET /api/access-log is 501.
-    reportingRoutes({ reports, exports }),
+    reportingRoutes({ reports, exports, accessLog: new AccessLogService(attendance, gate, eqr) }),
     gateRoutes(gate),
   ],
   { before: [authenticate(iam, admin), requireNoticeAck(iam)] },

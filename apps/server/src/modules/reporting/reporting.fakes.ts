@@ -1,11 +1,15 @@
 // In-memory fakes shared by the report tests.
 import type { HrsClient, MonthlyBatch, SendResult } from '../../adapters/hrs/hrs-client.js';
 import type { OrgUnit } from '../admin/index.js';
-import type { DailyRecord } from '../attendance/index.js';
+import type {
+  AccessLogQuery,
+  AttendanceQuery,
+  DailyRecord,
+  StoredEvent,
+} from '../attendance/index.js';
 import type { EmployeeRoster, RosterEntry } from '../employee-qr/index.js';
 import type { AuditEntry, AuditLog } from '../iam/index.js';
 import type { DateRange } from '../../shared/types.js';
-import type { AccessLogEvent, AccessLogQuery, AccessLogSource } from './reporting.access.js';
 import type { GateLookup, GateRef } from './reporting.gates.js';
 import type { EdgeSync, EdgeSyncStatus } from './reporting.edges.js';
 import type { AlertKind, Notifier } from './reporting.notifier.js';
@@ -194,11 +198,18 @@ export class RecordingAudit implements AuditLog {
   }
 }
 
-/** AccessLogSource fake: applies the query like the database would; remembers every query. */
-export class FakeAccessSource implements AccessLogSource {
+/** A StoredEvent fixture; the columns the access log ignores are filled in. */
+export type AccessFixture = Omit<StoredEvent, 'edgeId' | 'jti' | 'stale'> &
+  Partial<Pick<StoredEvent, 'edgeId' | 'jti' | 'stale'>>;
+
+/** Fake of Attendance's accessLog port: applies the query like the database would; remembers every query. */
+export class FakeAccessSource implements Pick<AttendanceQuery, 'accessLog'> {
   queries: AccessLogQuery[] = [];
-  constructor(public events: AccessLogEvent[] = []) {}
-  async accessLog(query: AccessLogQuery): Promise<AccessLogEvent[]> {
+  events: StoredEvent[];
+  constructor(events: AccessFixture[] = []) {
+    this.events = events.map((e) => ({ edgeId: 'edge-bd', jti: null, stale: false, ...e }));
+  }
+  async accessLog(query: AccessLogQuery): Promise<StoredEvent[]> {
     this.queries.push(query);
     return this.events
       .filter(

@@ -7,6 +7,7 @@ import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from './app.js';
 import {
+  type AccessLogQuery,
   AttendanceService,
   attendanceRoutes,
   type AttendanceStore,
@@ -33,6 +34,7 @@ import {
   type UserStore,
 } from './modules/iam/index.js';
 import {
+  AccessLogService,
   CompanyMonthSource,
   HrExportService,
   MonthlyReportService,
@@ -88,7 +90,10 @@ class InMemoryEmployees implements Pick<
 }
 
 /** Same contract as AttendanceRepo for what ingest and dailyRecords call: a known eventId is skipped. */
-class InMemoryEvents implements Pick<AttendanceStore, 'insert' | 'insertMany' | 'grantedEvents'> {
+class InMemoryEvents implements Pick<
+  AttendanceStore,
+  'insert' | 'insertMany' | 'grantedEvents' | 'accessLog'
+> {
   rows = new Map<string, StoredEvent>();
 
   async insert(event: StoredEvent) {
@@ -110,6 +115,24 @@ class InMemoryEvents implements Pick<AttendanceStore, 'insert' | 'insertMany' | 
         e.occurredAt >= from &&
         e.occurredAt < to,
     );
+  }
+
+  /** Range [from, to), gateIds, outcome; newest first, then eventId ascending; at most limit (#88). */
+  async accessLog({ range, gateIds, outcome, limit }: AccessLogQuery) {
+    return [...this.rows.values()]
+      .filter(
+        (e) =>
+          e.occurredAt >= range.from &&
+          e.occurredAt < range.to &&
+          (gateIds === undefined || gateIds.includes(e.gateId)) &&
+          (outcome === undefined || e.outcome === outcome),
+      )
+      .sort(
+        (a, b) =>
+          b.occurredAt.getTime() - a.occurredAt.getTime() || a.eventId.localeCompare(b.eventId),
+      )
+      .slice(0, limit)
+      .map((e) => ({ ...e }));
   }
 }
 
@@ -507,5 +530,106 @@ describe('cross-module flow: real routes, in-memory stores, simulated edge', () 
       iamStore.audit.filter((e) => e.target === `export:${MONTH}`).map((e) => e.action),
     ).toEqual(['EXPORT_RUN', 'EXPORT_DONE']);
     expect(notifier.alerts).toEqual([]);
+  });
+
+  it('GET /api/access-log gives a guard of the factory its granted and denied scans (FR-4.4, #85, #88)', async () => {
+    const lan = await onboard('BD-0006');
+    const qr = await issueQr(lan.session);
+    const granted = await edgeScan(qr.body.token);
+    expect(granted.reason).toBeUndefined();
+
+    // Same token, still inside its window, but the employee was revoked in between.
+    nowMs += 10_000;
+    expect(
+      (
+        await request(app)
+          .post(`/api/employees/${lan.id}/qr/revoke`)
+          .set('Authorization', `Bearer ${HR_SESSION}`)
+          .send()
+      ).status,
+    ).toBe(200);
+    const denied = await edgeScan(qr.body.token);
+    expect(denied.reason).toBe('REVOKED');
+    // A scan at a gate of another factory: the guard must not see it.
+    const elsewhere = await edgeScan(qr.body.token);
+
+    expect(
+      (
+        await push(
+          granted.event,
+          { ...denied.event, denyReason: 'REVOKED' },
+          { ...elsewhere.event, gateId: 'la-gate-1', denyReason: 'REVOKED' },
+        )
+      ).status,
+    ).toBe(200);
+    expect(events.rows.get(denied.event.eventId)).toMatchObject({ denyReason: 'REVOKED' });
+
+    // GRD sessions are seeded like HR's: scoped to the factory, finished MFA.
+    const guard = user({ username: 'guard', passwordHash: 'unused', role: 'GRD' });
+    guard.scoped = true;
+    guard.scopes = [FACTORY];
+    iamStore.users.push(guard);
+    const GRD_SESSION = 'grd-session-token';
+    await iamStore.store.createSession({
+      tokenHash: createHash('sha256').update(GRD_SESSION).digest('hex'),
+      userId: guard.id,
+      mfaPassed: true,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+
+    const gateLookup = { gates: async () => [{ id: GATE, name: 'Main gate', factoryId: FACTORY }] };
+    const logApp = createApp(
+      [
+        reportingRoutes({
+          reports: new MonthlyReportService(eqr, attendance, orgUnits),
+          exports: new HrExportService(
+            new InMemoryExportRuns(),
+            new CompanyMonthSource(eqr, attendance, orgUnits),
+            new ScriptedHrs(),
+            new FakeEdgeSyncs(),
+            new RecordingNotifier(),
+            iam,
+          ),
+          accessLog: new AccessLogService(attendance, gateLookup, eqr),
+        }),
+      ],
+      { before: [authenticate(iam), requireNoticeAck(iam)] },
+    );
+    const qs = `from=${encodeURIComponent('2026-11-07T00:00:00Z')}&to=${encodeURIComponent('2026-11-07T01:00:00Z')}`;
+
+    const res = await request(logApp)
+      .get(`/api/access-log?${qs}`)
+      .set('Authorization', `Bearer ${GRD_SESSION}`);
+    expect(res.status).toBe(200);
+    expect(res.body.rows).toEqual([
+      expect.objectContaining({
+        eventId: denied.event.eventId,
+        gateId: GATE,
+        gateName: 'Main gate',
+        outcome: 'DENIED',
+        denyReason: 'REVOKED',
+        employeeCode: 'BD-0006',
+        firstName: 'Lan',
+      }),
+      expect.objectContaining({
+        eventId: granted.event.eventId,
+        outcome: 'GRANTED',
+        denyReason: null,
+        employeeCode: 'BD-0006',
+        firstName: 'Lan',
+      }),
+    ]);
+
+    const onlyDenied = await request(logApp)
+      .get(`/api/access-log?${qs}&outcome=DENIED`)
+      .set('Authorization', `Bearer ${GRD_SESSION}`);
+    expect(onlyDenied.body.rows.map((r: { eventId: string }) => r.eventId)).toEqual([
+      denied.event.eventId,
+    ]);
+
+    const hr = await request(logApp)
+      .get(`/api/access-log?${qs}`)
+      .set('Authorization', `Bearer ${HR_SESSION}`);
+    expect(hr.status).toBe(403);
   });
 });

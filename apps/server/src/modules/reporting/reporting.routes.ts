@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import type { Request, RequestHandler, Response } from 'express';
 import { notImplemented } from '../../shared/errors.js';
+import type { AccessOutcome } from '../attendance/index.js';
 import { requirePermission } from '../iam/index.js';
 import type { UserRef } from '../iam/index.js';
 import { REPORT_BY } from './reporting.aggregate.js';
@@ -15,7 +16,7 @@ import {
 } from './reporting.service.js';
 import type { ExportRerun } from './reporting.service.js';
 import { AccessLogGateNotFoundError } from './reporting.access.js';
-import type { AccessLogReader, AccessLogRequest, AccessOutcome } from './reporting.access.js';
+import type { AccessLogReader, AccessLogRequest } from './reporting.access.js';
 import { ReportForbiddenError, UnknownScopeError } from './reporting.reports.js';
 import type { MonthlyReport, MonthlyReports, ReportQuery } from './reporting.reports.js';
 

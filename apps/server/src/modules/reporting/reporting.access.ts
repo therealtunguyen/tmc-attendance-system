@@ -1,47 +1,11 @@
 // Security access log (FR-4.4): every scan, denied ones included.
 import type { EdgeDenyReason } from '../../shared/contracts/edge.js';
 import type { DateRange } from '../../shared/types.js';
+import type { AccessOutcome, AttendanceQuery } from '../attendance/index.js';
 import type { EmployeeRoster } from '../employee-qr/index.js';
 import { isRestricted } from '../iam/index.js';
 import type { UserRef } from '../iam/index.js';
 import type { GateLookup } from './reporting.gates.js';
-
-export type AccessOutcome = 'GRANTED' | 'DENIED' | 'PENDING';
-
-/** What Reporting asks Attendance for. Filters and the limit run in the database. */
-export interface AccessLogQuery {
-  /** occurredAt from range.from (inclusive) to range.to (exclusive). */
-  range: DateRange;
-  /** Only these gates; undefined = every gate. An empty list matches nothing. */
-  gateIds?: readonly string[];
-  outcome?: AccessOutcome;
-  /** Newest first, at most this many. */
-  limit: number;
-}
-
-/** One stored scan, as Attendance returns it. */
-export interface AccessLogEvent {
-  eventId: string;
-  gateId: string;
-  /** Null when the token did not verify. */
-  employeeId: string | null;
-  method: 'QR' | 'MANUAL';
-  outcome: AccessOutcome;
-  denyReason: EdgeDenyReason | null;
-  /** The guard who made a MANUAL override (FR-2.5); null for QR scans. */
-  guardId: string | null;
-  /** The guard's justification for a MANUAL override (FR-2.5); null for QR scans. Not the deny reason. */
-  reason: string | null;
-  occurredAt: Date;
-}
-
-/**
- * Implemented by Attendance (AttendanceQuery.accessLog, not built yet: still todo()). Reporting never
- * reads AttendanceEvent itself, so it states here what it needs.
- */
-export interface AccessLogSource {
-  accessLog(query: AccessLogQuery): Promise<AccessLogEvent[]>;
-}
 
 /** One line of the access log a guard sees (FR-4.4): no contact data, only the code and first name (NFR-4). */
 export interface AccessLogRow {
@@ -82,7 +46,7 @@ export interface AccessLogReader {
 /** Security access log: every scan, denied ones included, limited to the viewer's factories (FR-4.4, BR-15). */
 export class AccessLogService implements AccessLogReader {
   constructor(
-    private source: AccessLogSource,
+    private source: Pick<AttendanceQuery, 'accessLog'>,
     private gateLookup: GateLookup,
     private roster: EmployeeRoster,
   ) {}
@@ -108,7 +72,8 @@ export class AccessLogService implements AccessLogReader {
       limit,
     });
 
-    // No scope: an employee of another factory can scan at this gate.
+    // No scope: an employee of another factory can scan at this gate. A lookup by ids would need a new
+    // EmployeeRoster method; left for later.
     const people = new Map<string, { code: string; firstName: string }>();
     if (events.some((e) => e.employeeId !== null)) {
       for (const e of await this.roster.roster()) people.set(e.id, e);
@@ -127,8 +92,8 @@ export class AccessLogService implements AccessLogReader {
         method: e.method,
         outcome: e.outcome,
         denyReason: e.denyReason,
-        guardId: e.guardId,
-        overrideReason: e.reason,
+        guardId: e.guardId ?? null,
+        overrideReason: e.reason ?? null,
         employeeCode: person?.code ?? null,
         firstName: person?.firstName ?? null,
       };
