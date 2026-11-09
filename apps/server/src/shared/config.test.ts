@@ -36,4 +36,9 @@ describe('positiveInt', () => {
     vi.stubEnv('LIMIT_TEST', value);
     expect(() => positiveInt('LIMIT_TEST', 10)).toThrow(/LIMIT_TEST/);
   });
+
+  it('throws for a digit string beyond the safe integer range', () => {
+    vi.stubEnv('LIMIT_TEST', '9'.repeat(400));
+    expect(() => positiveInt('LIMIT_TEST', 10)).toThrow(/LIMIT_TEST/);
+  });
 });

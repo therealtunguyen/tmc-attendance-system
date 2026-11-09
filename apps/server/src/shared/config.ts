@@ -24,7 +24,10 @@ export const positiveInt = (name: string, fallback: number): number => {
   const raw = process.env[name]?.trim();
   if (!raw) return fallback;
   if (!/^[1-9]\d*$/.test(raw)) throw new Error(`${name} must be a positive integer, not "${raw}"`);
-  return Number(raw);
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n))
+    throw new Error(`${name} must be a safe positive integer, not "${raw}"`);
+  return n;
 };
 
 export const config = {
