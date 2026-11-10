@@ -215,3 +215,28 @@ model ConfigValue {
   updatedAt DateTime @updatedAt
   updatedBy String
 }
+
+enum ExportStatus {
+  RUNNING
+  BLOCKED
+  DONE
+  FAILED
+}
+
+enum ExportTrigger {
+  SCHEDULE
+  MANUAL
+}
+
+// Owned by the reporting module. The state of one month's HRS export (FR-4.5, FR-4.6); one row per month,
+// overwritten by each run. The history of runs, failures and re-runs is in the audit log.
+model ExportRun {
+  // YYYY-MM
+  month      String        @id
+  status     ExportStatus
+  trigger    ExportTrigger
+  attempts   Int           @default(0)
+  lastError  String?
+  startedAt  DateTime
+  finishedAt DateTime?
+}

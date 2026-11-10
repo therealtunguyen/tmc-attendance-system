@@ -1,3 +1,4 @@
+import type { EdgeSync } from '../reporting/index.js';
 import type { PrismaClient } from '../../shared/prisma.js';
 import type { EdgeState, OfflineEdge } from './gate.heartbeat.js';
 import {
@@ -104,11 +105,27 @@ export class GateRepo implements GateStore {
     });
   }
 
-  async recordHeartbeat(edgeId: string, receivedAt: Date): Promise<boolean> {
+  async recordHeartbeat(edgeId: string, receivedAt: Date, syncedAt: Date | null): Promise<boolean> {
+    // GREATEST ignores NULL: the first heartbeat or sync sets the column, a null syncedAt leaves it.
     const count = await this.db.$executeRaw`
-      UPDATE "Edge" SET "lastHeartbeatAt" = GREATEST("lastHeartbeatAt", ${receivedAt}) WHERE "id" = ${edgeId}
+      UPDATE "Edge" SET "lastHeartbeatAt" = GREATEST("lastHeartbeatAt", ${receivedAt}),
+        "lastSyncAt" = GREATEST("lastSyncAt", ${syncedAt})
+      WHERE "id" = ${edgeId}
     `;
     return count > 0;
+  }
+
+  async edgeSyncs(): Promise<EdgeSync[]> {
+    const edges = await this.db.edge.findMany({
+      where: { gates: { some: { active: true } } },
+      select: { id: true, factoryId: true, lastSyncAt: true },
+      orderBy: { id: 'asc' },
+    });
+    return edges.map((edge) => ({
+      edgeId: edge.id,
+      factoryId: edge.factoryId,
+      lastSyncAt: edge.lastSyncAt,
+    }));
   }
 
   offlineEdges(cutoff: Date): Promise<OfflineEdge[]> {

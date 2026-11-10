@@ -23,9 +23,13 @@ import {
   requireNoticeAck,
 } from './modules/iam/index.js';
 import {
+  CompanyMonthSource,
+  ExportScheduler,
+  HrExportService,
   MonthlyReportService,
+  MailNotifier,
   ReportingRepo,
-  ReportingService,
+  startExportScheduler,
   reportingRoutes,
 } from './modules/reporting/index.js';
 import { config } from './shared/config.js';
@@ -50,11 +54,21 @@ const eqr = new EmployeeQrService(
 );
 const attendance = new AttendanceService(new AttendanceRepo(db), eqr);
 const reports = new MonthlyReportService(eqr, attendance, admin);
-const reporting = new ReportingService(new ReportingRepo(db), attendance, admin, hrs, iam);
-const gate = new GateService(new GateRepo(db), eqr, attendance, turnstile, admin, reporting, iam, {
+const notifier = new MailNotifier(mailer, config.alertEmails);
+const gate = new GateService(new GateRepo(db), eqr, attendance, turnstile, admin, notifier, iam, {
   heartbeatTimeoutMs: config.heartbeatTimeoutMs,
   directory: eqr,
 });
+const runs = new ReportingRepo(db);
+const exports = new HrExportService(
+  runs,
+  new CompanyMonthSource(eqr, attendance, admin),
+  hrs,
+  gate,
+  notifier,
+  iam,
+);
+const scheduler = new ExportScheduler(admin, runs, exports);
 
 const app = createApp(
   [
@@ -65,7 +79,7 @@ const app = createApp(
     adminRoutes(admin),
     employeeQrRoutes(eqr, admin, { qrToken: { max: config.qrTokenRateLimitPerMin } }),
     attendanceRoutes(attendance),
-    reportingRoutes({ reports }),
+    reportingRoutes({ reports, exports }),
     gateRoutes(gate),
   ],
   { before: [authenticate(iam, admin), requireNoticeAck(iam)] },
@@ -78,11 +92,12 @@ const server = app.listen(config.port, () => {
 });
 
 const stopMonitor = startGateMonitor(() => gate.checkOffline(), config.heartbeatCheckMs);
+const stopExports = startExportScheduler(() => scheduler.tick());
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(
     signal,
     () =>
-      void stopMonitor().then(() => {
+      void Promise.all([stopMonitor(), exports.stop(), stopExports()]).then(() => {
         server.close(() => void db.$disconnect());
       }),
   );

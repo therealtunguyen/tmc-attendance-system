@@ -1,8 +1,14 @@
 // In-memory fakes shared by the report tests.
+import type { HrsClient, MonthlyBatch, SendResult } from '../../adapters/hrs/hrs-client.js';
 import type { OrgUnit } from '../admin/index.js';
 import type { DailyRecord } from '../attendance/index.js';
 import type { EmployeeRoster, RosterEntry } from '../employee-qr/index.js';
+import type { AuditEntry, AuditLog } from '../iam/index.js';
 import type { DateRange } from '../../shared/types.js';
+import type { EdgeSync, EdgeSyncStatus } from './reporting.edges.js';
+import type { AlertKind, Notifier } from './reporting.notifier.js';
+import { canClaim } from './reporting.runs.js';
+import type { ExportResult, ExportRun, ExportRunStore, ExportTrigger } from './reporting.runs.js';
 
 const unit = (id: string, kind: OrgUnit['kind'], parentId: string | null, name = id): OrgUnit => ({
   id,
@@ -103,3 +109,85 @@ export const BIG_RECORDS: DailyRecord[] = [
 ];
 
 export const fakeConfig = { orgUnits: async () => UNITS };
+
+/** ExportRunStore fake: the same claim rule as the repo, rows kept in a map; returns copies. */
+export class InMemoryExportRuns implements ExportRunStore {
+  rows = new Map<string, ExportRun>();
+
+  async find(month: string): Promise<ExportRun | null> {
+    const row = this.rows.get(month);
+    return row ? { ...row } : null;
+  }
+
+  async claim(
+    month: string,
+    trigger: ExportTrigger,
+    at: Date,
+    staleBefore: Date,
+  ): Promise<ExportRun | null> {
+    if (!canClaim(this.rows.get(month) ?? null, trigger, staleBefore)) return null;
+    const run: ExportRun = {
+      month,
+      status: 'RUNNING',
+      trigger,
+      attempts: 0,
+      lastError: null,
+      startedAt: at,
+      finishedAt: null,
+    };
+    this.rows.set(month, run);
+    return { ...run };
+  }
+
+  async finish(
+    month: string,
+    { status, attempts, lastError, at }: ExportResult,
+  ): Promise<ExportRun> {
+    const row = this.rows.get(month);
+    if (!row) throw new Error(`No export run for ${month}`);
+    const run = { ...row, status, attempts, lastError, finishedAt: at };
+    this.rows.set(month, run);
+    return { ...run };
+  }
+}
+
+/** HRS fake: answers from a script, one entry per call (the last repeats); records every batch. */
+export class ScriptedHrs implements HrsClient {
+  batches: MonthlyBatch[] = [];
+  constructor(private script: readonly (SendResult | 'throw')[] = ['ACCEPTED']) {}
+
+  async send(batch: MonthlyBatch): Promise<SendResult> {
+    const step = this.script[Math.min(this.batches.length, this.script.length - 1)]!;
+    this.batches.push(batch);
+    if (step === 'throw') throw new Error('HRS unreachable');
+    return step;
+  }
+}
+
+/** EdgeSyncStatus fake: the list can be changed between calls. */
+export class FakeEdgeSyncs implements EdgeSyncStatus {
+  constructor(public edges: EdgeSync[] = []) {}
+  async edgeSyncs(): Promise<EdgeSync[]> {
+    return this.edges.map((e) => ({ ...e }));
+  }
+}
+
+/** Notifier fake: records alerts; rejects when `fail` is set. */
+export class RecordingNotifier implements Notifier {
+  alerts: { kind: AlertKind; message: string }[] = [];
+  fail = false;
+  async alert(kind: AlertKind, message: string): Promise<void> {
+    if (this.fail) throw new Error('mail down');
+    this.alerts.push({ kind, message });
+  }
+}
+
+export class RecordingAudit implements AuditLog {
+  entries: AuditEntry[] = [];
+  async append(entry: AuditEntry): Promise<void> {
+    this.entries.push(entry);
+  }
+  async search(): Promise<AuditEntry[]> {
+    return this.entries;
+  }
+}

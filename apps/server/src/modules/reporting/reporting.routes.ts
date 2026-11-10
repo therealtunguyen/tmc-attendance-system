@@ -8,11 +8,18 @@ import type { DepartmentRow, EmployeeRow, FactoryRow, ReportBy } from './reporti
 import { toCsv } from './reporting.csv.js';
 import type { CsvColumn } from './reporting.csv.js';
 import { parseMonth } from './reporting.month.js';
+import {
+  EdgesNotSyncedError,
+  ExportBusyError,
+  InvalidExportMonthError,
+} from './reporting.service.js';
+import type { ExportRerun } from './reporting.service.js';
 import { ReportForbiddenError, UnknownScopeError } from './reporting.reports.js';
 import type { MonthlyReport, MonthlyReports, ReportQuery } from './reporting.reports.js';
 
 export interface ReportingRouteDeps {
   reports: MonthlyReports;
+  exports: ExportRerun;
   /** Clock for the "not in the future" month check. */
   now?: () => Date;
 }
@@ -68,7 +75,11 @@ const noStore: RequestHandler = (_req, res, next) => {
   next();
 };
 
-export const reportingRoutes = ({ reports, now = () => new Date() }: ReportingRouteDeps) => {
+export const reportingRoutes = ({
+  reports,
+  exports,
+  now = () => new Date(),
+}: ReportingRouteDeps) => {
   /** Parses the query and runs the report; answers the error itself and returns null. */
   const run = async (req: Request, res: Response): Promise<MonthlyReport | null> => {
     const month = parseMonth(req.query.month, now());
@@ -122,5 +133,49 @@ export const reportingRoutes = ({ reports, now = () => new Date() }: ReportingRo
         .send(`\uFEFF${csvOf(report)}`);
     })
     .get('/access-log', notImplemented)
-    .post('/exports/:month/rerun', notImplemented);
+    .get('/exports/:month', requirePermission('export:hr'), noStore, async (req, res) => {
+      const month = parseMonth(req.params.month, now());
+      if (typeof month === 'string') {
+        res.status(400).json({ error: month });
+        return;
+      }
+      const run = await exports.status(month.month);
+      if (!run) {
+        res.status(404).json({ error: 'No export for this month' });
+        return;
+      }
+      res.json(run);
+    })
+    .post('/exports/:month/rerun', requirePermission('export:hr'), noStore, async (req, res) => {
+      const ignore = req.body?.ignoreUnsyncedEdges;
+      if (ignore !== undefined && typeof ignore !== 'boolean') {
+        res.status(400).json({ error: 'ignoreUnsyncedEdges must be a boolean' });
+        return;
+      }
+      try {
+        const { run } = await exports.rerun(
+          (res.locals.user as UserRef).id,
+          String(req.params.month),
+          { ignoreUnsyncedEdges: ignore ?? false },
+        );
+        res.status(202).json(run);
+      } catch (err) {
+        if (err instanceof InvalidExportMonthError) {
+          res.status(400).json({ error: err.message });
+        } else if (err instanceof EdgesNotSyncedError) {
+          res.status(409).json({
+            error: err.message,
+            edges: err.edges.map(({ edgeId, factoryId, lastSyncAt }) => ({
+              edgeId,
+              factoryId,
+              lastSyncAt,
+            })),
+          });
+        } else if (err instanceof ExportBusyError) {
+          res.status(409).json({ error: err.message });
+        } else {
+          throw err;
+        }
+      }
+    });
 };

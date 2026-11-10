@@ -1,11 +1,22 @@
 import { Router } from 'express';
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../app.js';
 import type { UserRef } from '../iam/index.js';
-import { FakeAttendance, FakeRoster, fakeConfig } from './reporting.fakes.js';
+import {
+  FakeAttendance,
+  FakeEdgeSyncs,
+  FakeRoster,
+  InMemoryExportRuns,
+  RecordingAudit,
+  RecordingNotifier,
+  ScriptedHrs,
+  fakeConfig,
+} from './reporting.fakes.js';
 import { MonthlyReportService } from './reporting.reports.js';
 import { reportingRoutes } from './reporting.routes.js';
+import { HrExportService } from './reporting.service.js';
+import { CompanyMonthSource } from './reporting.source.js';
 
 const NOW = new Date('2026-11-08T00:00:00Z');
 const reports = new MonthlyReportService(new FakeRoster(), new FakeAttendance(), fakeConfig);
@@ -16,8 +27,25 @@ const signedIn = (user?: UserRef) =>
     if (user) res.locals.user = user;
     next();
   });
+const SYNCED = [
+  { edgeId: 'edge-bd', factoryId: 'binh-duong', lastSyncAt: new Date('2026-11-02T00:00:00Z') },
+];
+let edges: FakeEdgeSyncs;
+let exportsSvc: HrExportService;
+beforeEach(() => {
+  edges = new FakeEdgeSyncs(SYNCED);
+  exportsSvc = new HrExportService(
+    new InMemoryExportRuns(),
+    new CompanyMonthSource(new FakeRoster(), new FakeAttendance(), fakeConfig),
+    new ScriptedHrs(['ACCEPTED']),
+    edges,
+    new RecordingNotifier(),
+    new RecordingAudit(),
+    { now: () => NOW, sleep: async () => {}, log: () => {} },
+  );
+});
 const app = (user?: UserRef) =>
-  createApp([signedIn(user), reportingRoutes({ reports, now: () => NOW })]);
+  createApp([signedIn(user), reportingRoutes({ reports, exports: exportsSvc, now: () => NOW })]);
 
 const user = (role: UserRef['role'], scopes?: string[]): UserRef => ({ id: role, role, scopes });
 const hr = user('HR');
@@ -155,5 +183,82 @@ describe('GET /api/reports/monthly.csv (FR-4.2)', () => {
       'factoryId,factoryName,employees,daysPresent,hours,missingPunchDays',
     );
     expect(fac.headers['content-disposition']).toContain('report-factory-2026-10.csv');
+  });
+});
+
+describe('export routes (FR-4.5, FR-4.6)', () => {
+  const RERUN = '/api/exports/2026-10/rerun';
+  const STATUS = '/api/exports/2026-10';
+
+  it('401 without a session', async () => {
+    expect((await request(app()).post(RERUN)).status).toBe(401);
+    expect((await request(app()).get(STATUS)).status).toBe(401);
+  });
+
+  it.each(['SUP', 'EXE', 'ADM', 'GRD', 'EMP'] as const)('403 for %s', async (role) => {
+    expect((await request(app(user(role))).post(RERUN)).status).toBe(403);
+    expect((await request(app(user(role))).get(STATUS)).status).toBe(403);
+  });
+
+  it('202 with the RUNNING run for HR, then GET shows the state', async () => {
+    expect((await request(app(hr)).get(STATUS)).status).toBe(404);
+    const res = await request(app(hr)).post(RERUN).send({ ignoreUnsyncedEdges: false });
+    expect(res.status).toBe(202);
+    expect(res.body).toMatchObject({ month: '2026-10', status: 'RUNNING', trigger: 'MANUAL' });
+    const got = await request(app(hr)).get(STATUS);
+    expect(got.status).toBe(200);
+    expect(got.body.month).toBe('2026-10');
+    expect(res.headers['cache-control']).toBe('no-store');
+    expect(got.headers['cache-control']).toBe('no-store');
+  });
+
+  it('accepts an empty body', async () => {
+    expect((await request(app(hr)).post(RERUN)).status).toBe(202);
+  });
+
+  it('400 for a bad month, the current month and a non-boolean flag', async () => {
+    expect((await request(app(hr)).post('/api/exports/2026-1/rerun')).status).toBe(400);
+    const current = await request(app(hr)).post('/api/exports/2026-11/rerun');
+    expect(current.status).toBe(400);
+    const flag = await request(app(hr)).post(RERUN).send({ ignoreUnsyncedEdges: 'yes' });
+    expect(flag.status).toBe(400);
+    expect(flag.body).toEqual({ error: 'ignoreUnsyncedEdges must be a boolean' });
+  });
+
+  it('409 with the edges when one has not synced; the flag overrides', async () => {
+    edges.edges = [{ edgeId: 'edge-la', factoryId: 'long-an', lastSyncAt: null }];
+    const res = await request(app(hr)).post(RERUN);
+    expect(res.status).toBe(409);
+    expect(res.body.edges).toEqual([{ edgeId: 'edge-la', factoryId: 'long-an', lastSyncAt: null }]);
+    const forced = await request(app(hr)).post(RERUN).send({ ignoreUnsyncedEdges: true });
+    expect(forced.status).toBe(202);
+  });
+
+  it('409 while the month is already running', async () => {
+    let release!: () => void;
+    exportsSvc = new HrExportService(
+      new InMemoryExportRuns(),
+      {
+        company: () =>
+          new Promise((resolve) => (release = () => resolve({ employees: [], records: [] }))),
+      },
+      new ScriptedHrs(['ACCEPTED']),
+      edges,
+      new RecordingNotifier(),
+      new RecordingAudit(),
+      { now: () => NOW, sleep: async () => {}, log: () => {} },
+    );
+    expect((await request(app(hr)).post(RERUN)).status).toBe(202);
+    const busy = await request(app(hr)).post(RERUN);
+    expect(busy.status).toBe(409);
+    expect(busy.body).toEqual({ error: 'An export of this month is already running' });
+    release();
+  });
+
+  it('GET: 400 for a bad month format, 404 for an unknown month', async () => {
+    expect((await request(app(hr)).get('/api/exports/abc')).status).toBe(400);
+    const none = await request(app(hr)).get('/api/exports/2026-09');
+    expect(none.status).toBe(404);
+    expect(none.body).toEqual({ error: 'No export for this month' });
   });
 });

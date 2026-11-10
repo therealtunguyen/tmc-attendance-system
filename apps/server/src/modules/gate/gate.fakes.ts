@@ -16,8 +16,24 @@ import {
 export class InMemoryGates implements GateStore {
   rows = new Map<string, Gate>();
   edges = new Map([
-    ['edge-bd', { id: 'edge-bd', factoryId: 'binh-duong', lastHeartbeatAt: null as Date | null }],
-    ['edge-la', { id: 'edge-la', factoryId: 'long-an', lastHeartbeatAt: null as Date | null }],
+    [
+      'edge-bd',
+      {
+        id: 'edge-bd',
+        factoryId: 'binh-duong',
+        lastHeartbeatAt: null as Date | null,
+        lastSyncAt: null as Date | null,
+      },
+    ],
+    [
+      'edge-la',
+      {
+        id: 'edge-la',
+        factoryId: 'long-an',
+        lastHeartbeatAt: null as Date | null,
+        lastSyncAt: null as Date | null,
+      },
+    ],
   ]);
 
   async create(data: NewGate) {
@@ -75,11 +91,19 @@ export class InMemoryGates implements GateStore {
     return [...this.edges.values()].filter((edge) => edgeIds.includes(edge.id));
   }
 
-  async recordHeartbeat(id: string, at: Date) {
+  async recordHeartbeat(id: string, at: Date, syncedAt: Date | null) {
     const edge = this.edges.get(id);
     if (!edge) return false;
     if (!edge.lastHeartbeatAt || edge.lastHeartbeatAt < at) edge.lastHeartbeatAt = at;
+    if (syncedAt && (!edge.lastSyncAt || edge.lastSyncAt < syncedAt)) edge.lastSyncAt = syncedAt;
     return true;
+  }
+
+  async edgeSyncs() {
+    const active = new Set([...this.rows.values()].filter((g) => g.active).map((g) => g.edgeId));
+    return [...this.edges.values()]
+      .filter((edge) => active.has(edge.id))
+      .map(({ id, factoryId, lastSyncAt }) => ({ edgeId: id, factoryId, lastSyncAt }));
   }
 
   async offlineEdges(cutoff: Date) {
