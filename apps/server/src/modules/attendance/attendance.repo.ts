@@ -65,8 +65,13 @@ export class AttendanceRepo implements AttendanceStore {
     });
   }
 
-  async insertCorrection(correction: Correction): Promise<void> {
-    await this.db.correction.create({ data: correction });
+  async insertCorrection(correction: Correction): Promise<string> {
+    const { id } = await this.db.correction.create({ data: correction, select: { id: true } });
+    return id;
+  }
+
+  async deleteCorrection(id: string): Promise<void> {
+    await this.db.correction.deleteMany({ where: { id } });
   }
 
   async decide(eventId: string, outcome: ScanOutcome): Promise<boolean> {

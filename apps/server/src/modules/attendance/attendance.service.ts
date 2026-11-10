@@ -141,7 +141,10 @@ export interface AttendanceStore {
   corrections(from: Date, to: Date, employeeIds?: string[]): Promise<Correction[]>;
   /** Every correction of one employee, oldest first. */
   correctionsOf(employeeId: string): Promise<Correction[]>;
-  insertCorrection(correction: Correction): Promise<void>;
+  /** Returns the ID of the new row. */
+  insertCorrection(correction: Correction): Promise<string>;
+  /** Only to undo a correction whose audit entry could not be written. */
+  deleteCorrection(id: string): Promise<void>;
   /** Sets the outcome only while it is PENDING or already equal; true if the row now has it. */
   decide(eventId: string, outcome: ScanOutcome): Promise<boolean>;
   /** Null when there is no such event. */
@@ -184,6 +187,7 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
     private repo: AttendanceStore,
     private directory: EmployeeDirectory,
     private audit: AuditLog,
+    private now: () => Date = () => new Date(),
   ) {}
 
   /**
@@ -298,8 +302,10 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
   /**
    * HR changes one value of a daily record, with a reason (FR-3.6, UC-8). The scans are not touched:
    * the correction is stored beside them, with the value it replaced. Returns the recomputed record.
-   * Audited first, because the two writes belong to two modules and cannot share a transaction: a
-   * failure in between leaves a spare audit entry, never a change that was not audited.
+   * The correction is stored first and then audited. The audit log belongs to the IAM module and
+   * cannot share a transaction with this write, so if the audit append fails the correction is
+   * deleted again and the error is rethrown: no unaudited change, and no audit entry for a change
+   * that never happened.
    */
   async correct(
     actorId: string,
@@ -325,6 +331,11 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
     if (localDayStart(value).getTime() !== day.getTime()) {
       throw new InvalidCorrectionError('value must be on the day of the record');
     }
+    const now = this.now();
+    // A time that has not happened yet would add hours to an open shift (reports, HRS export).
+    if (value.getTime() > now.getTime()) {
+      throw new InvalidCorrectionError('value must not be in the future');
+    }
     const firstIn = field === 'FIRST_IN' ? value : before.firstIn;
     const lastOut = field === 'LAST_OUT' ? value : before.lastOut;
     if (firstIn && lastOut && firstIn.getTime() >= lastOut.getTime()) {
@@ -339,18 +350,23 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
       correctedValue: value,
       reason: trimmed,
       correctedBy: actorId,
-      createdAt: new Date(),
+      createdAt: now,
     };
     const [after] = buildDailyRecords(events, [...corrections, correction]);
-    await this.audit.append({
-      actorId,
-      action: 'ATTENDANCE_CORRECT',
-      target: `attendance:${recordId}`,
-      at: correction.createdAt,
-      before,
-      after: { ...after, field, reason: trimmed },
-    });
-    await this.repo.insertCorrection(correction);
+    const id = await this.repo.insertCorrection(correction);
+    try {
+      await this.audit.append({
+        actorId,
+        action: 'ATTENDANCE_CORRECT',
+        target: `attendance:${recordId}`,
+        at: correction.createdAt,
+        before,
+        after: { ...after, field, reason: trimmed },
+      });
+    } catch (error) {
+      await this.repo.deleteCorrection(id);
+      throw error;
+    }
     return after as DailyRecord;
   }
 

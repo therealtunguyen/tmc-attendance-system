@@ -36,8 +36,20 @@ class InMemoryEvents implements AttendanceStore {
     return this.correctionRows.filter((c) => c.employeeId === employeeId);
   }
 
+  correctionIds: string[] = [];
+
   async insertCorrection(correction: Correction) {
+    const id = `c-${this.correctionIds.length + 1}`;
     this.correctionRows.push(correction);
+    this.correctionIds.push(id);
+    return id;
+  }
+
+  async deleteCorrection(id: string) {
+    const index = this.correctionIds.indexOf(id);
+    if (index === -1) return;
+    this.correctionRows.splice(index, 1);
+    this.correctionIds.splice(index, 1);
   }
 
   async insert(event: StoredEvent) {
@@ -148,8 +160,12 @@ beforeEach(() => {
     store,
     new FakeDirectory({ 'binh-duong': ['emp-1', 'emp-2'], 'long-an': ['emp-3'] }),
     audit,
+    () => NOW,
   );
 });
+
+/** The clock of the service in these tests: after every day the tests correct. */
+const NOW = new Date('2026-11-09T03:00:00Z');
 
 describe('AttendanceService.record (FR-3.1, FR-3.2)', () => {
   it('stores a new scan as PENDING, from the server (no edge, not stale)', async () => {
@@ -819,6 +835,94 @@ describe('HR corrections (FR-3.6, UC-8)', () => {
         }),
       ).rejects.toThrow(new InvalidCorrectionError('value must be on the day of the record'));
       expect(store.correctionRows).toEqual([]);
+    });
+
+    describe('a value later than now', () => {
+      // The clock stands at 12:00 on 07/11, the day being corrected: the shift is still open.
+      const noon = at('12:00');
+      const service = () =>
+        new AttendanceService(
+          store,
+          new FakeDirectory({ 'binh-duong': ['emp-1'] }),
+          audit,
+          () => noon,
+        );
+
+      it('is refused, storing and auditing nothing', async () => {
+        await expect(
+          service().correct('hr-1', recordId, {
+            field: 'LAST_OUT',
+            value: at('23:59'),
+            reason: 'Will leave late',
+          }),
+        ).rejects.toThrow(new InvalidCorrectionError('value must not be in the future'));
+        expect(store.correctionRows).toEqual([]);
+        expect(audit.entries).toEqual([]);
+      });
+
+      it('is accepted up to now itself', async () => {
+        const record = await service().correct('hr-1', recordId, {
+          field: 'LAST_OUT',
+          value: noon,
+          reason: 'Left at noon',
+        });
+        expect(record.lastOut).toEqual(noon);
+      });
+    });
+
+    it('stores the correction before writing the audit entry', async () => {
+      const seen: number[] = [];
+      const ordered: AuditLog = {
+        append: async (entry) => {
+          seen.push(store.correctionRows.length);
+          await audit.append(entry);
+        },
+        search: async () => audit.entries,
+      };
+      const service = new AttendanceService(
+        store,
+        new FakeDirectory({ 'binh-duong': ['emp-1'] }),
+        ordered,
+        () => NOW,
+      );
+      await service.correct('hr-1', recordId, {
+        field: 'LAST_OUT',
+        value: at('17:00'),
+        reason: 'Forgot to scan out',
+      });
+      expect(seen).toEqual([1]);
+    });
+
+    it('removes the correction again when the audit entry cannot be written', async () => {
+      await attendance.correct('hr-1', recordId, {
+        field: 'FIRST_IN',
+        value: at('07:30'),
+        reason: 'Kept: audited',
+      });
+      const failing: AuditLog = {
+        append: async () => {
+          throw new Error('audit log down');
+        },
+        search: async () => [],
+      };
+      const service = new AttendanceService(
+        store,
+        new FakeDirectory({ 'binh-duong': ['emp-1'] }),
+        failing,
+        () => NOW,
+      );
+      await expect(
+        service.correct('hr-1', recordId, {
+          field: 'LAST_OUT',
+          value: at('17:00'),
+          reason: 'Forgot to scan out',
+        }),
+      ).rejects.toThrow('audit log down');
+      // Only the earlier, audited correction is left; the day is as it was.
+      expect(store.correctionRows.map((c) => c.reason)).toEqual(['Kept: audited']);
+      expect(audit.entries).toHaveLength(1);
+      const [day] = await attendance.history('emp-1').then((r) => r.slice(-1));
+      expect(day).toMatchObject({ lastOut: null, missingPunch: true });
     });
 
     it.each([
