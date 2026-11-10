@@ -57,6 +57,9 @@ model AttendanceEvent {
   // FR-2.5: authenticated guard and justification; null for QR and legacy events.
   guardId    String?
   reason     String?
+  // Why the scan was denied (FR-4.4): an EdgeDenyReason (shared/contracts/edge.ts), validated in code.
+  // Null when granted, pending, or not known.
+  denyReason String?
   outcome    ScanOutcome @default(PENDING)
   // Token ID; not unique, so one jti used at two edges is stored and flagged (ADR-10).
   jti        String?
@@ -70,6 +73,9 @@ model AttendanceEvent {
   @@index([jti])
   // An employee's own history (FR-1.6) reads by person across all dates.
   @@index([employeeId, occurredAt])
+  // The security access log filters by gate and time, newest first (FR-4.4).
+  @@index([gateId, occurredAt])
+  @@index([occurredAt])
 }
 
 // Owned by the gate module. One edge agent per factory (ADR-9).
@@ -213,4 +219,29 @@ model ConfigValue {
   value     String
   updatedAt DateTime @updatedAt
   updatedBy String
+}
+
+enum ExportStatus {
+  RUNNING
+  BLOCKED
+  DONE
+  FAILED
+}
+
+enum ExportTrigger {
+  SCHEDULE
+  MANUAL
+}
+
+// Owned by the reporting module. The state of one month's HRS export (FR-4.5, FR-4.6); one row per month,
+// overwritten by each run. The history of runs, failures and re-runs is in the audit log.
+model ExportRun {
+  // YYYY-MM
+  month      String        @id
+  status     ExportStatus
+  trigger    ExportTrigger
+  attempts   Int           @default(0)
+  lastError  String?
+  startedAt  DateTime
+  finishedAt DateTime?
 }

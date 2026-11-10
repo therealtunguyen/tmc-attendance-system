@@ -7,6 +7,7 @@ import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from './app.js';
 import {
+  type AccessLogQuery,
   AttendanceService,
   attendanceRoutes,
   type AttendanceStore,
@@ -32,6 +33,19 @@ import {
   type UserRecord,
   type UserStore,
 } from './modules/iam/index.js';
+import {
+  AccessLogService,
+  CompanyMonthSource,
+  HrExportService,
+  MonthlyReportService,
+  reportingRoutes,
+} from './modules/reporting/index.js';
+import {
+  InMemoryExportRuns,
+  RecordingNotifier,
+  ScriptedHrs,
+  FakeEdgeSyncs,
+} from './modules/reporting/reporting.fakes.js';
 import type { EdgeEvent, EdgeSnapshot } from './shared/contracts/edge.js';
 import { checkQrToken } from './shared/contracts/qr-validation.js';
 import type { Scope } from './shared/types.js';
@@ -76,7 +90,10 @@ class InMemoryEmployees implements Pick<
 }
 
 /** Same contract as AttendanceRepo for what ingest and dailyRecords call: a known eventId is skipped. */
-class InMemoryEvents implements Pick<AttendanceStore, 'insert' | 'insertMany' | 'grantedEvents'> {
+class InMemoryEvents implements Pick<
+  AttendanceStore,
+  'insert' | 'insertMany' | 'grantedEvents' | 'accessLog'
+> {
   rows = new Map<string, StoredEvent>();
 
   async insert(event: StoredEvent) {
@@ -98,6 +115,24 @@ class InMemoryEvents implements Pick<AttendanceStore, 'insert' | 'insertMany' | 
         e.occurredAt >= from &&
         e.occurredAt < to,
     );
+  }
+
+  /** Range [from, to), gateIds, outcome; newest first, then eventId ascending; at most limit (#88). */
+  async accessLog({ range, gateIds, outcome, limit }: AccessLogQuery) {
+    return [...this.rows.values()]
+      .filter(
+        (e) =>
+          e.occurredAt >= range.from &&
+          e.occurredAt < range.to &&
+          (gateIds === undefined || gateIds.includes(e.gateId)) &&
+          (outcome === undefined || e.outcome === outcome),
+      )
+      .sort(
+        (a, b) =>
+          b.occurredAt.getTime() - a.occurredAt.getTime() || a.eventId.localeCompare(b.eventId),
+      )
+      .slice(0, limit)
+      .map((e) => ({ ...e }));
   }
 }
 
@@ -165,6 +200,7 @@ let nowMs: number;
 let employees: InMemoryEmployees;
 let events: InMemoryEvents;
 let iamStore: ReturnType<typeof inMemoryIam>;
+let iam: IamService;
 let eqr: EmployeeQrService;
 let attendance: AttendanceService;
 let app: ReturnType<typeof createApp>;
@@ -176,7 +212,7 @@ beforeEach(() => {
   events = new InMemoryEvents();
   iamStore = inMemoryIam();
   // Same order and same before-handler as main.ts. Random 1 skips the login's session purge.
-  const iam = new IamService(iamStore.store, Date.now, () => 1);
+  iam = new IamService(iamStore.store, Date.now, () => 1);
   eqr = new EmployeeQrService(
     employees as unknown as EmployeeStore,
     iam,
@@ -389,7 +425,211 @@ describe('cross-module flow: real routes, in-memory stores, simulated edge', () 
   it.todo('/api/edge/* rejects a request without a valid edge credential (#69)');
   it.todo('sync flags a stale event for a revoked person, and one jti at two edges (#33)');
   it.todo('edge outbox: does not push a PENDING event while its TCS call is still running (#27)');
-  // Reporting (reporting.routes.ts, reporting.service.ts) is all stubs and has no issue or owner yet.
-  it.todo('GET /api/reports/monthly reads these daily records (FR-4.1, no issue yet)');
-  it.todo('monthly export sends them to MockHrs, retries, audits (FR-4.5, FR-4.6, no issue yet)');
+  // The month of the events above (2026-11, Vietnam time) and a minimal org tree: this file has no admin module.
+  const MONTH = '2026-11';
+  const orgUnits = {
+    orgUnits: async () => [
+      {
+        id: FACTORY,
+        kind: 'FACTORY' as const,
+        name: 'Binh Duong',
+        parentId: null,
+        supervisorIds: [],
+      },
+    ],
+  };
+
+  /** One full work day for a new employee: a granted IN scan at 07:58 and OUT at 17:03, pushed like the edge would. */
+  const workOneDay = async (code: string) => {
+    const lan = await onboard(code);
+    const scanIn = await edgeScan((await issueQr(lan.session)).body.token);
+    nowMs = Date.parse(OUT_AT);
+    const scanOut = await edgeScan((await issueQr(lan.session)).body.token);
+    expect((await push(scanIn.event, scanOut.event)).status).toBe(200);
+    const [record] = await attendance.dailyRecords(TODAY, FACTORY);
+    expect(record).toMatchObject({ employeeId: lan.id, hours: 9.08, missingPunch: false });
+    return { lan, record: record! };
+  };
+
+  it('GET /api/reports/monthly reads these daily records (FR-4.1, FR-4.3, #83)', async () => {
+    const { lan, record } = await workOneDay('BD-0004');
+    const reports = new MonthlyReportService(eqr, attendance, orgUnits);
+    const exportsSvc = new HrExportService(
+      new InMemoryExportRuns(),
+      new CompanyMonthSource(eqr, attendance, orgUnits),
+      new ScriptedHrs(),
+      new FakeEdgeSyncs(),
+      new RecordingNotifier(),
+      iam,
+    );
+    const reportApp = createApp(
+      [reportingRoutes({ reports, exports: exportsSvc, now: () => new Date(nowMs) })],
+      { before: [authenticate(iam), requireNoticeAck(iam)] },
+    );
+
+    expect((await request(reportApp).get(`/api/reports/monthly?month=${MONTH}`)).status).toBe(401);
+    const res = await request(reportApp)
+      .get(`/api/reports/monthly?month=${MONTH}&by=employee`)
+      .set('Authorization', `Bearer ${HR_SESSION}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ month: MONTH, by: 'employee', suppressed: 0 });
+    expect(res.body.rows).toEqual([
+      expect.objectContaining({
+        employeeId: lan.id,
+        code: 'BD-0004',
+        factoryId: FACTORY,
+        daysPresent: 1,
+        hours: record.hours,
+        missingPunchDays: 0,
+      }),
+    ]);
+  });
+
+  it('monthly export sends them to MockHrs, retries, audits (FR-4.5, FR-4.6, #84)', async () => {
+    const { lan, record } = await workOneDay('BD-0005');
+    // Day 1 of the next month, 06:00 in Vietnam; the edge synced after the month ended.
+    const exportAt = new Date('2026-11-30T23:00:00Z');
+    const hrs = new ScriptedHrs(['throw', 'throw', 'ACCEPTED']);
+    const notifier = new RecordingNotifier();
+    const runs = new InMemoryExportRuns();
+    const exportsSvc = new HrExportService(
+      runs,
+      new CompanyMonthSource(eqr, attendance, orgUnits),
+      hrs,
+      new FakeEdgeSyncs([
+        { edgeId: EDGE, factoryId: FACTORY, lastSyncAt: new Date('2026-11-30T22:00:00Z') },
+      ]),
+      notifier,
+      iam,
+      { now: () => exportAt, sleep: async () => {}, log: () => {} },
+    );
+
+    const run = await exportsSvc.runScheduled(MONTH, false);
+    expect(run).toMatchObject({ month: MONTH, status: 'DONE', attempts: 3, lastError: null });
+    expect(await exportsSvc.status(MONTH)).toMatchObject({ status: 'DONE', attempts: 3 });
+
+    // The same batch each attempt: one row per daily record, ids and hours, no names.
+    expect(hrs.batches).toHaveLength(3);
+    expect(hrs.batches[2]).toEqual({
+      month: MONTH,
+      rows: [
+        {
+          employeeId: lan.id,
+          employeeCode: 'BD-0005',
+          date: '2026-11-07',
+          firstIn: record.firstIn!.toISOString(),
+          lastOut: record.lastOut!.toISOString(),
+          hours: record.hours,
+          missingPunch: false,
+        },
+      ],
+    });
+    expect(JSON.stringify(hrs.batches)).not.toMatch(/Lan|Nguyen|firstName|lastName/);
+
+    expect(
+      iamStore.audit.filter((e) => e.target === `export:${MONTH}`).map((e) => e.action),
+    ).toEqual(['EXPORT_RUN', 'EXPORT_DONE']);
+    expect(notifier.alerts).toEqual([]);
+  });
+
+  it('GET /api/access-log gives a guard of the factory its granted and denied scans (FR-4.4, #85, #88)', async () => {
+    const lan = await onboard('BD-0006');
+    const qr = await issueQr(lan.session);
+    const granted = await edgeScan(qr.body.token);
+    expect(granted.reason).toBeUndefined();
+
+    // Same token, still inside its window, but the employee was revoked in between.
+    nowMs += 10_000;
+    expect(
+      (
+        await request(app)
+          .post(`/api/employees/${lan.id}/qr/revoke`)
+          .set('Authorization', `Bearer ${HR_SESSION}`)
+          .send()
+      ).status,
+    ).toBe(200);
+    const denied = await edgeScan(qr.body.token);
+    expect(denied.reason).toBe('REVOKED');
+    // A scan at a gate of another factory: the guard must not see it.
+    const elsewhere = await edgeScan(qr.body.token);
+
+    expect(
+      (
+        await push(
+          granted.event,
+          { ...denied.event, denyReason: 'REVOKED' },
+          { ...elsewhere.event, gateId: 'la-gate-1', denyReason: 'REVOKED' },
+        )
+      ).status,
+    ).toBe(200);
+    expect(events.rows.get(denied.event.eventId)).toMatchObject({ denyReason: 'REVOKED' });
+
+    // GRD sessions are seeded like HR's: scoped to the factory, finished MFA.
+    const guard = user({ username: 'guard', passwordHash: 'unused', role: 'GRD' });
+    guard.scoped = true;
+    guard.scopes = [FACTORY];
+    iamStore.users.push(guard);
+    const GRD_SESSION = 'grd-session-token';
+    await iamStore.store.createSession({
+      tokenHash: createHash('sha256').update(GRD_SESSION).digest('hex'),
+      userId: guard.id,
+      mfaPassed: true,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+
+    const gateLookup = { gates: async () => [{ id: GATE, name: 'Main gate', factoryId: FACTORY }] };
+    const logApp = createApp(
+      [
+        reportingRoutes({
+          reports: new MonthlyReportService(eqr, attendance, orgUnits),
+          exports: new HrExportService(
+            new InMemoryExportRuns(),
+            new CompanyMonthSource(eqr, attendance, orgUnits),
+            new ScriptedHrs(),
+            new FakeEdgeSyncs(),
+            new RecordingNotifier(),
+            iam,
+          ),
+          accessLog: new AccessLogService(attendance, gateLookup, eqr),
+        }),
+      ],
+      { before: [authenticate(iam), requireNoticeAck(iam)] },
+    );
+    const qs = `from=${encodeURIComponent('2026-11-07T00:00:00Z')}&to=${encodeURIComponent('2026-11-07T01:00:00Z')}`;
+
+    const res = await request(logApp)
+      .get(`/api/access-log?${qs}`)
+      .set('Authorization', `Bearer ${GRD_SESSION}`);
+    expect(res.status).toBe(200);
+    expect(res.body.rows).toEqual([
+      expect.objectContaining({
+        eventId: denied.event.eventId,
+        gateId: GATE,
+        gateName: 'Main gate',
+        outcome: 'DENIED',
+        denyReason: 'REVOKED',
+        employeeCode: 'BD-0006',
+        firstName: 'Lan',
+      }),
+      expect.objectContaining({
+        eventId: granted.event.eventId,
+        outcome: 'GRANTED',
+        denyReason: null,
+        employeeCode: 'BD-0006',
+        firstName: 'Lan',
+      }),
+    ]);
+
+    const onlyDenied = await request(logApp)
+      .get(`/api/access-log?${qs}&outcome=DENIED`)
+      .set('Authorization', `Bearer ${GRD_SESSION}`);
+    expect(onlyDenied.body.rows.map((r: { eventId: string }) => r.eventId)).toEqual([
+      denied.event.eventId,
+    ]);
+
+    const hr = await request(logApp)
+      .get(`/api/access-log?${qs}`)
+      .set('Authorization', `Bearer ${HR_SESSION}`);
+    expect(hr.status).toBe(403);
+  });
 });

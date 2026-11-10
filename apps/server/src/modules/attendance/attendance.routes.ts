@@ -1,6 +1,8 @@
 import { Router, type Request } from 'express';
 import {
+  DENY_REASONS,
   MAX_EDGE_BATCH,
+  type EdgeDenyReason,
   type EdgeEvent,
   type PushEventsRequest,
 } from '../../shared/contracts/edge.js';
@@ -44,6 +46,12 @@ const invalidEvent = (e: unknown): string | null => {
   if (!METHODS.includes(e.method as string)) return '.method must be QR or MANUAL';
   if (!OUTCOMES.includes(e.outcome as string)) {
     return '.outcome must be PENDING, GRANTED or DENIED';
+  }
+  if (e.denyReason !== undefined && e.denyReason !== null) {
+    if (!DENY_REASONS.includes(e.denyReason as EdgeDenyReason)) {
+      return `.denyReason must be one of ${DENY_REASONS.join(', ')} or null`;
+    }
+    if (e.outcome !== 'DENIED') return '.denyReason is only allowed with outcome DENIED';
   }
   if (!isIsoDate(e.occurredAt)) return '.occurredAt must be an ISO date';
   if (e.jti !== null && !isText(e.jti)) return '.jti must be a non-empty string or null';

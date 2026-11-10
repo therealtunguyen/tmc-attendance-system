@@ -2,13 +2,14 @@
 import type { Scope } from '../../shared/types.js';
 import type { ConfigReader, OrgUnit } from '../admin/index.js';
 import { descendants, factoryOf } from '../admin/index.js';
-import type { AttendanceQuery, DailyRecord } from '../attendance/index.js';
-import type { EmployeeRoster, RosterEntry } from '../employee-qr/index.js';
+import type { AttendanceQuery } from '../attendance/index.js';
+import type { EmployeeRoster } from '../employee-qr/index.js';
 import { inScope, isRestricted } from '../iam/index.js';
 import type { UserRef } from '../iam/index.js';
 import { departmentRows, employeeRows, factoryRows } from './reporting.aggregate.js';
 import type { DepartmentRow, EmployeeRow, FactoryRow, ReportBy } from './reporting.aggregate.js';
 import type { ReportMonth } from './reporting.month.js';
+import { readMonth } from './reporting.source.js';
 
 export interface ReportQuery {
   month: ReportMonth;
@@ -100,28 +101,18 @@ export class MonthlyReportService implements MonthlyReports {
     }
     const allowed = new Set(descendants(units, targets));
 
-    const perUnit = await Promise.all(
-      queryUnits(units, targets).map(async (u) => {
-        const [entries, records] = await Promise.all([
-          this.roster.roster(u),
-          this.attendance.dailyRecords(month.range, u),
-        ]);
-        return { entries, records };
-      }),
+    // The narrowest units that cover the targets; the scope filter stays as defence in depth.
+    const data = await readMonth(
+      this.roster,
+      this.attendance,
+      queryUnits(units, targets),
+      month.range,
+    );
+    const employees = data.employees.filter(
+      (e) => allowed.has(e.factoryId) || (e.teamId !== null && allowed.has(e.teamId)),
     );
 
-    const employees = new Map<string, RosterEntry>();
-    const records: DailyRecord[] = [];
-    for (const { entries, records: recs } of perUnit) {
-      records.push(...recs);
-      for (const e of entries) {
-        if (allowed.has(e.factoryId) || (e.teamId !== null && allowed.has(e.teamId))) {
-          employees.set(e.id, e);
-        }
-      }
-    }
-
-    const rows = employeeRows([...employees.values()], records, units);
+    const rows = employeeRows(employees, data.records, units);
     const base = { month: month.month, scope: scope ?? null };
     const minGroup = viewer.role === 'EXE' ? EXE_MIN_GROUP : 0;
     if (by === 'department') {

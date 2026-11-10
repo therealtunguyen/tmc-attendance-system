@@ -40,6 +40,7 @@ beforeEach(async () => {
       insertMany: async () => {},
       grantedEvents: async () => [],
       grantedEventsOf: async () => [],
+      accessLog: async () => [],
       decide: async (id, outcome) => {
         const event = events.get(id);
         if (!event || (event.outcome !== 'PENDING' && event.outcome !== outcome)) return false;
