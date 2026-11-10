@@ -8,6 +8,7 @@ import type { EmployeeDirectory } from '../employee-qr/index.js';
 import type { UserRef } from '../iam/index.js';
 import { attendanceRoutes } from './attendance.routes.js';
 import {
+  ACCESS_LOG_MAX_LIMIT,
   AttendanceService,
   OutcomeConflictError,
   UnknownEventError,
@@ -678,9 +679,33 @@ describe('AttendanceService.accessLog (FR-4.4)', () => {
   it.each([0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1])(
     'rejects limit %s with a RangeError',
     async (limit) => {
-      await expect(attendance.accessLog({ range: day, limit })).rejects.toThrow(RangeError);
+      await expect(attendance.accessLog({ range: day, limit })).rejects.toThrow(
+        new RangeError('limit must be an integer from 1 to 500'),
+      );
     },
   );
+
+  it('accepts the maximum limit and rejects anything above it', async () => {
+    await seed('a', '2026-11-07T01:00:00Z');
+    expect(await attendance.accessLog({ range: day, limit: ACCESS_LOG_MAX_LIMIT })).toHaveLength(1);
+    const message = 'limit must be an integer from 1 to 500';
+    for (const limit of [ACCESS_LOG_MAX_LIMIT + 1, Number.MAX_SAFE_INTEGER]) {
+      await expect(attendance.accessLog({ range: day, limit })).rejects.toThrow(
+        new RangeError(message),
+      );
+    }
+  });
+
+  it('rejects an invalid Date in range.from or range.to', async () => {
+    const bad = new Date('nope');
+    const message = 'range.from and range.to must be valid dates';
+    await expect(
+      attendance.accessLog({ range: { from: bad, to: day.to }, limit: 10 }),
+    ).rejects.toThrow(new RangeError(message));
+    await expect(
+      attendance.accessLog({ range: { from: day.from, to: bad }, limit: 10 }),
+    ).rejects.toThrow(new RangeError(message));
+  });
 
   it('an empty or inverted range gives no rows', async () => {
     await seed('a', '2026-11-07T01:00:00Z');

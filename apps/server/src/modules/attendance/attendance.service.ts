@@ -45,6 +45,9 @@ export interface StoredEvent extends Omit<
 
 export type AccessOutcome = StoredEvent['outcome']; // 'GRANTED' | 'DENIED' | 'PENDING'
 
+/** FR-4.4: one page of the access log holds at most this many rows; callers page by time. */
+export const ACCESS_LOG_MAX_LIMIT = 500;
+
 /** What the security access log asks for (FR-4.4). Filters, order and limit run in the database. */
 export interface AccessLogQuery {
   /** occurredAt from range.from (inclusive) to range.to (exclusive). */
@@ -52,7 +55,7 @@ export interface AccessLogQuery {
   /** Only these gates; undefined = every gate. An empty list matches nothing. */
   gateIds?: readonly string[];
   outcome?: AccessOutcome;
-  /** Newest first, at most this many rows (a positive integer). */
+  /** Newest first, at most this many rows (an integer from 1 to ACCESS_LOG_MAX_LIMIT). */
   limit: number;
 }
 
@@ -223,11 +226,19 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
   }
 
   async accessLog(query: AccessLogQuery): Promise<StoredEvent[]> {
-    if (!Number.isSafeInteger(query.limit) || query.limit < 1) {
-      throw new RangeError('limit must be a positive integer');
+    if (
+      !Number.isSafeInteger(query.limit) ||
+      query.limit < 1 ||
+      query.limit > ACCESS_LOG_MAX_LIMIT
+    ) {
+      throw new RangeError(`limit must be an integer from 1 to ${ACCESS_LOG_MAX_LIMIT}`);
+    }
+    const { range } = query;
+    if (Number.isNaN(range.from.getTime()) || Number.isNaN(range.to.getTime())) {
+      throw new RangeError('range.from and range.to must be valid dates');
     }
     if (query.gateIds?.length === 0) return [];
-    if (query.range.to <= query.range.from) return [];
+    if (range.to <= range.from) return [];
     return this.repo.accessLog(query);
   }
 }

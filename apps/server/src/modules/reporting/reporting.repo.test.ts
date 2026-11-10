@@ -102,14 +102,23 @@ describe('ReportingRepo', () => {
     expect(updateMany).not.toHaveBeenCalled();
   });
 
-  it('finish stores the outcome and finishedAt', async () => {
+  it('finish updates only the run it claimed and returns the stored row', async () => {
     const done = { ...row, status: 'FAILED' as const, attempts: 4, lastError: 'x', finishedAt: at };
-    const update = vi.fn().mockResolvedValue(done);
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const findUnique = vi.fn().mockResolvedValue(done);
     const result = { status: 'FAILED', attempts: 4, lastError: 'x', at } as const;
-    expect(await repoWith({ update }).finish('2026-10', result)).toEqual(done);
-    expect(update).toHaveBeenCalledWith({
-      where: { month: '2026-10' },
+    expect(await repoWith({ updateMany, findUnique }).finish('2026-10', at, result)).toEqual(done);
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { month: '2026-10', status: 'RUNNING', startedAt: at },
       data: { status: 'FAILED', attempts: 4, lastError: 'x', finishedAt: at },
     });
+  });
+
+  it('finish returns null when another run took the month over', async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const findUnique = vi.fn();
+    const result = { status: 'DONE', attempts: 1, lastError: null, at } as const;
+    expect(await repoWith({ updateMany, findUnique }).finish('2026-10', at, result)).toBeNull();
+    expect(findUnique).not.toHaveBeenCalled();
   });
 });
