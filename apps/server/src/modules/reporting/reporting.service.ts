@@ -7,7 +7,7 @@ import type { EdgeSync, EdgeSyncStatus } from './reporting.edges.js';
 import { parseMonth } from './reporting.month.js';
 import type { Notifier } from './reporting.notifier.js';
 import { STALE_AFTER_MS } from './reporting.runs.js';
-import type { ExportRun, ExportRunStore, ExportTrigger } from './reporting.runs.js';
+import type { ExportResult, ExportRun, ExportRunStore, ExportTrigger } from './reporting.runs.js';
 import { previousMonth } from './reporting.schedule.js';
 import { hrsRows } from './reporting.source.js';
 import type { MonthSource } from './reporting.source.js';
@@ -184,9 +184,7 @@ export class HrExportService implements ScheduledExport, ExportRerun, ExportLife
               lastError: messageOf(error),
               at: this.now(),
             };
-      await this.runs
-        .finish(month, outcome)
-        .catch((e) => this.log('Could not release the export run', e));
+      await this.settle(run, outcome).catch((e) => this.log('Could not release the export run', e));
       throw error;
     }
     return { run, finished: this.track(this.send(month, parsed.range, actorId, run)) };
@@ -208,12 +206,14 @@ export class HrExportService implements ScheduledExport, ExportRerun, ExportLife
         const list = describeEdges(unsynced);
         const error = `Waiting for edge sync: ${list}`;
         if (!lastChance) {
-          return await this.runs.finish(month, {
-            status: 'BLOCKED',
-            attempts: 0,
-            lastError: error.slice(0, MAX_ERROR_LENGTH),
-            at: this.now(),
-          });
+          return (
+            await this.settle(run, {
+              status: 'BLOCKED',
+              attempts: 0,
+              lastError: error.slice(0, MAX_ERROR_LENGTH),
+              at: this.now(),
+            })
+          ).run;
         }
         return await this.fail(
           month,
@@ -221,6 +221,7 @@ export class HrExportService implements ScheduledExport, ExportRerun, ExportLife
           0,
           error,
           `HRS export of ${month} failed: edges not synced since the month ended: ${list}. Re-run once they sync, or with ignoreUnsyncedEdges.`,
+          run,
         );
       }
       await this.audit.append({
@@ -254,6 +255,7 @@ export class HrExportService implements ScheduledExport, ExportRerun, ExportLife
         0,
         `Started at ${since} and never finished (the server stopped during the run)`,
         `HRS export of ${month} did not finish: it started at ${since} and the server stopped before it ended. ${rerunHint}`,
+        run,
       );
     }
     if (previous?.status === 'BLOCKED' && previous.lastError) {
@@ -263,6 +265,7 @@ export class HrExportService implements ScheduledExport, ExportRerun, ExportLife
         0,
         `Missed the export window (day 1 before 12:00). ${previous.lastError}`,
         `HRS export of ${month} did not run in its window (day 1 before 12:00): ${previous.lastError}. ${rerunHint}`,
+        run,
       );
     }
     return this.fail(
@@ -271,6 +274,7 @@ export class HrExportService implements ScheduledExport, ExportRerun, ExportLife
       0,
       'Missed the export window (day 1 before 12:00)',
       `HRS export of ${month} did not run in its window (day 1 before 12:00). ${rerunHint}`,
+      run,
     );
   }
 
@@ -295,7 +299,7 @@ export class HrExportService implements ScheduledExport, ExportRerun, ExportLife
       const batch = { month, rows: hrsRows(data.employees, data.records) };
       if (batch.rows.length === 0) {
         const error = `No attendance records for ${month}; nothing was sent to HRS`;
-        return await this.fail(month, actorId, 0, error, this.failedText(month, 0, error));
+        return await this.fail(month, actorId, 0, error, this.failedText(month, 0, error), claimed);
       }
       const maxAttempts = 1 + this.retryDelaysMs.length;
       let lastError: string | null = null;
@@ -321,12 +325,14 @@ export class HrExportService implements ScheduledExport, ExportRerun, ExportLife
           continue;
         }
         if (answer === 'ACCEPTED') {
-          const done = await this.runs.finish(month, {
+          const { run: done, stored } = await this.settle(claimed, {
             status: 'DONE',
             attempts,
             lastError: null,
             at: this.now(),
           });
+          // A newer run owns the record now; HRS accepts a repeated batch (ADR-5).
+          if (!stored) return done;
           // HRS has the data, so the run stays DONE: a failed audit write is logged, not reported as a failed export.
           await this.audit
             .append({
@@ -349,6 +355,7 @@ export class HrExportService implements ScheduledExport, ExportRerun, ExportLife
         attempts,
         lastError ?? 'unknown error',
         this.failedText(month, attempts, lastError ?? 'unknown error'),
+        claimed,
       );
     } catch (error) {
       return this.failUnexpected(month, actorId, attempts, error, claimed);
@@ -367,12 +374,14 @@ export class HrExportService implements ScheduledExport, ExportRerun, ExportLife
   ): Promise<ExportRun> {
     const error = `Interrupted by shutdown after ${attempts} attempt(s)`;
     if (claimed.trigger === 'SCHEDULE') {
-      return this.runs.finish(month, {
-        status: 'BLOCKED',
-        attempts,
-        lastError: error,
-        at: this.now(),
-      });
+      return (
+        await this.settle(claimed, {
+          status: 'BLOCKED',
+          attempts,
+          lastError: error,
+          at: this.now(),
+        })
+      ).run;
     }
     return this.fail(
       month,
@@ -380,6 +389,7 @@ export class HrExportService implements ScheduledExport, ExportRerun, ExportLife
       attempts,
       error,
       `HRS export of ${month} did not finish: the server shut down after ${attempts} attempt(s). Re-run it with POST /api/exports/${month}/rerun.`,
+      claimed,
     );
   }
 
@@ -405,11 +415,26 @@ export class HrExportService implements ScheduledExport, ExportRerun, ExportLife
         attempts,
         text,
         this.failedText(month, attempts, text),
+        lastKnown,
       );
     } catch (e) {
       this.log(`Could not store the failure of the ${month} export`, e);
       return lastKnown;
     }
+  }
+
+  /**
+   * Stores the outcome only while the row is still the run `claimed`. When a newer run took it over, the outcome is
+   * dropped (logged) and the current run is returned with stored false.
+   */
+  private async settle(
+    claimed: ExportRun,
+    result: ExportResult,
+  ): Promise<{ run: ExportRun; stored: boolean }> {
+    const run = await this.runs.finish(claimed.month, claimed.startedAt, result);
+    if (run) return { run, stored: true };
+    this.log(`Export of ${claimed.month} was taken over by a newer run; this outcome is dropped`);
+    return { run: (await this.runs.find(claimed.month)) ?? claimed, stored: false };
   }
 
   /** Stores FAILED, then audits and alerts once. A failing audit or alert is logged: the run is already stored. */
@@ -419,14 +444,17 @@ export class HrExportService implements ScheduledExport, ExportRerun, ExportLife
     attempts: number,
     error: string,
     alertText: string,
+    claimed: ExportRun,
   ): Promise<ExportRun> {
     const lastError = error.slice(0, MAX_ERROR_LENGTH);
-    const run = await this.runs.finish(month, {
+    const { run, stored } = await this.settle(claimed, {
       status: 'FAILED',
       attempts,
       lastError,
       at: this.now(),
     });
+    // A newer run took the month over: its outcome is the one to audit and alert.
+    if (!stored) return run;
     await this.audit
       .append({
         actorId,

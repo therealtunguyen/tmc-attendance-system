@@ -64,7 +64,7 @@ describe('InMemoryExportRuns', () => {
   it('stores the outcome, and a manual claim restarts a DONE month but the schedule does not', async () => {
     const runs = new InMemoryExportRuns();
     await runs.claim('2026-10', 'SCHEDULE', at, STALE);
-    const done = await runs.finish('2026-10', finish);
+    const done = await runs.finish('2026-10', at, finish);
     expect(done).toMatchObject({ status: 'DONE', attempts: 2, finishedAt: at });
     expect(await runs.find('2026-10')).toEqual(done);
     expect(await runs.claim('2026-10', 'SCHEDULE', at, STALE)).toBeNull();
@@ -74,6 +74,18 @@ describe('InMemoryExportRuns', () => {
       attempts: 0,
       finishedAt: null,
     });
+  });
+
+  it('drops the outcome of a run that was taken over, and of a row that is not RUNNING', async () => {
+    const runs = new InMemoryExportRuns();
+    await runs.claim('2026-10', 'SCHEDULE', at, STALE);
+    const other = new Date(at.getTime() + 1);
+    expect(await runs.finish('2026-10', other, finish)).toBeNull();
+    expect(await runs.find('2026-10')).toMatchObject({ status: 'RUNNING', startedAt: at });
+    expect(await runs.finish('2026-10', at, finish)).not.toBeNull();
+    expect(await runs.finish('2026-10', at, { ...finish, status: 'FAILED' })).toBeNull();
+    expect(await runs.find('2026-10')).toMatchObject({ status: 'DONE' });
+    expect(await runs.finish('2026-09', at, finish)).toBeNull();
   });
 
   it('returns copies', async () => {

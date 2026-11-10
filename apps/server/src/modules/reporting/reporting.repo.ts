@@ -58,13 +58,13 @@ export class ReportingRepo implements ExportRunStore {
 
   async finish(
     month: string,
+    startedAt: Date,
     { status, attempts, lastError, at }: ExportResult,
-  ): Promise<ExportRun> {
-    return toRun(
-      await this.db.exportRun.update({
-        where: { month },
-        data: { status, attempts, lastError, finishedAt: at },
-      }),
-    );
+  ): Promise<ExportRun | null> {
+    const { count } = await this.db.exportRun.updateMany({
+      where: { month, status: 'RUNNING', startedAt },
+      data: { status, attempts, lastError, finishedAt: at },
+    });
+    return count === 0 ? null : this.find(month);
   }
 }

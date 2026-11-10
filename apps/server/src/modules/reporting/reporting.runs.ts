@@ -59,6 +59,9 @@ export interface ExportRunStore {
     at: Date,
     staleBefore: Date,
   ): Promise<ExportRun | null>;
-  /** Stores the outcome of the run (finishedAt = result.at). Returns the updated run. */
-  finish(month: string, result: ExportResult): Promise<ExportRun>;
+  /**
+   * Stores the outcome (finishedAt = result.at) only while the row is still the run this caller claimed (status
+   * RUNNING and the same startedAt). Null when another run has taken it over: the caller's outcome is dropped.
+   */
+  finish(month: string, startedAt: Date, result: ExportResult): Promise<ExportRun | null>;
 }
