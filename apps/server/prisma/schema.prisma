@@ -71,6 +71,8 @@ model AttendanceEvent {
   receivedAt DateTime    @default(now())
 
   @@index([jti])
+  // An employee's own history (FR-1.6) reads by person across all dates.
+  @@index([employeeId, occurredAt])
   // The security access log filters by gate and time, newest first (FR-4.4).
   @@index([gateId, occurredAt])
   @@index([occurredAt])

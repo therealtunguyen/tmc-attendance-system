@@ -1,9 +1,11 @@
+import { Router } from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../app.js';
 import { MAX_EDGE_BATCH, type EdgeEvent } from '../../shared/contracts/edge.js';
 import type { Scope } from '../../shared/types.js';
 import type { EmployeeDirectory } from '../employee-qr/index.js';
+import type { UserRef } from '../iam/index.js';
 import { attendanceRoutes } from './attendance.routes.js';
 import {
   AttendanceService,
@@ -39,6 +41,12 @@ class InMemoryEvents implements AttendanceStore {
 
   async outcomeOf(eventId: string) {
     return this.rows.get(eventId)?.outcome ?? null;
+  }
+
+  async grantedEventsOf(employeeId: string) {
+    return [...this.rows.values()].filter(
+      (e) => e.outcome === 'GRANTED' && e.employeeId === employeeId,
+    );
   }
 
   accessLogCalls = 0;
@@ -500,6 +508,104 @@ describe('AttendanceService.dailyRecords (FR-3.4, FR-3.5)', () => {
       'nowhere',
     );
     expect(records).toEqual([]);
+  });
+});
+
+describe('own attendance history (FR-1.6, UC-3)', () => {
+  const push = (eventId: string, employeeId: string, occurredAt: string, changes = {}) =>
+    attendance.ingest({
+      edgeId: 'edge-bd',
+      events: [edgeEvent(eventId, { employeeId, occurredAt, ...changes })],
+    });
+
+  beforeEach(async () => {
+    await push('a-1', 'emp-1', '2026-11-06T01:00:00Z'); // 06/11, one scan
+    await push('a-2', 'emp-1', '2026-11-07T01:00:00Z'); // 07/11, two scans
+    await push('a-3', 'emp-1', '2026-11-07T10:00:00Z');
+    await push('a-4', 'emp-1', '2026-11-08T01:00:00Z', { outcome: 'DENIED' });
+    await push('a-5', 'emp-1', '2026-11-08T02:00:00Z', { outcome: 'PENDING' });
+    await push('b-1', 'emp-2', '2026-11-07T02:00:00Z');
+  });
+
+  describe('AttendanceService.history', () => {
+    it('lists that employee only, newest day first, with hours and missing punches', async () => {
+      expect(await attendance.history('emp-1')).toEqual([
+        {
+          employeeId: 'emp-1',
+          day: new Date('2026-11-06T17:00:00Z'),
+          firstIn: new Date('2026-11-07T01:00:00Z'),
+          lastOut: new Date('2026-11-07T10:00:00Z'),
+          hours: 9,
+          missingPunch: false,
+        },
+        {
+          employeeId: 'emp-1',
+          day: new Date('2026-11-05T17:00:00Z'),
+          firstIn: new Date('2026-11-06T01:00:00Z'),
+          lastOut: null,
+          hours: 0,
+          missingPunch: true,
+        },
+      ]);
+    });
+
+    it('is empty for an employee with no granted scan', async () => {
+      expect(await attendance.history('emp-9')).toEqual([]);
+    });
+  });
+
+  describe('GET /api/me/attendance', () => {
+    const app = (user?: UserRef) =>
+      createApp([
+        Router().use((_req, res, next) => {
+          if (user) res.locals.user = user;
+          next();
+        }),
+        attendanceRoutes(attendance),
+      ]);
+    const me: UserRef = { id: 'user-1', role: 'EMP', employeeId: 'emp-2' };
+
+    it('returns the signed-in employee history, never cached', async () => {
+      const res = await request(app(me)).get('/api/me/attendance');
+      expect(res.status).toBe(200);
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(res.body).toEqual({
+        records: [
+          {
+            employeeId: 'emp-2',
+            day: '2026-11-06T17:00:00.000Z',
+            firstIn: '2026-11-07T02:00:00.000Z',
+            lastOut: null,
+            hours: 0,
+            missingPunch: true,
+          },
+        ],
+      });
+    });
+
+    it('ignores an employeeId in the request: nobody reads another person', async () => {
+      const res = await request(app(me)).get('/api/me/attendance?employeeId=emp-1');
+      expect(res.body.records.map((r: { employeeId: string }) => r.employeeId)).toEqual(['emp-2']);
+    });
+
+    it.each(['SUP', 'HR', 'GRD', 'ADM', 'EXE'] as const)(
+      '%s also views own attendance (report 8.6)',
+      async (role) => {
+        const res = await request(app({ ...me, role })).get('/api/me/attendance');
+        expect(res.status).toBe(200);
+        expect(res.body.records).toHaveLength(1);
+      },
+    );
+
+    it('401 when not signed in', async () => {
+      expect((await request(app()).get('/api/me/attendance')).status).toBe(401);
+    });
+
+    it('403 NO_EMPLOYEE for an account with no employee record', async () => {
+      const res = await request(app({ id: 'user-2', role: 'ADM' })).get('/api/me/attendance');
+      expect(res.status).toBe(403);
+      expect(res.body.reason).toBe('NO_EMPLOYEE');
+    });
   });
 });
 
