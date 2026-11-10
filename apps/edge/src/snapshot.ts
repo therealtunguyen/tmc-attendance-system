@@ -98,11 +98,21 @@ export class SnapshotManager {
     );
   }
 
-  /** Starts the background pull loop. Returns a cleanup function (for tests). */
+  /** Starts the background pull loop with an in-flight guard. Returns a cleanup function. */
   startLoop(intervalMs = SNAPSHOT_PULL_INTERVAL_MS): () => void {
+    let running = false;
+    const tick = async () => {
+      if (running) return;
+      running = true;
+      try {
+        await this.pull();
+      } finally {
+        running = false;
+      }
+    };
     // Pull immediately on startup, then on the interval.
-    void this.pull();
-    const id = setInterval(() => void this.pull(), intervalMs);
+    void tick();
+    const id = setInterval(() => void tick(), intervalMs);
     return () => clearInterval(id);
   }
 

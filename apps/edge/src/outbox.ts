@@ -5,6 +5,7 @@ import type { EdgeEvent, PushEventsRequest } from '../../server/src/shared/contr
 import { MAX_PUSH_ATTEMPTS, type Db, type LocalEvent } from './db.js';
 import type { ServerClient } from './server-client.js';
 
+const BATCH_LIMIT = 100;
 const inFlight = new WeakSet<Db>();
 
 const toEdgeEvent = (e: LocalEvent): EdgeEvent => ({
@@ -20,9 +21,9 @@ const toEdgeEvent = (e: LocalEvent): EdgeEvent => ({
 });
 
 /**
- * One outbox flush: fetch unpushed events, POST them to the server, mark confirmed ones.
+ * Flush unpushed events in batches (<= MAX_EDGE_BATCH) until drained or a push fails.
  * Guarded against overlapping runs on the same db.
- * Returns the number of events confirmed in this run (useful for tests).
+ * Returns the total number of events confirmed in this run (useful for tests).
  */
 export const flushOutbox = async (
   db: Db,
@@ -32,39 +33,45 @@ export const flushOutbox = async (
   if (inFlight.has(db)) return 0;
   inFlight.add(db);
   try {
-    const pending = db.unpushedEvents();
-    if (pending.length === 0) return 0;
+    let totalConfirmed = 0;
+    while (true) {
+      const pending = db.unpushedEvents();
+      if (pending.length === 0) break;
 
-    const req: PushEventsRequest = {
-      edgeId,
-      events: pending.map(toEdgeEvent),
-    };
+      const req: PushEventsRequest = {
+        edgeId,
+        events: pending.map(toEdgeEvent),
+      };
 
-    const result = await client.pushEvents(req);
-    if (!result.ok) {
-      console.warn(`[outbox] push failed (${result.status}): ${result.error}`);
-      return 0;
-    }
-
-    const accepted = new Set(result.data.accepted);
-    let confirmed = 0;
-    for (const event of pending) {
-      if (accepted.has(event.eventId)) {
-        db.markPushed(event.eventId);
-        confirmed++;
-      } else {
-        const attempts = db.recordRejected(event.eventId);
-        const suffix =
-          attempts >= MAX_PUSH_ATTEMPTS
-            ? ` (reached max ${MAX_PUSH_ATTEMPTS} attempts; parking)`
-            : ` (attempt ${attempts}/${MAX_PUSH_ATTEMPTS})`;
-        console.warn(`[outbox] event ${event.eventId} omitted from accepted${suffix}`);
+      const result = await client.pushEvents(req);
+      if (!result.ok) {
+        console.warn(`[outbox] push failed (${result.status}): ${result.error}`);
+        break;
       }
+
+      const accepted = new Set(result.data.accepted);
+      let confirmed = 0;
+      for (const event of pending) {
+        if (accepted.has(event.eventId)) {
+          db.markPushed(event.eventId);
+          confirmed++;
+        } else {
+          const attempts = db.recordRejected(event.eventId);
+          const suffix =
+            attempts >= MAX_PUSH_ATTEMPTS
+              ? ` (reached max ${MAX_PUSH_ATTEMPTS} attempts; parking)`
+              : ` (attempt ${attempts}/${MAX_PUSH_ATTEMPTS})`;
+          console.warn(`[outbox] event ${event.eventId} omitted from accepted${suffix}`);
+        }
+      }
+      totalConfirmed += confirmed;
+      if (confirmed > 0) {
+        console.log(`[outbox] confirmed ${confirmed}/${pending.length} events`);
+      }
+      // Stop if this was a partial final batch or nothing was accepted (avoid spinning on rejects).
+      if (pending.length < BATCH_LIMIT || confirmed === 0) break;
     }
-    if (confirmed > 0) {
-      console.log(`[outbox] confirmed ${confirmed}/${pending.length} events`);
-    }
-    return confirmed;
+    return totalConfirmed;
   } finally {
     inFlight.delete(db);
   }
@@ -74,8 +81,8 @@ export const flushOutbox = async (
 export const outboxSize = (db: Db): number => db.outboxCount();
 
 /**
- * Starts the outbox flush loop. Returns a cleanup function.
- * On network failure the loop retries every `intervalMs` (simple fixed retry — #27).
+ * Starts the outbox flush loop. Flushes once immediately on startup, then every `intervalMs`.
+ * Returns a cleanup function.
  */
 export const startOutboxLoop = (
   db: Db,
@@ -83,6 +90,7 @@ export const startOutboxLoop = (
   edgeId: string,
   intervalMs: number,
 ): (() => void) => {
+  void flushOutbox(db, client, edgeId);
   const id = setInterval(() => {
     void flushOutbox(db, client, edgeId);
   }, intervalMs);
