@@ -709,6 +709,8 @@ describe('cross-module flow: real routes, in-memory stores, simulated edge', () 
       eventId: 'override-out',
       outcome: 'DENIED',
     });
+    // Persisted, not only returned.
+    expect(events.rows.get('override-out')).toMatchObject({ outcome: 'DENIED', method: 'MANUAL' });
     expect(await attendance.dailyRecords(TODAY, FACTORY)).toEqual([
       expect.objectContaining({ employeeId: lan.id, lastOut: null, missingPunch: true }),
     ]);
