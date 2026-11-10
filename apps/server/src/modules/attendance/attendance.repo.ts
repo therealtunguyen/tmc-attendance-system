@@ -1,6 +1,11 @@
 import type { PrismaClient } from '../../shared/prisma.js';
 import type { DailyInput } from './attendance.daily.js';
-import type { AttendanceStore, ScanOutcome, StoredEvent } from './attendance.service.js';
+import type {
+  AccessLogQuery,
+  AttendanceStore,
+  ScanOutcome,
+  StoredEvent,
+} from './attendance.service.js';
 
 /** Owns: AttendanceEvent, DailyRecord, Correction. */
 export class AttendanceRepo implements AttendanceStore {
@@ -47,5 +52,30 @@ export class AttendanceRepo implements AttendanceStore {
       select: { outcome: true },
     });
     return row?.outcome ?? null;
+  }
+
+  async accessLog({ range, gateIds, outcome, limit }: AccessLogQuery): Promise<StoredEvent[]> {
+    return this.db.attendanceEvent.findMany({
+      where: {
+        occurredAt: { gte: range.from, lt: range.to },
+        ...(gateIds && { gateId: { in: [...gateIds] } }),
+        ...(outcome && { outcome }),
+      },
+      orderBy: [{ occurredAt: 'desc' }, { eventId: 'asc' }],
+      take: limit,
+      select: {
+        eventId: true,
+        employeeId: true,
+        gateId: true,
+        edgeId: true,
+        method: true,
+        guardId: true,
+        reason: true,
+        outcome: true,
+        jti: true,
+        stale: true,
+        occurredAt: true,
+      },
+    });
   }
 }
