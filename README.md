@@ -19,7 +19,7 @@ npm run dev                                     # server :3000, web :5173
 
 Check: <http://localhost:3000/health> returns `{ "ok": true }`, and <http://localhost:5173> shows the kiosk, portal and staff pages.
 
-TCS (turnstiles) and HRS (HR/Payroll) are mocked in-process by default. Set `TCS_MODE=http` / `HRS_MODE=http` in `.env` to call the real systems.
+TCS (turnstiles) and HRS (HR/Payroll) are mocked in-process by default. Set `TCS_MODE=http` / `HRS_MODE=http` in `.env` to call the real systems. Mail is mocked too: set `MAIL_MODE=smtp` and `SMTP_URL` to send it.
 
 ## Scripts (run from the root)
 
@@ -46,6 +46,7 @@ apps/server/            Express modular monolith
     <name>.routes.ts    HTTP routes under /api
   src/adapters/tcs/     TurnstileClient: http.ts (real, 1 s timeout) and mock.ts
   src/adapters/hrs/     HrsClient: http.ts (real) and mock.ts
+  src/adapters/mail/    Mailer: smtp.ts (real) and mock.ts
   src/shared/           env config, Prisma client, errors
   prisma/schema.prisma  database schema (starter models only)
 apps/web/               React + Vite single app
@@ -53,6 +54,10 @@ apps/web/               React + Vite single app
   src/pages/portal/     employee portal (phone-friendly)
   src/pages/staff/      HR, supervisors, guards, admins, executives
 ```
+
+Gate registry data and CRUD rules (FR-2.1): [docs/gate-registry.md](docs/gate-registry.md).
+
+Gate online/offline monitoring and ADM alerts (FR-2.6): [docs/gate-heartbeat.md](docs/gate-heartbeat.md).
 
 ## Deployment notes
 

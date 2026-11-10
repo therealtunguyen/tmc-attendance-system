@@ -1,10 +1,17 @@
 // Edge agent <-> server contract (ADR-9). Shared by the server and the edge agent (#23).
 // JSON over HTTP, all under /api/edge. Dates are ISO 8601 strings on the wire.
 
+import type { QrDenyReason } from './qr-validation.js';
+
 /** The edge pulls GET /api/edge/snapshot this often. */
 export const SNAPSHOT_PULL_INTERVAL_MS = 60_000;
 /** An event decided from a snapshot older than this is sent with `stale: true`. */
 export const SNAPSHOT_STALE_AFTER_MS = 5 * 60_000;
+
+/** FR-2.6 defaults. The edge sends every 30 s; the server tolerates 90 s without a receipt. */
+export const HEARTBEAT_INTERVAL_MS = 30_000;
+export const HEARTBEAT_TIMEOUT_MS = 90_000;
+export const HEARTBEAT_CHECK_INTERVAL_MS = 15_000;
 
 /**
  * Most events in one POST /api/edge/events. A bigger batch gets 400, so the edge outbox must send
@@ -12,6 +19,17 @@ export const SNAPSHOT_STALE_AFTER_MS = 5 * 60_000;
  * 100 KB JSON body limit, so a long offline backlog drains in chunks instead of failing forever.
  */
 export const MAX_EDGE_BATCH = 200;
+
+/** Why a scan was denied (FR-4.4): a QR check failure, or a jti already used (ADR-10, checked at the edge). */
+export type EdgeDenyReason = QrDenyReason | 'REPLAYED';
+export const DENY_REASONS: readonly EdgeDenyReason[] = [
+  'INVALID_SIGNATURE',
+  'EXPIRED',
+  'UNKNOWN',
+  'INACTIVE',
+  'REVOKED',
+  'REPLAYED',
+];
 
 /** One scan the edge has committed locally. The edge's outbox pushes it until the server confirms. */
 export interface EdgeEvent {
@@ -29,6 +47,11 @@ export interface EdgeEvent {
   jti: string | null;
   /** True if the snapshot was older than SNAPSHOT_STALE_AFTER_MS when this event was decided. */
   stale: boolean;
+  /**
+   * Why the edge denied the scan, for the security access log (FR-4.4). Only with outcome DENIED;
+   * optional so an edge built before this field still pushes. Null or absent = not known.
+   */
+  denyReason?: EdgeDenyReason | null;
 }
 
 /** POST /api/edge/events */

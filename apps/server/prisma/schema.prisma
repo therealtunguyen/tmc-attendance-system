@@ -1,5 +1,4 @@
-// Skeleton: the columns the shared contracts need (ADR-9, ADR-10). Each model names its owning module;
-// owners add their own columns. A module never reads another module's tables, so there are no
+// Each model names its owning module. A module never reads another module's tables, so there are no
 // relations across modules: IDs like AttendanceEvent.gateId are plain strings.
 // QR signing keys stay in env (QR_SIGNING_*), so they have no table.
 
@@ -55,6 +54,12 @@ model AttendanceEvent {
   // Edge agent that pushed it (ADR-9). Null for events entered on the server (MANUAL fallback).
   edgeId     String?
   method     ScanMethod
+  // FR-2.5: authenticated guard and justification; null for QR and legacy events.
+  guardId    String?
+  reason     String?
+  // Why the scan was denied (FR-4.4): an EdgeDenyReason (shared/contracts/edge.ts), validated in code.
+  // Null when granted, pending, or not known.
+  denyReason String?
   outcome    ScanOutcome @default(PENDING)
   // Token ID; not unique, so one jti used at two edges is stored and flagged (ADR-10).
   jti        String?
@@ -66,25 +71,54 @@ model AttendanceEvent {
   receivedAt DateTime    @default(now())
 
   @@index([jti])
+  // An employee's own history (FR-1.6) reads by person across all dates.
+  @@index([employeeId, occurredAt])
+  // The security access log filters by gate and time, newest first (FR-4.4).
+  @@index([gateId, occurredAt])
+  @@index([occurredAt])
 }
 
 // Owned by the gate module. One edge agent per factory (ADR-9).
 model Edge {
   id              String    @id
   name            String
+  // Org ID owned by admin; one edge per factory (ADR-9), no cross-module relation.
+  factoryId       String    @unique
   // Heartbeats stop -> offline -> alert ADM (FR-2.6).
   lastHeartbeatAt DateTime?
   // Last successful push; the monthly export checks it (ADR-9, ADR-5).
   lastSyncAt      DateTime?
   gates           Gate[]
+
+  // Composite target for Gate's FK: a gate and its edge must belong to the same factory.
+  @@unique([id, factoryId])
 }
 
-// Owned by the gate module.
+enum GateDirection {
+  IN
+  OUT
+}
+
+// Owned by the gate module (FR-2.1). Registry rules: docs/gate-registry.md.
+// Non-blank string CHECK constraints live in the migration (not expressible in Prisma).
 model Gate {
-  id     String @id
-  name   String
-  edgeId String
-  edge   Edge   @relation(fields: [edgeId], references: [id])
+  id          String        @id @default(uuid())
+  name        String
+  // Org ID owned by admin; repeated here for filtering and enforced against Edge by the FK.
+  factoryId   String
+  edgeId      String
+  location    String
+  direction   GateDirection
+  // TCS_BASE_URL addresses one TCS namespace; a device has one registry entry, even if inactive.
+  turnstileId String        @unique
+  // CRUD deletion deactivates the row; attendance history keeps its stable gateId.
+  active      Boolean       @default(true)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @default(now()) @updatedAt
+  edge        Edge          @relation(fields: [edgeId, factoryId], references: [id, factoryId], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([factoryId])
+  @@index([edgeId, factoryId])
 }
 
 // Owned by the iam module. Append-only and hash-chained (FR-4.9): a trigger rejects UPDATE, DELETE
@@ -185,4 +219,29 @@ model ConfigValue {
   value     String
   updatedAt DateTime @updatedAt
   updatedBy String
+}
+
+enum ExportStatus {
+  RUNNING
+  BLOCKED
+  DONE
+  FAILED
+}
+
+enum ExportTrigger {
+  SCHEDULE
+  MANUAL
+}
+
+// Owned by the reporting module. The state of one month's HRS export (FR-4.5, FR-4.6); one row per month,
+// overwritten by each run. The history of runs, failures and re-runs is in the audit log.
+model ExportRun {
+  // YYYY-MM
+  month      String        @id
+  status     ExportStatus
+  trigger    ExportTrigger
+  attempts   Int           @default(0)
+  lastError  String?
+  startedAt  DateTime
+  finishedAt DateTime?
 }

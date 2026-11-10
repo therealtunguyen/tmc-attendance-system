@@ -1,5 +1,9 @@
-import type { PushEventsRequest, PushEventsResponse } from '../../shared/contracts/edge.js';
-import { todo } from '../../shared/errors.js';
+import {
+  DENY_REASONS,
+  type EdgeDenyReason,
+  type PushEventsRequest,
+  type PushEventsResponse,
+} from '../../shared/contracts/edge.js';
 import type { DateRange, Scope } from '../../shared/types.js';
 import type { EmployeeDirectory } from '../employee-qr/index.js';
 import { buildDailyRecords, localDayStart, nextDay, type DailyInput } from './attendance.daily.js';
@@ -11,6 +15,8 @@ export interface ScanEvent {
   employeeId: string | null;
   gateId: string;
   method: 'QR' | 'MANUAL';
+  guardId?: string;
+  reason?: string;
   occurredAt: Date;
   /**
    * Outcome at commit time (ADR-3): PENDING (default) before the TCS call, or DENIED when the
@@ -18,14 +24,36 @@ export interface ScanEvent {
    * from setOutcome(), after the gate opened.
    */
   outcome?: 'PENDING' | 'DENIED';
+  /** Why the scan was denied, for the security access log (FR-4.4). Only with outcome DENIED. */
+  denyReason?: EdgeDenyReason;
 }
 
 /** A row in AttendanceEvent. Edge ingest (#32) fills the extra fields; record() leaves the defaults. */
-export interface StoredEvent extends Omit<ScanEvent, 'outcome'> {
+export interface StoredEvent extends Omit<
+  ScanEvent,
+  'outcome' | 'denyReason' | 'guardId' | 'reason'
+> {
+  /** Null when read back from the database without a value. */
+  guardId?: string | null;
+  reason?: string | null;
   outcome: ScanOutcome | 'PENDING';
+  denyReason: EdgeDenyReason | null;
   edgeId: string | null;
   jti: string | null;
   stale: boolean;
+}
+
+export type AccessOutcome = StoredEvent['outcome']; // 'GRANTED' | 'DENIED' | 'PENDING'
+
+/** What the security access log asks for (FR-4.4). Filters, order and limit run in the database. */
+export interface AccessLogQuery {
+  /** occurredAt from range.from (inclusive) to range.to (exclusive). */
+  range: DateRange;
+  /** Only these gates; undefined = every gate. An empty list matches nothing. */
+  gateIds?: readonly string[];
+  outcome?: AccessOutcome;
+  /** Newest first, at most this many rows (a positive integer). */
+  limit: number;
 }
 
 export interface DailyRecord {
@@ -62,10 +90,14 @@ export interface AttendanceStore {
   insertMany(events: StoredEvent[]): Promise<void>;
   /** GRANTED events with an employee, occurredAt in [from, to); only these employees if given. */
   grantedEvents(from: Date, to: Date, employeeIds?: string[]): Promise<DailyInput[]>;
+  /** Every GRANTED event of one employee, whatever the date. */
+  grantedEventsOf(employeeId: string): Promise<DailyInput[]>;
   /** Sets the outcome only while it is PENDING or already equal; true if the row now has it. */
   decide(eventId: string, outcome: ScanOutcome): Promise<boolean>;
   /** Null when there is no such event. */
   outcomeOf(eventId: string): Promise<StoredEvent['outcome'] | null>;
+  /** Every scan matching the query, denied ones included, newest first by occurredAt then eventId ascending; rows as stored. */
+  accessLog(query: AccessLogQuery): Promise<StoredEvent[]>;
 }
 
 export interface AttendanceRecorder {
@@ -92,7 +124,8 @@ export interface EdgeIngest {
 export interface AttendanceQuery {
   dailyRecords(range: DateRange, scope: Scope): Promise<DailyRecord[]>;
   history(employeeId: string): Promise<DailyRecord[]>;
-  accessLog(range: DateRange): Promise<ScanEvent[]>;
+  /** Every scan, denied ones included, newest first by occurredAt then eventId ascending; rows as stored. */
+  accessLog(query: AccessLogQuery): Promise<StoredEvent[]>;
 }
 
 /** Event store, daily records, missing punches, HR corrections (FR-1.6, FR-3.x). */
@@ -108,9 +141,20 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
    */
   async record(event: ScanEvent): Promise<boolean> {
     const { eventId, employeeId, gateId, method, occurredAt, outcome = 'PENDING' } = event;
+    if (method === 'MANUAL' && (event.guardId !== undefined || event.reason !== undefined)) {
+      if (!event.guardId?.trim() || !event.reason?.trim()) {
+        throw new TypeError('MANUAL override requires guardId and reason');
+      }
+    }
     // A runtime guard: GRANTED at commit time would count an entry before the gate opened.
     if (outcome !== 'PENDING' && outcome !== 'DENIED') {
       throw new TypeError(`record() takes outcome PENDING or DENIED, got ${String(outcome)}`);
+    }
+    if (event.denyReason !== undefined) {
+      if (outcome !== 'DENIED') throw new TypeError('denyReason requires outcome DENIED');
+      if (!DENY_REASONS.includes(event.denyReason)) {
+        throw new TypeError(`Unknown denyReason ${String(event.denyReason)}`);
+      }
     }
     return this.repo.insert({
       eventId,
@@ -119,9 +163,11 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
       method,
       occurredAt,
       outcome,
+      denyReason: event.denyReason ?? null,
       edgeId: null,
       jti: null,
       stale: false,
+      ...(method === 'MANUAL' ? { guardId: event.guardId, reason: event.reason } : {}),
     });
   }
 
@@ -148,6 +194,7 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
         method: e.method,
         occurredAt: new Date(e.occurredAt),
         outcome: e.outcome,
+        denyReason: e.denyReason ?? null,
         edgeId,
         jti: e.jti,
         stale: e.stale,
@@ -170,11 +217,17 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
     return buildDailyRecords(await this.repo.grantedEvents(from, to, employeeIds));
   }
 
-  async history(): Promise<DailyRecord[]> {
-    return todo();
+  /** One employee's daily records, newest day first (FR-1.6, UC-3). */
+  async history(employeeId: string): Promise<DailyRecord[]> {
+    return buildDailyRecords(await this.repo.grantedEventsOf(employeeId)).reverse();
   }
 
-  async accessLog(): Promise<ScanEvent[]> {
-    return todo();
+  async accessLog(query: AccessLogQuery): Promise<StoredEvent[]> {
+    if (!Number.isSafeInteger(query.limit) || query.limit < 1) {
+      throw new RangeError('limit must be a positive integer');
+    }
+    if (query.gateIds?.length === 0) return [];
+    if (query.range.to <= query.range.from) return [];
+    return this.repo.accessLog(query);
   }
 }

@@ -77,6 +77,11 @@ export interface QrRevocation {
   reissueQr(actorId: string, id: string): Promise<Employee | null>;
 }
 
+/** Tells an employee where their QR is (FR-1.3). */
+export interface QrLinkSender {
+  sendQrLink(employee: Pick<Employee, 'email' | 'firstName'>): Promise<void>;
+}
+
 /** Ed25519 keys as base64 DER (see .env.example). previous* empty when there was no rotation. */
 export interface QrKeyConfig {
   kid: string;
@@ -85,19 +90,30 @@ export interface QrKeyConfig {
   previousPublicKey: string;
 }
 
-/** issueToken refuses an employee who would be denied at the gate anyway. */
 /** The QR keys are missing or malformed (a deployment problem, not a caller one). */
 export class QrNotConfiguredError extends Error {}
 
+/** issueToken refuses an employee who would be denied at the gate anyway. */
 export class QrNotIssuableError extends Error {
   constructor(readonly reason: 'UNKNOWN' | 'INACTIVE' | 'REVOKED') {
     super(`No QR token: employee is ${reason.toLowerCase()}`);
   }
 }
 
+/** The portal's QR page: a token to draw and the name to show above it. */
+export interface LiveQr {
+  token: string;
+  ttlSeconds: number;
+  firstName: string;
+  lastName: string;
+  code: string;
+}
+
 export interface QrIssuer {
   /** Short-lived token for the employee's live QR (ADR-10, FR-1.2). Token format: shared/contracts/qr-token.ts. */
   issueToken(employeeId: string): Promise<string>;
+  /** Same checks, plus whose QR it is, for the portal page (FR-1.3). Throws like issueToken. */
+  liveQr(employeeId: string): Promise<LiveQr>;
 }
 
 export interface EdgeSnapshotSource {
@@ -114,6 +130,17 @@ export interface EmployeeDirectory {
   list(scope: Scope): Promise<EmployeeSummary[]>;
 }
 
+/** What a report needs about an employee (FR-4.1): no email or QR state (NFR-4). */
+export type RosterEntry = Pick<
+  Employee,
+  'id' | 'code' | 'firstName' | 'lastName' | 'active' | 'factoryId' | 'teamId'
+>;
+
+export interface EmployeeRoster {
+  /** Employees in one factory or team (everyone when scope is undefined), inactive ones included. */
+  roster(scope?: Scope): Promise<RosterEntry[]>;
+}
+
 /** Employees, QR issue/revoke/reissue, validation (FR-1.1 to FR-1.5). */
 export class EmployeeQrService
   implements
@@ -122,6 +149,7 @@ export class EmployeeQrService
     QrRevocation,
     EdgeSnapshotSource,
     EmployeeDirectory,
+    EmployeeRoster,
     EmployeeAdmin
 {
   private keyring?: QrKeyring;
@@ -131,6 +159,7 @@ export class EmployeeQrService
     private audit: AuditLog,
     private keys: QrKeyConfig,
     private now: () => Date = () => new Date(),
+    private links: QrLinkSender = { sendQrLink: async () => {} },
   ) {}
 
   /** Built on first use, so the server still starts (and serves everything else) without QR keys. */
@@ -145,6 +174,7 @@ export class EmployeeQrService
   async createEmployee(actorId: string, data: NewEmployee): Promise<Employee> {
     const employee = await this.repo.create(data);
     await this.record(actorId, 'EMPLOYEE_CREATE', employee.id);
+    this.sendLink(employee);
     return employee;
   }
 
@@ -204,7 +234,26 @@ export class EmployeeQrService
       before: { qrRevoked: !revoked },
       after: { qrRevoked: revoked },
     });
+    if (!revoked) this.sendLink(employee);
     return employee;
+  }
+
+  /** Best effort: the employee and the audit entry are already stored, and the page works without the email. */
+  /**
+   * Not awaited: the employee and the audit entry are already stored, and a stalled mail server
+   * must not hold the request open (HR would retry into a 409). Every failure is caught and logged.
+   */
+  private sendLink(employee: Employee): void {
+    // Name and code only: a mail error message can quote the address (NFR-4).
+    const failed = (e: unknown) => {
+      const { name, code } = (e ?? {}) as { name?: string; code?: string };
+      console.error(`QR link email failed for employee ${employee.id}:`, name, code);
+    };
+    try {
+      this.links.sendQrLink(employee).catch(failed);
+    } catch (e) {
+      failed(e);
+    }
   }
 
   /**
@@ -225,10 +274,24 @@ export class EmployeeQrService
 
   /** Signed with the current key; a fresh jti every call, so a screenshot is useless after TTL (ADR-10). */
   async issueToken(employeeId: string): Promise<string> {
+    return this.sign(await this.issuable(employeeId));
+  }
+
+  async liveQr(employeeId: string): Promise<LiveQr> {
+    const employee = await this.issuable(employeeId);
+    const { firstName, lastName, code } = employee;
+    return { token: this.sign(employee), ttlSeconds: QR_TOKEN_TTL_S, firstName, lastName, code };
+  }
+
+  private async issuable(employeeId: string): Promise<Employee> {
     const employee = await this.repo.find(employeeId);
     if (!employee) throw new QrNotIssuableError('UNKNOWN');
     const { deny } = admission(employee);
     if (deny) throw new QrNotIssuableError(deny);
+    return employee;
+  }
+
+  private sign(employee: Employee): string {
     const exp = Math.floor(this.now().getTime() / 1000) + QR_TOKEN_TTL_S;
     const { kid, signingKey } = this.ring;
     return signQrToken({ sub: employee.id, exp, jti: randomUUID() }, kid, signingKey);
@@ -253,6 +316,10 @@ export class EmployeeQrService
     return (await this.repo.list(scope)).map(summary);
   }
 
+  async roster(scope?: Scope): Promise<RosterEntry[]> {
+    return (await this.repo.list(scope)).map(rosterEntry);
+  }
+
   private record(actorId: string, action: string, employeeId: string) {
     return this.audit.append({ actorId, action, target: `employee:${employeeId}`, at: new Date() });
   }
@@ -272,3 +339,14 @@ const summary = ({ id, firstName, lastName, active }: Employee): EmployeeSummary
   lastName,
   active,
 });
+
+/** Drops contact and QR fields before Reporting sees the employee. */
+const rosterEntry = ({
+  id,
+  code,
+  firstName,
+  lastName,
+  active,
+  factoryId,
+  teamId,
+}: Employee): RosterEntry => ({ id, code, firstName, lastName, active, factoryId, teamId });
