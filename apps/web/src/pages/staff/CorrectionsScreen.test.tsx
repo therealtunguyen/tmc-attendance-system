@@ -86,4 +86,16 @@ describe('CorrectionHistory', () => {
   it('says when nothing was corrected', () => {
     expect(renderToString(<CorrectionHistory entries={[]} />)).toContain('Not corrected yet');
   });
+
+  it('never claims "not corrected" when the history could not be loaded', () => {
+    const page = renderToString(<CorrectionHistory entries="failed" />);
+    expect(page).toContain('could not be loaded');
+    expect(page).not.toContain('Not corrected yet');
+  });
+
+  it('never claims "not corrected" while the history is loading', () => {
+    const page = renderToString(<CorrectionHistory entries="loading" />);
+    expect(page).toContain('Loading');
+    expect(page).not.toContain('Not corrected yet');
+  });
 });

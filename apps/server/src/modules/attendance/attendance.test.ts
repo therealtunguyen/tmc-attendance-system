@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import request from 'supertest';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../../app.js';
 import { MAX_EDGE_BATCH, type EdgeEvent } from '../../shared/contracts/edge.js';
 import type { Scope } from '../../shared/types.js';
@@ -923,6 +923,39 @@ describe('HR corrections (FR-3.6, UC-8)', () => {
       expect(audit.entries).toHaveLength(1);
       const [day] = await attendance.history('emp-1').then((r) => r.slice(-1));
       expect(day).toMatchObject({ lastOut: null, missingPunch: true });
+    });
+
+    it('reports the audit failure, not the undo failure, when both fail', async () => {
+      const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+      store.deleteCorrection = async () => {
+        throw new Error('database down');
+      };
+      const service = new AttendanceService(
+        store,
+        new FakeDirectory({ 'binh-duong': ['emp-1'] }),
+        {
+          append: async () => {
+            throw new Error('audit log down');
+          },
+          search: async () => [],
+        },
+        () => NOW,
+      );
+      try {
+        await expect(
+          service.correct('hr-1', recordId, {
+            field: 'LAST_OUT',
+            value: at('17:00'),
+            reason: 'Forgot to scan out',
+          }),
+        ).rejects.toThrow('audit log down');
+        expect(log).toHaveBeenCalledWith(
+          expect.stringContaining('not audited'),
+          new Error('database down'),
+        );
+      } finally {
+        log.mockRestore();
+      }
     });
 
     it.each([

@@ -50,8 +50,23 @@ export function RecordsTable({
   );
 }
 
-/** Every change to one record, so the original values stay visible (FR-3.6). */
-export function CorrectionHistory({ entries }: { entries: CorrectionEntry[] }) {
+/** The corrections of the open record: still loading, failed to load, or loaded. */
+export type HistoryState = 'loading' | 'failed' | CorrectionEntry[];
+
+/**
+ * Every change to one record, so the original values stay visible (FR-3.6). A failed load never
+ * says "not corrected": the record may have corrections that could not be read.
+ */
+export function CorrectionHistory({ entries }: { entries: HistoryState }) {
+  if (entries === 'loading') return <p>Loading the correction history…</p>;
+  if (entries === 'failed') {
+    return (
+      <p>
+        <strong>The correction history could not be loaded.</strong> Earlier corrections and
+        original values are not shown. Open the day again before correcting it.
+      </p>
+    );
+  }
   if (entries.length === 0) return <p>Not corrected yet. The values above come from the scans.</p>;
   return (
     <table style={{ width: '100%', borderCollapse: 'collapse' }}>

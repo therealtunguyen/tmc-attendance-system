@@ -364,7 +364,13 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
         after: { ...after, field, reason: trimmed },
       });
     } catch (error) {
-      await this.repo.deleteCorrection(id);
+      // The caller must see the audit failure, so a failed undo is only logged, never rethrown.
+      await this.repo.deleteCorrection(id).catch((undoError: unknown) => {
+        console.error(
+          `Correction ${id} is stored but not audited, and could not be removed`,
+          undoError,
+        );
+      });
       throw error;
     }
     return after as DailyRecord;

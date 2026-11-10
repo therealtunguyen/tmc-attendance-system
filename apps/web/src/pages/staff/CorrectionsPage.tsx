@@ -9,11 +9,15 @@ import {
   submitCorrection,
   type ApiResult,
   type CorrectableRecord,
-  type CorrectionEntry,
   type CorrectionField,
   type EmployeeOption,
 } from './corrections';
-import { CorrectionHistory, FIELD_LABEL, RecordsTable } from './CorrectionsScreen';
+import {
+  CorrectionHistory,
+  FIELD_LABEL,
+  RecordsTable,
+  type HistoryState,
+} from './CorrectionsScreen';
 
 const field = { display: 'block', width: '100%', padding: 8, marginBottom: 12 };
 
@@ -24,7 +28,7 @@ function Panel({ session, onEnd }: { session: Session; onEnd: () => void }) {
   const [to, setTo] = useState('');
   const [records, setRecords] = useState<CorrectableRecord[] | null>(null);
   const [open, setOpen] = useState<CorrectableRecord | null>(null);
-  const [entries, setEntries] = useState<CorrectionEntry[]>([]);
+  const [entries, setEntries] = useState<HistoryState>('loading');
   const [target, setTarget] = useState<CorrectionField>('LAST_OUT');
   const [time, setTime] = useState('');
   const [reason, setReason] = useState('');
@@ -67,8 +71,13 @@ function Panel({ session, onEnd }: { session: Session; onEnd: () => void }) {
     setOpen(record);
     setTime('');
     setReason('');
-    const list = unwrap(await fetchCorrections(session.token, record.recordId));
-    setEntries(list ?? []);
+    await loadHistory(record);
+  };
+
+  /** A failed load stays 'failed', never an empty list: that would claim "not corrected". */
+  const loadHistory = async (record: CorrectableRecord) => {
+    setEntries('loading');
+    setEntries(unwrap(await fetchCorrections(session.token, record.recordId)) ?? 'failed');
   };
 
   const save = async (event: FormEvent) => {
@@ -82,14 +91,12 @@ function Panel({ session, onEnd }: { session: Session; onEnd: () => void }) {
     setMessage('Correction saved. If this month was already exported, re-run the export.');
     const list = await load();
     const updated = list?.find((record) => record.recordId === open.recordId);
-    if (updated) await openWithoutClearing(updated);
+    if (updated) {
+      setOpen(updated);
+      await loadHistory(updated);
+    }
     setTime('');
     setReason('');
-  };
-
-  const openWithoutClearing = async (record: CorrectableRecord) => {
-    setOpen(record);
-    setEntries(unwrap(await fetchCorrections(session.token, record.recordId)) ?? []);
   };
 
   const leave = () => {
