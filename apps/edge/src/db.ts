@@ -9,6 +9,9 @@ export type Db = ReturnType<typeof openDb>;
 /** Maximum times an event rejected/omitted by a 200 server response is retried before moving on. */
 export const MAX_PUSH_ATTEMPTS = 5;
 
+/** Events per outbox batch (must stay <= MAX_EDGE_BATCH in shared/contracts/edge.ts). */
+export const OUTBOX_BATCH_LIMIT = 100;
+
 /** One committed scan event (before or after TCS call). */
 export interface LocalEvent {
   eventId: string;
@@ -124,7 +127,7 @@ export const openDb = (dataDir: string, options: DbOptions = {}) => {
   // Exclude in-flight PENDING rows until pendingGraceS has elapsed (crash recovery),
   // and park rows that exceeded maxPushAttempts so stuck events cannot starve newer ones.
   const unpushedEvents = db.prepare<
-    [{ maxAttempts: number; pendingModifier: string }],
+    [{ maxAttempts: number; pendingModifier: string; batchLimit: number }],
     LocalEvent
   >(`
     SELECT event_id      AS eventId,
@@ -143,7 +146,7 @@ export const openDb = (dataDir: string, options: DbOptions = {}) => {
       AND  push_attempts < @maxAttempts
       AND  (outcome <> 'PENDING' OR occurred_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', @pendingModifier))
     ORDER  BY push_attempts ASC, occurred_at ASC
-    LIMIT  100
+    LIMIT  @batchLimit
   `);
 
   const countOutbox = db.prepare<[{ maxAttempts: number }], { count: number }>(`
@@ -207,7 +210,11 @@ export const openDb = (dataDir: string, options: DbOptions = {}) => {
       setOutcome.run({ eventId, outcome });
     },
     unpushedEvents: (): LocalEvent[] =>
-      unpushedEvents.all({ maxAttempts: maxPushAttempts, pendingModifier }),
+      unpushedEvents.all({
+        maxAttempts: maxPushAttempts,
+        pendingModifier,
+        batchLimit: OUTBOX_BATCH_LIMIT,
+      }),
     outboxCount: (): number => countOutbox.get({ maxAttempts: maxPushAttempts })?.count ?? 0,
     markPushed: (eventId: string): void => {
       markPushed.run({ pushedAt: new Date().toISOString(), eventId });

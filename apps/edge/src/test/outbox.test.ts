@@ -6,7 +6,7 @@ import type {
   OpenResult,
   TurnstileClient,
 } from '../../../server/src/adapters/tcs/turnstile-client.js';
-import { MAX_PUSH_ATTEMPTS, type Db } from '../db.js';
+import { MAX_PUSH_ATTEMPTS, OUTBOX_BATCH_LIMIT, type Db } from '../db.js';
 import { flushOutbox, outboxSize } from '../outbox.js';
 import { scan } from '../scan.js';
 import type { ServerClient } from '../server-client.js';
@@ -250,5 +250,44 @@ describe('outbox — network drop then recovery (#27, #30)', () => {
     }
     expect(db.unpushedEvents()).toHaveLength(1);
     expect(db.unpushedEvents()[0]?.pushAttempts).toBe(0);
+  });
+
+  it('drains more than OUTBOX_BATCH_LIMIT queued events in a single flushOutbox call', async () => {
+    const total = OUTBOX_BATCH_LIMIT + 25;
+    const baseTime = Date.now() - total * 1000;
+
+    for (let i = 0; i < total; i++) {
+      const occurredAt = new Date(baseTime + i * 1000).toISOString();
+      db.commitScan(
+        {
+          eventId: `bulk-${i}`,
+          gateId: 'g',
+          employeeId: employee.id,
+          method: 'QR',
+          outcome: 'GRANTED',
+          occurredAt,
+          jti: `jti-bulk-${i}`,
+          stale: 0,
+          denyReason: null,
+        },
+        60_000,
+      );
+    }
+    expect(outboxSize(db)).toBe(total);
+
+    const batchSizes: number[] = [];
+    const pushedIds = new Set<string>();
+    const client = makeMockClient(async (req) => {
+      batchSizes.push(req.events.length);
+      for (const e of req.events) pushedIds.add(e.eventId);
+      return { ok: true, data: { accepted: req.events.map((e) => e.eventId) } };
+    });
+
+    const confirmed = await flushOutbox(db, client, 'edge-1');
+
+    expect(confirmed).toBe(total);
+    expect(batchSizes).toEqual([OUTBOX_BATCH_LIMIT, 25]);
+    expect(pushedIds.size).toBe(total);
+    expect(outboxSize(db)).toBe(0);
   });
 });

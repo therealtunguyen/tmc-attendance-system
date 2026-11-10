@@ -2,10 +2,9 @@
 // No events are lost: they stay in SQLite until the server echoes their eventId back.
 // No duplicates: the server inserts by eventId (FR-3.2 idempotency), so retries are safe.
 import type { EdgeEvent, PushEventsRequest } from '../../server/src/shared/contracts/edge.js';
-import { MAX_PUSH_ATTEMPTS, type Db, type LocalEvent } from './db.js';
+import { MAX_PUSH_ATTEMPTS, OUTBOX_BATCH_LIMIT, type Db, type LocalEvent } from './db.js';
 import type { ServerClient } from './server-client.js';
 
-const BATCH_LIMIT = 100;
 const inFlight = new WeakSet<Db>();
 
 const toEdgeEvent = (e: LocalEvent): EdgeEvent => ({
@@ -69,7 +68,7 @@ export const flushOutbox = async (
         console.log(`[outbox] confirmed ${confirmed}/${pending.length} events`);
       }
       // Stop if this was a partial final batch or nothing was accepted (avoid spinning on rejects).
-      if (pending.length < BATCH_LIMIT || confirmed === 0) break;
+      if (pending.length < OUTBOX_BATCH_LIMIT || confirmed === 0) break;
     }
     return totalConfirmed;
   } finally {
