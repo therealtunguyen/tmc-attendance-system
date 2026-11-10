@@ -5,6 +5,7 @@
 import { createHash, createPublicKey, generateKeyPairSync, randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { MockTurnstile } from './adapters/tcs/mock.js';
 import { createApp } from './app.js';
 import {
   type AccessLogQuery,
@@ -46,6 +47,8 @@ import {
   ScriptedHrs,
   FakeEdgeSyncs,
 } from './modules/reporting/reporting.fakes.js';
+import { InMemoryGates } from './modules/gate/gate.fakes.js';
+import { GateService, gateRoutes } from './modules/gate/index.js';
 import type { EdgeEvent, EdgeSnapshot } from './shared/contracts/edge.js';
 import { checkQrToken } from './shared/contracts/qr-validation.js';
 import type { Scope } from './shared/types.js';
@@ -92,7 +95,7 @@ class InMemoryEmployees implements Pick<
 /** Same contract as AttendanceRepo for what ingest and dailyRecords call: a known eventId is skipped. */
 class InMemoryEvents implements Pick<
   AttendanceStore,
-  'insert' | 'insertMany' | 'grantedEvents' | 'accessLog'
+  'insert' | 'insertMany' | 'grantedEvents' | 'accessLog' | 'decide' | 'outcomeOf'
 > {
   rows = new Map<string, StoredEvent>();
 
@@ -104,6 +107,18 @@ class InMemoryEvents implements Pick<
 
   async insertMany(events: StoredEvent[]) {
     for (const event of events) await this.insert(event);
+  }
+
+  /** Like the repo: only a PENDING row (or one already at this outcome) takes the outcome. */
+  async decide(eventId: string, outcome: StoredEvent['outcome']) {
+    const row = this.rows.get(eventId);
+    if (!row || (row.outcome !== 'PENDING' && row.outcome !== outcome)) return false;
+    row.outcome = outcome;
+    return true;
+  }
+
+  async outcomeOf(eventId: string) {
+    return this.rows.get(eventId)?.outcome ?? null;
   }
 
   async grantedEvents(from: Date, to: Date, employeeIds?: string[]) {
@@ -631,5 +646,72 @@ describe('cross-module flow: real routes, in-memory stores, simulated edge', () 
       .get(`/api/access-log?${qs}`)
       .set('Authorization', `Bearer ${HR_SESSION}`);
     expect(hr.status).toBe(403);
+  });
+
+  it('a guard override opens mock TCS; OPENED records attendance, ERROR records a denial and none (FR-2.5)', async () => {
+    // The only server path that calls TCS today; the edge's scan-time open is the #24 todo above.
+    const lan = await onboard('BD-0007');
+    const turnstile = new MockTurnstile('open');
+    const gates = new InMemoryGates();
+    const gate = await gates.create({
+      name: 'Main gate',
+      factoryId: FACTORY,
+      edgeId: EDGE,
+      location: 'Entrance',
+      direction: 'IN',
+      turnstileId: 'tcs-bd-1',
+    });
+    const gateApp = createApp(
+      [
+        gateRoutes(
+          new GateService(
+            gates,
+            eqr,
+            attendance,
+            turnstile,
+            { get: async () => undefined, ...orgUnits },
+            new RecordingNotifier(),
+            iam,
+            { directory: eqr, now: () => new Date(nowMs) },
+          ),
+        ),
+      ],
+      { before: [authenticate(iam), requireNoticeAck(iam)] },
+    );
+    const guard = user({ username: 'guard', passwordHash: 'unused', role: 'GRD' });
+    Object.assign(guard, { scoped: true, scopes: [FACTORY] });
+    iamStore.users.push(guard);
+    const GRD_SESSION = 'grd-override-token';
+    await iamStore.store.createSession({
+      tokenHash: createHash('sha256').update(GRD_SESSION).digest('hex'),
+      userId: guard.id,
+      mfaPassed: true,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    const override = (eventId: string) =>
+      request(gateApp)
+        .post(`/api/gates/${gate.id}/override`)
+        .set('Authorization', `Bearer ${GRD_SESSION}`)
+        .send({ eventId, employeeId: lan.id, reason: 'Phone battery dead', mode: 'OPEN' });
+
+    const opened = await override('override-in');
+    expect(opened.status).toBe(201);
+    expect(opened.body).toEqual({ eventId: 'override-in', outcome: 'GRANTED' });
+    expect(events.rows.get('override-in')).toMatchObject({ method: 'MANUAL', guardId: guard.id });
+    expect(await attendance.dailyRecords(TODAY, FACTORY)).toEqual([
+      expect.objectContaining({ employeeId: lan.id, firstIn: new Date(IN_AT) }),
+    ]);
+
+    // The turnstile answers ERROR at the OUT scan: the person did not pass, so no lastOut.
+    turnstile.mode = 'fail';
+    nowMs = Date.parse(OUT_AT);
+    expect((await override('override-out')).body).toEqual({
+      eventId: 'override-out',
+      outcome: 'DENIED',
+    });
+    expect(await attendance.dailyRecords(TODAY, FACTORY)).toEqual([
+      expect.objectContaining({ employeeId: lan.id, lastOut: null, missingPunch: true }),
+    ]);
+    expect(iamStore.audit.filter((e) => e.action === 'GATE_OVERRIDE')).toHaveLength(2);
   });
 });
