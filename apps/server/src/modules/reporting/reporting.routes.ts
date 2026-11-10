@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type { Request, RequestHandler, Response } from 'express';
 import { notImplemented } from '../../shared/errors.js';
-import type { AccessOutcome } from '../attendance/index.js';
+import { ACCESS_LOG_MAX_LIMIT, type AccessOutcome } from '../attendance/index.js';
 import { requirePermission } from '../iam/index.js';
 import type { UserRef } from '../iam/index.js';
 import { REPORT_BY } from './reporting.aggregate.js';
@@ -33,7 +33,6 @@ const ISO_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[
 const MAX_RANGE_MS = 31 * 24 * 3_600_000;
 const OUTCOMES: readonly string[] = ['GRANTED', 'DENIED', 'PENDING'];
 const DEFAULT_LIMIT = 100;
-const MAX_LIMIT = 500;
 
 /** An ISO 8601 date-time with an offset, e.g. 2026-11-01T00:00:00+07:00; null if it is not one. */
 const parseIsoDate = (value: unknown): Date | null => {
@@ -156,7 +155,9 @@ export const reportingRoutes = ({
     let limit = DEFAULT_LIMIT;
     if (rawLimit !== undefined) {
       limit = typeof rawLimit === 'string' && /^\d+$/.test(rawLimit) ? Number(rawLimit) : 0;
-      if (limit < 1 || limit > MAX_LIMIT) return 'limit must be an integer from 1 to 500';
+      if (limit < 1 || limit > ACCESS_LOG_MAX_LIMIT) {
+        return `limit must be an integer from 1 to ${ACCESS_LOG_MAX_LIMIT}`;
+      }
     }
     return {
       range: { from, to },
