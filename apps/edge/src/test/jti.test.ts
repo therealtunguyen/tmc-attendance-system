@@ -29,7 +29,7 @@ afterEach(() => {
 });
 
 describe('jti replay guard (#25)', () => {
-  it('admits the same token once and denies it on the second scan', async () => {
+  it('admits once, stores only the first REPLAYED per jti as DENIED, and skips further duplicates', async () => {
     const snapshots = makeLoadedSnapshots(db, makeSnapshot([employee], publicKey));
     const token = issueToken(employee.id, privateKey);
     const turnstile = new MockTurnstile('open');
@@ -38,8 +38,18 @@ describe('jti replay guard (#25)', () => {
     expect(first.outcome).toBe('GRANTED');
 
     const second = await scan({ gateId: 'g', token }, db, snapshots, turnstile);
-    expect(second.outcome).toBe('DENIED');
-    if (second.outcome === 'DENIED') expect(second.reason).toBe('REPLAYED');
+    expect(second).toMatchObject({ outcome: 'DENIED', reason: 'REPLAYED', firstName: 'Jti' });
+
+    const third = await scan({ gateId: 'g', token }, db, snapshots, turnstile);
+    expect(third).toMatchObject({ outcome: 'DENIED', reason: 'REPLAYED', firstName: 'Jti' });
+
+    // Only the initial GRANTED scan + the FIRST REPLAYED denial should be stored.
+    const events = db.unpushedEvents();
+    expect(events).toHaveLength(2);
+    expect(events.map((e) => [e.outcome, e.denyReason])).toEqual([
+      ['GRANTED', null],
+      ['DENIED', 'REPLAYED'],
+    ]);
   });
 
   it('allows the same jti after the TTL has elapsed', async () => {
@@ -57,10 +67,8 @@ describe('jti replay guard (#25)', () => {
     const first = await scan({ gateId: 'g', token }, db, snapshots, turnstile);
     expect(first.outcome).toBe('GRANTED');
 
-    // Manually prune jti_seen as if the TTL has elapsed.
-    // JTI_TTL_MS = (60 + 10 + 30) * 1000 = 100_000 ms.  We call pruneJti with a threshold
-    // that is *after* the entry we just inserted, simulating time passing.
-    db.pruneJti(Date.now() + 1); // prune everything (threshold is in the future)
+    // Simulate TTL expiry by pruning all entries.
+    db.pruneJti(Date.now() + 1);
 
     // Second scan with the same jti: now allowed again because the entry was pruned.
     const second = await scan({ gateId: 'g', token }, db, snapshots, turnstile);

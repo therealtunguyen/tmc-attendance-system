@@ -14,7 +14,7 @@ import { SnapshotManager } from './snapshot.js';
 // Ensure the data directory exists.
 mkdirSync(config.dataDir, { recursive: true });
 
-const db = openDb(config.dataDir);
+const db = openDb(config.dataDir, { pendingGraceS: config.pendingGraceS });
 const serverClient = new ServerClient(config.serverBaseUrl);
 const snapshots = new SnapshotManager(db, serverClient, config.edgeId);
 const turnstile =

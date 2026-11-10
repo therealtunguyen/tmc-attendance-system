@@ -30,18 +30,19 @@ export type DenyReason =
 
 export type ScanResult =
   | { outcome: 'GRANTED'; firstName: string; eventId: string }
-  | { outcome: 'DENIED'; reason: DenyReason; eventId: string };
+  | { outcome: 'DENIED'; reason: DenyReason; firstName?: string; eventId: string };
 
 /**
  * Runs the edge scan flow (#24):
- * 1. Validate token with snapshot employees (reuses checkQrToken from shared contracts)
- * 2. Check jti reuse (#25)
- * 3. Commit to SQLite (PENDING) in one transaction with jti insert
+ * 1. Validate token against snapshot employees (reuses checkQrToken from shared contracts)
+ * 2. Verified, unexpired denials (REVOKED/INACTIVE/UNKNOWN) are committed straight as DENIED
+ *    with employeeId + jti and skip TCS; unverified/expired/no-snapshot scans are logged only.
+ * 3. Check jti reuse (#25) and commit to SQLite atomically
  * 4. Call TCS (reuse TurnstileClient)
  * 5. Set final outcome (GRANTED | DENIED) in SQLite
  *
- * If a crash occurs between step 3 and step 5, the outbox will push a PENDING event —
- * the server records it and the supervisor can follow up.
+ * If a crash occurs between step 3 and step 5, the outbox will push the PENDING event
+ * once the pending grace window elapses — the server records it and the supervisor can follow up.
  */
 export const scan = async (
   input: ScanInput,
@@ -54,10 +55,12 @@ export const scan = async (
   const occurredAt = now().toISOString();
   const stale = snapshots.isStale() ? (1 as const) : (0 as const);
 
-  // 1 & 2: Validate token against snapshot
+  // 1: Validate token against snapshot
   const live = snapshots.get();
   if (!live) {
-    // No snapshot at all — fail closed (FR-2.3).
+    // FR-3.1 exception: no snapshot is loaded so we cannot verify or identify the token;
+    // log and fail closed without writing unverified rows to SQLite.
+    console.warn(`[scan] gate=${input.gateId} denied: NO_SNAPSHOT`);
     return { outcome: 'DENIED', reason: 'NO_SNAPSHOT', eventId };
   }
 
@@ -69,18 +72,46 @@ export const scan = async (
   });
 
   if (!checkResult.ok) {
-    // Token is bad — no jti, no event (don't waste SQLite space on forgeries).
+    // FR-3.1 exception: INVALID_SIGNATURE and EXPIRED cannot be trusted to identify an
+    // employee and would allow token floods to bloat SQLite/outbox; log them and skip storage.
+    if (checkResult.reason === 'INVALID_SIGNATURE' || checkResult.reason === 'EXPIRED') {
+      console.warn(`[scan] gate=${input.gateId} denied: ${checkResult.reason}`);
+      return { outcome: 'DENIED', reason: checkResult.reason, eventId };
+    }
+
+    // Verified, unexpired denial (REVOKED, INACTIVE, UNKNOWN): employeeId and jti are known.
+    // Commit directly as DENIED (skip TCS) and record at most one REPLAYED if seen again.
+    const employeeId = checkResult.employeeId ?? null;
+    const jti = checkResult.jti ?? null;
+    const firstName = employeeId ? snapshots.findEmployee(employeeId)?.firstName : undefined;
+    const status = db.commitScan(
+      {
+        eventId,
+        gateId: input.gateId,
+        employeeId,
+        method: 'QR',
+        outcome: 'DENIED',
+        occurredAt,
+        jti,
+        stale,
+        denyReason: checkResult.reason,
+      },
+      JTI_TTL_MS,
+    );
+
+    const reason: DenyReason = status === 'REPLAYED' ? 'REPLAYED' : checkResult.reason;
     return {
       outcome: 'DENIED',
-      reason: checkResult.reason as DenyReason,
+      reason,
+      ...(firstName !== undefined ? { firstName } : {}),
       eventId,
     };
   }
 
   const { employeeId, firstName, jti } = checkResult;
 
-  // 3: Commit to SQLite + jti check (#25) — atomic transaction.
-  const committed = db.commitScan(
+  // 3: Commit PENDING to SQLite + jti replay guard (#25) — atomic transaction.
+  const status = db.commitScan(
     {
       eventId,
       gateId: input.gateId,
@@ -90,14 +121,15 @@ export const scan = async (
       occurredAt,
       jti,
       stale,
+      denyReason: null,
     },
     JTI_TTL_MS,
   );
 
-  if (!committed) {
-    // jti already seen within TTL → REPLAYED (#25).
-    // We don't store a REPLAYED event: no eventId to push to server.
-    return { outcome: 'DENIED', reason: 'REPLAYED', eventId };
+  if (status === 'REPLAYED') {
+    // First replay per jti was stored as DENIED in commitScan; subsequent replays are logged only.
+    console.warn(`[scan] gate=${input.gateId} employee=${employeeId} denied: REPLAYED`);
+    return { outcome: 'DENIED', reason: 'REPLAYED', firstName, eventId };
   }
 
   // 4: Call TCS (ADR-3: 1 s timeout, no retry). Fail closed on anything but OPENED.
@@ -113,6 +145,7 @@ export const scan = async (
   return {
     outcome: 'DENIED',
     reason: 'TCS_UNAVAILABLE',
+    firstName,
     eventId,
   };
 };

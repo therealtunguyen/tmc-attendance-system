@@ -1,8 +1,13 @@
 // Tests for the outbox (#27, #30).
-// Verifies: network drop then recovery → no lost or duplicate events.
+// Verifies: network drop/recovery, in-flight PENDING guard, crash recovery, overlap guard, reject limit.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MockTurnstile } from '../../../server/src/adapters/tcs/mock.js';
-import { flushOutbox } from '../outbox.js';
+import type {
+  OpenResult,
+  TurnstileClient,
+} from '../../../server/src/adapters/tcs/turnstile-client.js';
+import { MAX_PUSH_ATTEMPTS, type Db } from '../db.js';
+import { flushOutbox, outboxSize } from '../outbox.js';
 import { scan } from '../scan.js';
 import type { ServerClient } from '../server-client.js';
 import {
@@ -16,7 +21,6 @@ import type {
   PushEventsResponse,
   PushEventsRequest,
 } from '../../../server/src/shared/contracts/edge.js';
-import type { Db } from '../db.js';
 
 let db: Db;
 let cleanup: () => void;
@@ -69,40 +73,166 @@ describe('outbox — network drop then recovery (#27, #30)', () => {
     const confirmed = await flushOutbox(db, client, edgeId);
 
     expect(confirmed).toBe(3);
-    expect(db.unpushedEvents()).toHaveLength(0); // all cleared
-    expect(inserted.size).toBe(3); // server saw exactly 3
+    expect(db.unpushedEvents()).toHaveLength(0);
+    expect(inserted.size).toBe(3);
+  });
+
+  it('does not push an in-flight PENDING row between commitScan and setOutcome', async () => {
+    const snapshots = makeLoadedSnapshots(db, makeSnapshot([employee], publicKey));
+    const token = issueToken(employee.id, privateKey);
+
+    let resolveOpen!: (res: OpenResult) => void;
+    let markOpenCalled!: () => void;
+    const openCalled = new Promise<void>((r) => {
+      markOpenCalled = r;
+    });
+    const turnstile: TurnstileClient = {
+      open: () => {
+        markOpenCalled();
+        return new Promise<OpenResult>((r) => {
+          resolveOpen = r;
+        });
+      },
+    };
+
+    const pushedBatches: PushEventsRequest[] = [];
+    const client = makeMockClient(async (req) => {
+      pushedBatches.push(req);
+      return { ok: true, data: { accepted: req.events.map((e) => e.eventId) } };
+    });
+
+    // Start the scan and wait until commitScan has written PENDING and TCS open() is in flight.
+    const scanPromise = scan({ gateId: 'g', token }, db, snapshots, turnstile);
+    await openCalled;
+
+    // Flush during TCS call: the fresh PENDING row must NOT be pushed.
+    expect(await flushOutbox(db, client, 'edge-1')).toBe(0);
+    expect(pushedBatches).toHaveLength(0);
+
+    // Finish TCS -> setOutcome sets GRANTED.
+    resolveOpen('OPENED');
+    await scanPromise;
+
+    // Next flush pushes the final GRANTED event.
+    expect(await flushOutbox(db, client, 'edge-1')).toBe(1);
+    expect(pushedBatches).toHaveLength(1);
+    expect(pushedBatches[0]?.events[0]?.outcome).toBe('GRANTED');
+  });
+
+  it('eventually pushes a PENDING row older than the grace window (crash recovery)', async () => {
+    const stalePendingAt = new Date(Date.now() - 10_000).toISOString();
+    db.commitScan(
+      {
+        eventId: 'crashed-evt',
+        gateId: 'g',
+        employeeId: employee.id,
+        method: 'QR',
+        outcome: 'PENDING',
+        occurredAt: stalePendingAt,
+        jti: 'jti-crash',
+        stale: 0,
+        denyReason: null,
+      },
+      60_000,
+    );
+
+    const pushed: string[] = [];
+    const client = makeMockClient(async (req) => {
+      for (const e of req.events) pushed.push(`${e.eventId}:${e.outcome}`);
+      return { ok: true, data: { accepted: req.events.map((e) => e.eventId) } };
+    });
+
+    expect(await flushOutbox(db, client, 'edge-1')).toBe(1);
+    expect(pushed).toEqual(['crashed-evt:PENDING']);
+  });
+
+  it('prevents overlapping flushOutbox calls on the same db', async () => {
+    const snapshots = makeLoadedSnapshots(db, makeSnapshot([employee], publicKey));
+    await scan(
+      { gateId: 'g', token: issueToken(employee.id, privateKey) },
+      db,
+      snapshots,
+      new MockTurnstile('open'),
+    );
+
+    let releasePush!: () => void;
+    let pushCalls = 0;
+    const client = makeMockClient(
+      (req) =>
+        new Promise((resolve) => {
+          pushCalls++;
+          releasePush = () =>
+            resolve({ ok: true, data: { accepted: req.events.map((e) => e.eventId) } });
+        }),
+    );
+
+    const first = flushOutbox(db, client, 'edge-1');
+    const second = flushOutbox(db, client, 'edge-1');
+    releasePush();
+
+    const [c1, c2] = await Promise.all([first, second]);
+    expect(pushCalls).toBe(1);
+    expect(c1).toBe(1);
+    expect(c2).toBe(0);
+  });
+
+  it('parks events omitted from accepted after MAX_PUSH_ATTEMPTS so newer events are not starved', async () => {
+    const snapshots = makeLoadedSnapshots(db, makeSnapshot([employee], publicKey));
+    await scan(
+      { gateId: 'g', token: issueToken(employee.id, privateKey) },
+      db,
+      snapshots,
+      new MockTurnstile('open'),
+    );
+    const stuckId = db.unpushedEvents()[0]!.eventId;
+
+    // Server keeps omitting stuckId on 200 responses.
+    const rejectStuckClient = makeMockClient(async (req) => ({
+      ok: true,
+      data: { accepted: req.events.filter((e) => e.eventId !== stuckId).map((e) => e.eventId) },
+    }));
+
+    for (let i = 0; i < MAX_PUSH_ATTEMPTS; i++) {
+      await flushOutbox(db, rejectStuckClient, 'edge-1');
+    }
+
+    // Stuck row is parked and no longer blocks the outbox.
+    expect(db.unpushedEvents()).toHaveLength(0);
+    expect(outboxSize(db)).toBe(0);
+
+    // Newer scan still flushes cleanly.
+    await scan(
+      { gateId: 'g', token: issueToken(employee.id, privateKey) },
+      db,
+      snapshots,
+      new MockTurnstile('open'),
+    );
+    expect(await flushOutbox(db, rejectStuckClient, 'edge-1')).toBe(1);
   });
 
   it('no duplicate events when outbox retries after a partial success', async () => {
     const snapshots = makeLoadedSnapshots(db, makeSnapshot([employee], publicKey));
     const edgeId = 'edge-1';
 
-    // Scan once.
     const token = issueToken(employee.id, privateKey);
     await scan({ gateId: 'g', token }, db, snapshots, new MockTurnstile('open'));
     expect(db.unpushedEvents()).toHaveLength(1);
 
-    const eventId = db.unpushedEvents()[0]!.eventId;
     let callCount = 0;
     const client = makeMockClient(async (req) => {
       callCount++;
       return { ok: true, data: { accepted: req.events.map((e) => e.eventId) } };
     });
 
-    // First flush — success.
     await flushOutbox(db, client, edgeId);
     expect(db.unpushedEvents()).toHaveLength(0);
 
-    // Second flush — the event is already marked pushed, so nothing is sent.
     await flushOutbox(db, client, edgeId);
-    expect(callCount).toBe(1); // server was only called once
+    expect(callCount).toBe(1);
     expect(db.unpushedEvents()).toHaveLength(0);
-
-    // The eventId was accepted exactly once.
-    void eventId; // used above
   });
 
-  it('leaves events in the outbox when the server returns an error', async () => {
+  it('leaves events in the outbox without burning attempts when the server returns 503', async () => {
     const snapshots = makeLoadedSnapshots(db, makeSnapshot([employee], publicKey));
     const edgeId = 'edge-1';
 
@@ -115,8 +245,10 @@ describe('outbox — network drop then recovery (#27, #30)', () => {
       error: 'Server Error',
     }));
 
-    const confirmed = await flushOutbox(db, client, edgeId);
-    expect(confirmed).toBe(0);
-    expect(db.unpushedEvents()).toHaveLength(1); // still there
+    for (let i = 0; i < MAX_PUSH_ATTEMPTS + 2; i++) {
+      expect(await flushOutbox(db, client, edgeId)).toBe(0);
+    }
+    expect(db.unpushedEvents()).toHaveLength(1);
+    expect(db.unpushedEvents()[0]?.pushAttempts).toBe(0);
   });
 });
