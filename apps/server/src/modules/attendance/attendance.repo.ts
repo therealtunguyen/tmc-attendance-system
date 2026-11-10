@@ -1,3 +1,4 @@
+import type { EdgeDenyReason } from '../../shared/contracts/edge.js';
 import type { PrismaClient } from '../../shared/prisma.js';
 import type { DailyInput } from './attendance.daily.js';
 import type {
@@ -55,7 +56,7 @@ export class AttendanceRepo implements AttendanceStore {
   }
 
   async accessLog({ range, gateIds, outcome, limit }: AccessLogQuery): Promise<StoredEvent[]> {
-    return this.db.attendanceEvent.findMany({
+    const rows = await this.db.attendanceEvent.findMany({
       where: {
         occurredAt: { gte: range.from, lt: range.to },
         ...(gateIds && { gateId: { in: [...gateIds] } }),
@@ -71,11 +72,14 @@ export class AttendanceRepo implements AttendanceStore {
         method: true,
         guardId: true,
         reason: true,
+        denyReason: true,
         outcome: true,
         jti: true,
         stale: true,
         occurredAt: true,
       },
     });
+    // Written only through ingest and record(), which accept DENY_REASONS values only.
+    return rows.map((row) => ({ ...row, denyReason: row.denyReason as EdgeDenyReason | null }));
   }
 }

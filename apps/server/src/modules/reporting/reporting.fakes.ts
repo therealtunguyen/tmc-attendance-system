@@ -1,10 +1,16 @@
 // In-memory fakes shared by the report tests.
 import type { HrsClient, MonthlyBatch, SendResult } from '../../adapters/hrs/hrs-client.js';
 import type { OrgUnit } from '../admin/index.js';
-import type { DailyRecord } from '../attendance/index.js';
+import type {
+  AccessLogQuery,
+  AttendanceQuery,
+  DailyRecord,
+  StoredEvent,
+} from '../attendance/index.js';
 import type { EmployeeRoster, RosterEntry } from '../employee-qr/index.js';
 import type { AuditEntry, AuditLog } from '../iam/index.js';
 import type { DateRange } from '../../shared/types.js';
+import type { GateLookup, GateRef } from './reporting.gates.js';
 import type { EdgeSync, EdgeSyncStatus } from './reporting.edges.js';
 import type { AlertKind, Notifier } from './reporting.notifier.js';
 import { canClaim } from './reporting.runs.js';
@@ -189,5 +195,46 @@ export class RecordingAudit implements AuditLog {
   }
   async search(): Promise<AuditEntry[]> {
     return this.entries;
+  }
+}
+
+/** A StoredEvent fixture; the columns the access log ignores are filled in. */
+export type AccessFixture = Omit<StoredEvent, 'edgeId' | 'jti' | 'stale'> &
+  Partial<Pick<StoredEvent, 'edgeId' | 'jti' | 'stale'>>;
+
+/** Fake of Attendance's accessLog port: applies the query like the database would; remembers every query. */
+export class FakeAccessSource implements Pick<AttendanceQuery, 'accessLog'> {
+  queries: AccessLogQuery[] = [];
+  events: StoredEvent[];
+  constructor(events: AccessFixture[] = []) {
+    this.events = events.map((e) => ({ edgeId: 'edge-bd', jti: null, stale: false, ...e }));
+  }
+  async accessLog(query: AccessLogQuery): Promise<StoredEvent[]> {
+    this.queries.push(query);
+    return this.events
+      .filter(
+        (e) =>
+          e.occurredAt >= query.range.from &&
+          e.occurredAt < query.range.to &&
+          (query.gateIds === undefined || query.gateIds.includes(e.gateId)) &&
+          (query.outcome === undefined || e.outcome === query.outcome),
+      )
+      .sort((a, b) => b.occurredAt.getTime() - a.occurredAt.getTime())
+      .slice(0, query.limit);
+  }
+}
+
+export const GATES: GateRef[] = [
+  { id: 'gate-bd-1', name: 'BD main gate', factoryId: 'binh-duong' },
+  { id: 'gate-bd-old', name: 'BD old gate (inactive)', factoryId: 'binh-duong' },
+  { id: 'gate-la-1', name: 'LA main gate', factoryId: 'long-an' },
+];
+
+/** GateLookup fake: filters on factoryId like the real one; remembers each call. */
+export class FakeGateLookup implements GateLookup {
+  calls: (readonly string[] | undefined)[] = [];
+  async gates(factoryIds?: readonly string[]): Promise<GateRef[]> {
+    this.calls.push(factoryIds);
+    return GATES.filter((g) => factoryIds === undefined || factoryIds.includes(g.factoryId));
   }
 }

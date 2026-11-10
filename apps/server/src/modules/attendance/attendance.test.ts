@@ -116,6 +116,7 @@ describe('AttendanceService.record (FR-3.1, FR-3.2)', () => {
     expect(store.rows.get('e-1')).toEqual({
       ...scan,
       outcome: 'PENDING',
+      denyReason: null,
       edgeId: null,
       jti: null,
       stale: false,
@@ -157,6 +158,29 @@ describe('AttendanceService.record (FR-3.1, FR-3.2)', () => {
   it('refuses GRANTED at commit time: the gate has not opened yet (ADR-3)', async () => {
     const granted = { ...scan, outcome: 'GRANTED' } as unknown as ScanEvent;
     await expect(attendance.record(granted)).rejects.toThrow(TypeError);
+    expect(store.rows.size).toBe(0);
+  });
+
+  it('stores why a scan was denied (FR-4.4)', async () => {
+    await attendance.record({ ...scan, outcome: 'DENIED', denyReason: 'REVOKED' });
+    expect(store.rows.get('e-1')?.denyReason).toBe('REVOKED');
+  });
+
+  it('stores null when no denyReason is given', async () => {
+    await attendance.record({ ...scan, outcome: 'DENIED' });
+    expect(store.rows.get('e-1')?.denyReason).toBeNull();
+  });
+
+  it('refuses a denyReason on a PENDING scan', async () => {
+    await expect(attendance.record({ ...scan, denyReason: 'REVOKED' })).rejects.toThrow(
+      'denyReason requires outcome DENIED',
+    );
+    expect(store.rows.size).toBe(0);
+  });
+
+  it('refuses an unknown denyReason', async () => {
+    const bad = { ...scan, outcome: 'DENIED', denyReason: 'BANNED' } as unknown as ScanEvent;
+    await expect(attendance.record(bad)).rejects.toThrow('Unknown denyReason BANNED');
     expect(store.rows.size).toBe(0);
   });
 
@@ -220,6 +244,7 @@ describe('AttendanceService.ingest (ADR-9, FR-3.2)', () => {
       employeeId: 'emp-1',
       method: 'QR',
       outcome: 'GRANTED',
+      denyReason: null,
       occurredAt: new Date('2026-11-07T00:58:00.000Z'),
       edgeId: 'edge-bd',
       jti: 'jti-x-1',
@@ -253,6 +278,20 @@ describe('AttendanceService.ingest (ADR-9, FR-3.2)', () => {
     const res = await attendance.ingest({ edgeId: 'edge-bd', events: [edgeEvent('x-1')] });
     expect(res).toEqual({ accepted: ['x-1'] });
     expect(store.rows.get('x-1')).toMatchObject({ outcome: 'PENDING', edgeId: null });
+  });
+
+  it('stores the denyReason an edge sent, and null when absent or null (FR-4.4)', async () => {
+    await attendance.ingest({
+      edgeId: 'edge-bd',
+      events: [
+        edgeEvent('d-1', { outcome: 'DENIED', denyReason: 'REVOKED' }),
+        edgeEvent('d-2', { outcome: 'DENIED' }),
+        edgeEvent('d-3', { outcome: 'DENIED', denyReason: null }),
+      ],
+    });
+    expect(store.rows.get('d-1')?.denyReason).toBe('REVOKED');
+    expect(store.rows.get('d-2')?.denyReason).toBeNull();
+    expect(store.rows.get('d-3')?.denyReason).toBeNull();
   });
 
   it('an empty batch stores nothing', async () => {
@@ -349,6 +388,24 @@ describe('POST /api/edge/events', () => {
       'a missing eventId',
       { edgeId: 'e', events: [edgeEvent('', {})] },
       'events[0].eventId must be a non-empty string',
+    ],
+    [
+      'an unknown denyReason',
+      {
+        edgeId: 'e',
+        events: [edgeEvent('x-1', { outcome: 'DENIED', denyReason: 'BANNED' as 'EXPIRED' })],
+      },
+      'events[0].denyReason must be one of INVALID_SIGNATURE, EXPIRED, UNKNOWN, INACTIVE, REVOKED, REPLAYED or null',
+    ],
+    [
+      'a denyReason on a GRANTED event',
+      { edgeId: 'e', events: [edgeEvent('x-1', { denyReason: 'EXPIRED' })] },
+      'events[0].denyReason is only allowed with outcome DENIED',
+    ],
+    [
+      'a denyReason on a PENDING event',
+      { edgeId: 'e', events: [edgeEvent('x-1', { outcome: 'PENDING', denyReason: 'EXPIRED' })] },
+      'events[0].denyReason is only allowed with outcome DENIED',
     ],
     [
       'a non-boolean stale',

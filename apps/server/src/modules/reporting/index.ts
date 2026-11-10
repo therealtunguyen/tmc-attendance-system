@@ -1,5 +1,8 @@
+export { AccessLogGateNotFoundError, AccessLogService } from './reporting.access.js';
+export type { AccessLogReader, AccessLogRequest, AccessLogRow } from './reporting.access.js';
 export { unsyncedEdges } from './reporting.edges.js';
 export type { EdgeSync, EdgeSyncStatus } from './reporting.edges.js';
+export type { GateLookup, GateRef } from './reporting.gates.js';
 export { ReportingRepo } from './reporting.repo.js';
 export { reportingRoutes } from './reporting.routes.js';
 export type { ReportingRouteDeps } from './reporting.routes.js';

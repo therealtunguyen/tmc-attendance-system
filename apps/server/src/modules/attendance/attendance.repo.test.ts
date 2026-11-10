@@ -10,6 +10,7 @@ const select = {
   method: true,
   guardId: true,
   reason: true,
+  denyReason: true,
   outcome: true,
   jti: true,
   stale: true,
@@ -38,6 +39,7 @@ describe('AttendanceRepo.accessLog (FR-4.4)', () => {
       take: 50,
       select,
     });
+    expect(findMany.mock.calls[0]![0].select.denyReason).toBe(true);
   });
 
   it('leaves gateId and outcome out of the filter when not given', async () => {
@@ -59,6 +61,7 @@ describe('AttendanceRepo.accessLog (FR-4.4)', () => {
       method: 'MANUAL',
       guardId: null,
       reason: null,
+      denyReason: 'EXPIRED',
       outcome: 'DENIED',
       jti: null,
       stale: false,
@@ -67,6 +70,7 @@ describe('AttendanceRepo.accessLog (FR-4.4)', () => {
     const { repo } = repoWith([row]);
     const [event] = await repo.accessLog({ range, limit: 1 });
     expect(event).toEqual(row);
+    expect(event?.denyReason).toBe('EXPIRED');
     expect(event).not.toHaveProperty('id');
     expect(event).not.toHaveProperty('receivedAt');
   });

@@ -23,6 +23,7 @@ import {
   requireNoticeAck,
 } from './modules/iam/index.js';
 import {
+  AccessLogService,
   CompanyMonthSource,
   ExportScheduler,
   HrExportService,
@@ -79,7 +80,7 @@ const app = createApp(
     adminRoutes(admin),
     employeeQrRoutes(eqr, admin, { qrToken: { max: config.qrTokenRateLimitPerMin } }),
     attendanceRoutes(attendance),
-    reportingRoutes({ reports, exports }),
+    reportingRoutes({ reports, exports, accessLog: new AccessLogService(attendance, gate, eqr) }),
     gateRoutes(gate),
   ],
   { before: [authenticate(iam, admin), requireNoticeAck(iam)] },

@@ -57,6 +57,9 @@ model AttendanceEvent {
   // FR-2.5: authenticated guard and justification; null for QR and legacy events.
   guardId    String?
   reason     String?
+  // Why the scan was denied (FR-4.4): an EdgeDenyReason (shared/contracts/edge.ts), validated in code.
+  // Null when granted, pending, or not known.
+  denyReason String?
   outcome    ScanOutcome @default(PENDING)
   // Token ID; not unique, so one jti used at two edges is stored and flagged (ADR-10).
   jti        String?
