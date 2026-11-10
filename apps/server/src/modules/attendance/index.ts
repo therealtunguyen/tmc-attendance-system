@@ -9,6 +9,8 @@ export {
   UnknownEventError,
 } from './attendance.service.js';
 export type {
+  AccessLogQuery,
+  AccessOutcome,
   AttendanceQuery,
   AttendanceRecorder,
   AttendanceStore,

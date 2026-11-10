@@ -13,6 +13,7 @@ import {
   OutcomeConflictError,
   RecordNotFoundError,
   UnknownEventError,
+  type AccessLogQuery,
   type AttendanceStore,
   type Correction,
   type ScanEvent,
@@ -64,6 +65,26 @@ class InMemoryEvents implements AttendanceStore {
     return [...this.rows.values()].filter(
       (e) => e.outcome === 'GRANTED' && e.employeeId === employeeId,
     );
+  }
+
+  accessLogCalls = 0;
+
+  async accessLog({ range, gateIds, outcome, limit }: AccessLogQuery) {
+    this.accessLogCalls++;
+    return [...this.rows.values()]
+      .filter(
+        (e) =>
+          e.occurredAt >= range.from &&
+          e.occurredAt < range.to &&
+          (!gateIds || gateIds.includes(e.gateId)) &&
+          (!outcome || e.outcome === outcome),
+      )
+      .sort(
+        (a, b) =>
+          b.occurredAt.getTime() - a.occurredAt.getTime() || a.eventId.localeCompare(b.eventId),
+      )
+      .slice(0, limit)
+      .map((e) => ({ ...e }));
   }
 
   async grantedEvents(from: Date, to: Date, employeeIds?: string[]) {
@@ -136,6 +157,7 @@ describe('AttendanceService.record (FR-3.1, FR-3.2)', () => {
     expect(store.rows.get('e-1')).toEqual({
       ...scan,
       outcome: 'PENDING',
+      denyReason: null,
       edgeId: null,
       jti: null,
       stale: false,
@@ -177,6 +199,29 @@ describe('AttendanceService.record (FR-3.1, FR-3.2)', () => {
   it('refuses GRANTED at commit time: the gate has not opened yet (ADR-3)', async () => {
     const granted = { ...scan, outcome: 'GRANTED' } as unknown as ScanEvent;
     await expect(attendance.record(granted)).rejects.toThrow(TypeError);
+    expect(store.rows.size).toBe(0);
+  });
+
+  it('stores why a scan was denied (FR-4.4)', async () => {
+    await attendance.record({ ...scan, outcome: 'DENIED', denyReason: 'REVOKED' });
+    expect(store.rows.get('e-1')?.denyReason).toBe('REVOKED');
+  });
+
+  it('stores null when no denyReason is given', async () => {
+    await attendance.record({ ...scan, outcome: 'DENIED' });
+    expect(store.rows.get('e-1')?.denyReason).toBeNull();
+  });
+
+  it('refuses a denyReason on a PENDING scan', async () => {
+    await expect(attendance.record({ ...scan, denyReason: 'REVOKED' })).rejects.toThrow(
+      'denyReason requires outcome DENIED',
+    );
+    expect(store.rows.size).toBe(0);
+  });
+
+  it('refuses an unknown denyReason', async () => {
+    const bad = { ...scan, outcome: 'DENIED', denyReason: 'BANNED' } as unknown as ScanEvent;
+    await expect(attendance.record(bad)).rejects.toThrow('Unknown denyReason BANNED');
     expect(store.rows.size).toBe(0);
   });
 
@@ -240,6 +285,7 @@ describe('AttendanceService.ingest (ADR-9, FR-3.2)', () => {
       employeeId: 'emp-1',
       method: 'QR',
       outcome: 'GRANTED',
+      denyReason: null,
       occurredAt: new Date('2026-11-07T00:58:00.000Z'),
       edgeId: 'edge-bd',
       jti: 'jti-x-1',
@@ -273,6 +319,20 @@ describe('AttendanceService.ingest (ADR-9, FR-3.2)', () => {
     const res = await attendance.ingest({ edgeId: 'edge-bd', events: [edgeEvent('x-1')] });
     expect(res).toEqual({ accepted: ['x-1'] });
     expect(store.rows.get('x-1')).toMatchObject({ outcome: 'PENDING', edgeId: null });
+  });
+
+  it('stores the denyReason an edge sent, and null when absent or null (FR-4.4)', async () => {
+    await attendance.ingest({
+      edgeId: 'edge-bd',
+      events: [
+        edgeEvent('d-1', { outcome: 'DENIED', denyReason: 'REVOKED' }),
+        edgeEvent('d-2', { outcome: 'DENIED' }),
+        edgeEvent('d-3', { outcome: 'DENIED', denyReason: null }),
+      ],
+    });
+    expect(store.rows.get('d-1')?.denyReason).toBe('REVOKED');
+    expect(store.rows.get('d-2')?.denyReason).toBeNull();
+    expect(store.rows.get('d-3')?.denyReason).toBeNull();
   });
 
   it('an empty batch stores nothing', async () => {
@@ -369,6 +429,24 @@ describe('POST /api/edge/events', () => {
       'a missing eventId',
       { edgeId: 'e', events: [edgeEvent('', {})] },
       'events[0].eventId must be a non-empty string',
+    ],
+    [
+      'an unknown denyReason',
+      {
+        edgeId: 'e',
+        events: [edgeEvent('x-1', { outcome: 'DENIED', denyReason: 'BANNED' as 'EXPIRED' })],
+      },
+      'events[0].denyReason must be one of INVALID_SIGNATURE, EXPIRED, UNKNOWN, INACTIVE, REVOKED, REPLAYED or null',
+    ],
+    [
+      'a denyReason on a GRANTED event',
+      { edgeId: 'e', events: [edgeEvent('x-1', { denyReason: 'EXPIRED' })] },
+      'events[0].denyReason is only allowed with outcome DENIED',
+    ],
+    [
+      'a denyReason on a PENDING event',
+      { edgeId: 'e', events: [edgeEvent('x-1', { outcome: 'PENDING', denyReason: 'EXPIRED' })] },
+      'events[0].denyReason is only allowed with outcome DENIED',
     ],
     [
       'a non-boolean stale',
@@ -906,5 +984,88 @@ describe('HR corrections (FR-3.6, UC-8)', () => {
         expect.objectContaining({ day: '2026-11-06T17:00:00.000Z', corrected: true, hours: 9.03 }),
       );
     });
+  });
+});
+
+describe('AttendanceService.accessLog (FR-4.4)', () => {
+  const at = (iso: string) => new Date(iso);
+  const day = { from: at('2026-11-07T00:00:00Z'), to: at('2026-11-08T00:00:00Z') };
+  const seed = async (eventId: string, occurredAt: string, changes: Partial<ScanEvent> = {}) =>
+    attendance.record({ ...scan, eventId, occurredAt: at(occurredAt), ...changes });
+
+  it('includes occurredAt at range.from and excludes it at range.to', async () => {
+    await seed('a', '2026-11-06T23:59:59.999Z');
+    await seed('b', '2026-11-07T00:00:00Z');
+    await seed('c', '2026-11-07T23:59:59.999Z');
+    await seed('d', '2026-11-08T00:00:00Z');
+    const rows = await attendance.accessLog({ range: day, limit: 10 });
+    expect(rows.map((r) => r.eventId)).toEqual(['c', 'b']);
+  });
+
+  it('an empty gateIds list matches nothing and never reaches the store', async () => {
+    await seed('a', '2026-11-07T01:00:00Z');
+    expect(await attendance.accessLog({ range: day, gateIds: [], limit: 10 })).toEqual([]);
+    expect(store.accessLogCalls).toBe(0);
+  });
+
+  it('combines gateIds and outcome', async () => {
+    await seed('a', '2026-11-07T01:00:00Z', { gateId: 'g1', outcome: 'DENIED' });
+    await seed('b', '2026-11-07T02:00:00Z', { gateId: 'g1' });
+    await seed('c', '2026-11-07T03:00:00Z', { gateId: 'g2', outcome: 'DENIED' });
+    await seed('d', '2026-11-07T04:00:00Z', { gateId: 'g3', outcome: 'DENIED' });
+    const rows = await attendance.accessLog({
+      range: day,
+      gateIds: ['g1', 'g2'],
+      outcome: 'DENIED',
+      limit: 10,
+    });
+    expect(rows.map((r) => r.eventId)).toEqual(['c', 'a']);
+  });
+
+  it('lists newest first, equal times by eventId ascending', async () => {
+    await seed('b', '2026-11-07T02:00:00Z');
+    await seed('a', '2026-11-07T02:00:00Z');
+    await seed('old', '2026-11-07T01:00:00Z');
+    await seed('new', '2026-11-07T03:00:00Z');
+    const rows = await attendance.accessLog({ range: day, limit: 10 });
+    expect(rows.map((r) => r.eventId)).toEqual(['new', 'a', 'b', 'old']);
+  });
+
+  it('returns at most limit rows, the newest ones', async () => {
+    await seed('a', '2026-11-07T01:00:00Z');
+    await seed('b', '2026-11-07T02:00:00Z');
+    await seed('c', '2026-11-07T03:00:00Z');
+    const rows = await attendance.accessLog({ range: day, limit: 2 });
+    expect(rows.map((r) => r.eventId)).toEqual(['c', 'b']);
+  });
+
+  it('includes DENIED and PENDING scans, as stored', async () => {
+    await seed('a', '2026-11-07T01:00:00Z', { outcome: 'DENIED' });
+    await seed('b', '2026-11-07T02:00:00Z');
+    await attendance.setOutcome('b', 'GRANTED');
+    await seed('c', '2026-11-07T03:00:00Z');
+    const rows = await attendance.accessLog({ range: day, limit: 10 });
+    expect(rows.map((r) => [r.eventId, r.outcome])).toEqual([
+      ['c', 'PENDING'],
+      ['b', 'GRANTED'],
+      ['a', 'DENIED'],
+    ]);
+    expect(rows[0]).toMatchObject({ edgeId: null, jti: null, stale: false });
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects limit %s with a RangeError',
+    async (limit) => {
+      await expect(attendance.accessLog({ range: day, limit })).rejects.toThrow(RangeError);
+    },
+  );
+
+  it('an empty or inverted range gives no rows', async () => {
+    await seed('a', '2026-11-07T01:00:00Z');
+    const t = at('2026-11-07T01:00:00Z');
+    expect(await attendance.accessLog({ range: { from: t, to: t }, limit: 10 })).toEqual([]);
+    expect(
+      await attendance.accessLog({ range: { from: day.to, to: day.from }, limit: 10 }),
+    ).toEqual([]);
   });
 });

@@ -1,5 +1,9 @@
-import type { PushEventsRequest, PushEventsResponse } from '../../shared/contracts/edge.js';
-import { todo } from '../../shared/errors.js';
+import {
+  DENY_REASONS,
+  type EdgeDenyReason,
+  type PushEventsRequest,
+  type PushEventsResponse,
+} from '../../shared/contracts/edge.js';
 import type { DateRange, Scope } from '../../shared/types.js';
 import type { EmployeeDirectory } from '../employee-qr/index.js';
 import type { AuditLog } from '../iam/index.js';
@@ -30,14 +34,36 @@ export interface ScanEvent {
    * from setOutcome(), after the gate opened.
    */
   outcome?: 'PENDING' | 'DENIED';
+  /** Why the scan was denied, for the security access log (FR-4.4). Only with outcome DENIED. */
+  denyReason?: EdgeDenyReason;
 }
 
 /** A row in AttendanceEvent. Edge ingest (#32) fills the extra fields; record() leaves the defaults. */
-export interface StoredEvent extends Omit<ScanEvent, 'outcome'> {
+export interface StoredEvent extends Omit<
+  ScanEvent,
+  'outcome' | 'denyReason' | 'guardId' | 'reason'
+> {
+  /** Null when read back from the database without a value. */
+  guardId?: string | null;
+  reason?: string | null;
   outcome: ScanOutcome | 'PENDING';
+  denyReason: EdgeDenyReason | null;
   edgeId: string | null;
   jti: string | null;
   stale: boolean;
+}
+
+export type AccessOutcome = StoredEvent['outcome']; // 'GRANTED' | 'DENIED' | 'PENDING'
+
+/** What the security access log asks for (FR-4.4). Filters, order and limit run in the database. */
+export interface AccessLogQuery {
+  /** occurredAt from range.from (inclusive) to range.to (exclusive). */
+  range: DateRange;
+  /** Only these gates; undefined = every gate. An empty list matches nothing. */
+  gateIds?: readonly string[];
+  outcome?: AccessOutcome;
+  /** Newest first, at most this many rows (a positive integer). */
+  limit: number;
 }
 
 export interface DailyRecord {
@@ -120,6 +146,8 @@ export interface AttendanceStore {
   decide(eventId: string, outcome: ScanOutcome): Promise<boolean>;
   /** Null when there is no such event. */
   outcomeOf(eventId: string): Promise<StoredEvent['outcome'] | null>;
+  /** Every scan matching the query, denied ones included, newest first by occurredAt then eventId ascending; rows as stored. */
+  accessLog(query: AccessLogQuery): Promise<StoredEvent[]>;
 }
 
 export interface AttendanceRecorder {
@@ -146,7 +174,8 @@ export interface EdgeIngest {
 export interface AttendanceQuery {
   dailyRecords(range: DateRange, scope: Scope): Promise<DailyRecord[]>;
   history(employeeId: string): Promise<DailyRecord[]>;
-  accessLog(range: DateRange): Promise<ScanEvent[]>;
+  /** Every scan, denied ones included, newest first by occurredAt then eventId ascending; rows as stored. */
+  accessLog(query: AccessLogQuery): Promise<StoredEvent[]>;
 }
 
 /** Event store, daily records, missing punches, HR corrections (FR-1.6, FR-3.x). */
@@ -172,6 +201,12 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
     if (outcome !== 'PENDING' && outcome !== 'DENIED') {
       throw new TypeError(`record() takes outcome PENDING or DENIED, got ${String(outcome)}`);
     }
+    if (event.denyReason !== undefined) {
+      if (outcome !== 'DENIED') throw new TypeError('denyReason requires outcome DENIED');
+      if (!DENY_REASONS.includes(event.denyReason)) {
+        throw new TypeError(`Unknown denyReason ${String(event.denyReason)}`);
+      }
+    }
     return this.repo.insert({
       eventId,
       employeeId,
@@ -179,6 +214,7 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
       method,
       occurredAt,
       outcome,
+      denyReason: event.denyReason ?? null,
       edgeId: null,
       jti: null,
       stale: false,
@@ -209,6 +245,7 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
         method: e.method,
         occurredAt: new Date(e.occurredAt),
         outcome: e.outcome,
+        denyReason: e.denyReason ?? null,
         edgeId,
         jti: e.jti,
         stale: e.stale,
@@ -332,7 +369,12 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
     return buildDailyRecords(events, corrections);
   }
 
-  async accessLog(): Promise<ScanEvent[]> {
-    return todo();
+  async accessLog(query: AccessLogQuery): Promise<StoredEvent[]> {
+    if (!Number.isSafeInteger(query.limit) || query.limit < 1) {
+      throw new RangeError('limit must be a positive integer');
+    }
+    if (query.gateIds?.length === 0) return [];
+    if (query.range.to <= query.range.from) return [];
+    return this.repo.accessLog(query);
   }
 }

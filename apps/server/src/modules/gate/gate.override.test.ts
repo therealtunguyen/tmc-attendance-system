@@ -43,6 +43,7 @@ beforeEach(async () => {
       corrections: async () => [],
       correctionsOf: async () => [],
       insertCorrection: async () => {},
+      accessLog: async () => [],
       decide: async (id, outcome) => {
         const event = events.get(id);
         if (!event || (event.outcome !== 'PENDING' && event.outcome !== outcome)) return false;

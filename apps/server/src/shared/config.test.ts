@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { parseMailMode, positiveInt } from './config.js';
+import { parseEmailList, parseMailMode, positiveInt } from './config.js';
 
 describe('parseMailMode', () => {
   it.each([
@@ -15,6 +15,26 @@ describe('parseMailMode', () => {
 
   it.each(['smpt', 'http', 'true'])('stops on %j instead of silently mocking mail', (value) => {
     expect(() => parseMailMode(value)).toThrow(`MAIL_MODE must be mock or smtp, not "${value}"`);
+  });
+});
+
+describe('parseEmailList', () => {
+  it.each([undefined, '', '  '])('reads %j as no addresses', (value) => {
+    expect(parseEmailList(value, 'K')).toEqual([]);
+  });
+
+  it('reads one address', () => {
+    expect(parseEmailList('a@x.vn', 'K')).toEqual(['a@x.vn']);
+  });
+
+  it('trims items and drops empty ones', () => {
+    expect(parseEmailList(' a@x.vn , b@y.vn,', 'K')).toEqual(['a@x.vn', 'b@y.vn']);
+  });
+
+  it.each(['not-an-email', 'a@b', 'a b@x.vn'])('stops on %j', (item) => {
+    expect(() => parseEmailList(`ok@x.vn, ${item}`, 'ALERT_EMAILS_HR')).toThrow(
+      `ALERT_EMAILS_HR has an invalid email address: "${item}"`,
+    );
   });
 });
 
