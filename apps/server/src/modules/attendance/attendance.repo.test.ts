@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { PrismaClient } from '../../shared/prisma.js';
 import type { EmployeeDirectory } from '../employee-qr/index.js';
+import type { AuditLog } from '../iam/index.js';
 import { AttendanceRepo } from './attendance.repo.js';
 import { AttendanceService } from './attendance.service.js';
 
@@ -83,9 +84,11 @@ describe('AttendanceService.accessLog over AttendanceRepo (FR-4.4)', () => {
     find: async () => null,
     list: async () => [],
   };
+  // The access log writes no audit entry; the service only needs one to be constructed.
+  const audit: AuditLog = { append: async () => {}, search: async () => [] };
   const serviceWith = () => {
     const { repo, findMany } = repoWith();
-    return { service: new AttendanceService(repo, directory), findMany };
+    return { service: new AttendanceService(repo, directory, audit), findMany };
   };
 
   it('a normal query reaches findMany with take = limit and the repo where/orderBy', async () => {
