@@ -4,6 +4,21 @@ export type GuardLanguage = 'vi' | 'en';
 export const GuardLanguageContext = createContext<GuardLanguage>('en');
 
 const vi: Record<string, string> = {
+  'Choose a reason to continue.': 'Chọn lý do mở cổng để tiếp tục.',
+  '1. Gate': '1. Chọn cổng',
+  '2. Employee': '2. Nhân viên',
+  '3. Reason': '3. Lý do mở cổng',
+  Entry: 'Vào',
+  Exit: 'Ra',
+  'Enter employee record ID': 'Nhập ID nhân viên',
+  'Enter a short reason': 'Nhập lý do ngắn gọn',
+  'Open gate': 'Mở cổng',
+  'Next employee': 'Nhân viên tiếp theo',
+  'Check the employee and gate before confirming.':
+    'Kiểm tra đúng người, đúng cổng trước khi xác nhận.',
+  'Use the record ID from HR, not the employee code.':
+    'Dùng ID hồ sơ do HR cung cấp, không phải mã NV.',
+
   'Gate control': 'Điều khiển cổng',
   'Quick reasons': 'Lý do chọn nhanh',
   'QR expired': 'Mã QR hết hạn',

@@ -402,6 +402,9 @@ function OverrideForm({
   const [gateId, setGateId] = useState(gates.find((gate) => gate.active)?.id ?? gates[0]?.id ?? '');
   const [employeeId, setEmployeeId] = useState('');
   const [reason, setReason] = useState('');
+  const [reasonChoice, setReasonChoice] = useState('');
+  const employeeInput = useRef<HTMLInputElement>(null);
+  const reasonInput = useRef<HTMLTextAreaElement>(null);
   const [mode, setMode] = useState<'OPEN' | 'BACKFILL'>('OPEN');
   const [occurredAt, setOccurredAt] = useState('');
   const [error, setError] = useState('');
@@ -417,6 +420,10 @@ function OverrideForm({
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (sending.current || attempt) return;
+    if (!reason.trim()) {
+      setError('Choose a reason to continue.');
+      return;
+    }
     if (
       !selected ||
       (mode === 'OPEN' && !selected.active) ||
@@ -487,6 +494,7 @@ function OverrideForm({
               </div>
             )}
           </dl>
+          <p>{gt('Check the employee and gate before confirming.')}</p>
           <p>{gt('Your identity and reason will be recorded in the audit log.')}</p>
           <div className="guard-actions">
             <button type="button" onClick={() => setConfirming(false)}>
@@ -498,23 +506,9 @@ function OverrideForm({
           </div>
         </GuardDialog>
       )}
-      <h3 id="override-heading">{gt('Manual override')}</h3>
-      {selected && (
-        <div className="guard-selected-gate">
-          <div>
-            <strong>{selected.name}</strong>
-            <small>
-              {selected.id} · {selected.factoryId} · {selected.direction}
-            </small>
-          </div>
-          <span
-            className={`guard-outcome guard-outcome-${selected.active && selected.status === 'ONLINE' ? 'granted' : 'pending'}`}
-          >
-            {selected.active ? selected.status : 'INACTIVE'}
-          </span>
-          <small>{gt('Gate status at page load')}</small>
-        </div>
-      )}
+      <h3 id="override-heading">
+        {gt(mode === 'OPEN' ? 'Manual override' : 'Record an earlier manual admission')}
+      </h3>
       {attempt ? (
         <>
           <OverrideStatus result={attempt.result} input={attempt.input} />
@@ -540,6 +534,24 @@ function OverrideForm({
               {gt('Edit admission details')}
             </button>
           )}
+          {attempt.result.kind === 'decided' && (
+            <button
+              type="button"
+              className="guard-primary"
+              onClick={() => {
+                sending.current = false;
+                setAttempt(null);
+                setEmployeeId('');
+                setReason('');
+                setReasonChoice('');
+                setOccurredAt('');
+                setMode('OPEN');
+                requestAnimationFrame(() => employeeInput.current?.focus());
+              }}
+            >
+              {gt('Next employee')}
+            </button>
+          )}
           <button type="button" onClick={onClose}>
             {gt('Close override')}
           </button>
@@ -547,9 +559,9 @@ function OverrideForm({
       ) : (
         <form onSubmit={(event) => void submit(event)}>
           <fieldset disabled={busy}>
-            <legend>{gt('Admission details')}</legend>
+            <legend className="guard-sr-only">{gt('Admission details')}</legend>
             <label>
-              {gt('Gate')}
+              {gt('1. Gate')}
               <select
                 aria-label={t('Gate')}
                 value={gateId}
@@ -559,15 +571,18 @@ function OverrideForm({
                 <option value="">{t('Choose a gate')}</option>
                 {gates.map((gate) => (
                   <option key={gate.id} value={gate.id} disabled={mode === 'OPEN' && !gate.active}>
-                    {gate.name} · {gate.factoryId} · {gate.direction}
+                    {gate.name} · {t(gate.direction === 'IN' ? 'Entry' : 'Exit')}
                     {!gate.active ? t(' · Inactive') : ''}
                   </option>
                 ))}
               </select>
             </label>
             <label>
-              {gt('Employee ID')}
+              {gt('2. Employee')}
               <input
+                ref={employeeInput}
+                autoComplete="off"
+                placeholder={t('Enter employee record ID')}
                 aria-label={t('Employee ID')}
                 value={employeeId}
                 onChange={(event) => setEmployeeId(event.target.value)}
@@ -575,44 +590,42 @@ function OverrideForm({
                 aria-describedby="employee-id-hint"
               />
             </label>
-            <p id="employee-id-hint">
-              {gt(
-                'Use the employee record ID supplied by HR after verifying the person’s identity.',
+            <p id="employee-id-hint">{gt('Use the record ID from HR, not the employee code.')}</p>
+            <div className="guard-reason-section">
+              <p className="guard-step-label">{gt('3. Reason')}</p>
+              <div className="guard-reason-options" role="group" aria-label={t('Quick reasons')}>
+                {['QR expired', 'No phone', 'Scanner unavailable', 'Other'].map((value) => (
+                  <button
+                    key={value}
+                    type="button"
+                    aria-pressed={reasonChoice === value}
+                    onClick={() => {
+                      setError('');
+                      setReasonChoice(value);
+                      setReason(value === 'Other' ? '' : t(value));
+                      if (value === 'Other')
+                        requestAnimationFrame(() => reasonInput.current?.focus());
+                    }}
+                  >
+                    {gt(value)}
+                  </button>
+                ))}
+              </div>
+              {reasonChoice === 'Other' && (
+                <label className="guard-custom-reason">
+                  <span className="guard-sr-only">{gt('Reason')}</span>
+                  <textarea
+                    ref={reasonInput}
+                    placeholder={t('Enter a short reason')}
+                    aria-label={t('Reason')}
+                    value={reason}
+                    onChange={(event) => setReason(event.target.value)}
+                    required
+                    rows={2}
+                  />
+                </label>
               )}
-            </p>
-            <div className="guard-reason-options" role="group" aria-label={t('Quick reasons')}>
-              {['QR expired', 'No phone', 'Scanner unavailable', 'Other'].map((value) => (
-                <button
-                  key={value}
-                  type="button"
-                  aria-pressed={reason === t(value)}
-                  onClick={() => setReason(value === 'Other' ? '' : t(value))}
-                >
-                  {gt(value)}
-                </button>
-              ))}
             </div>
-            <label>
-              {gt('Reason')}
-              <textarea
-                aria-label={t('Reason')}
-                value={reason}
-                onChange={(event) => setReason(event.target.value)}
-                required
-                rows={3}
-              />
-            </label>
-            <label>
-              {gt('Action')}
-              <select
-                aria-label={t('Action')}
-                value={mode}
-                onChange={(event) => setMode(event.target.value as 'OPEN' | 'BACKFILL')}
-              >
-                <option value="OPEN">{t('Open gate now')}</option>
-                <option value="BACKFILL">{t('Record an earlier manual admission')}</option>
-              </select>
-            </label>
             {mode === 'BACKFILL' && (
               <label>
                 {gt('Admission time (Vietnam, UTC+7)')}
@@ -624,17 +637,6 @@ function OverrideForm({
                 />
               </label>
             )}
-            <p>
-              {gt(
-                mode === 'OPEN'
-                  ? 'This sends an open command to the selected turnstile and records your identity and reason.'
-                  : 'Use only for an admission already performed by hand. This records attendance without opening the gate.',
-              )}
-            </p>
-            <label className="guard-confirm">
-              <input type="checkbox" required />
-              {gt('I verified the employee and the selected gate.')}
-            </label>
             {error && <p role="alert">{gt(error)}</p>}
             <div className="guard-actions">
               <button
@@ -642,16 +644,14 @@ function OverrideForm({
                 type="submit"
                 disabled={!selected || (mode === 'OPEN' && !selected.active)}
               >
-                {gt(
-                  busy
-                    ? 'Submitting…'
-                    : mode === 'OPEN'
-                      ? 'Confirm and open gate'
-                      : 'Record admission',
-                )}
+                {gt(busy ? 'Submitting…' : mode === 'OPEN' ? 'Open gate' : 'Record admission')}
               </button>
-              <button type="button" onClick={onClose}>
-                {gt('Cancel')}
+              <button
+                type="button"
+                className="guard-backfill-toggle"
+                onClick={() => setMode(mode === 'OPEN' ? 'BACKFILL' : 'OPEN')}
+              >
+                {gt(mode === 'OPEN' ? 'Record an earlier manual admission' : 'Open gate now')}
               </button>
             </div>
           </fieldset>
@@ -721,7 +721,7 @@ function GuardConsole({
       {gates.length === 0 && (
         <p>{gt('No gates are assigned to this account. Contact your administrator.')}</p>
       )}
-      <details className="guard-card">
+      <details className="guard-card" hidden={tab !== 'log'}>
         <summary>{gt('Gate status at page load')}</summary>
         <ul>
           {gates.map((gate) => (

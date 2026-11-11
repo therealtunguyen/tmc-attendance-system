@@ -72,3 +72,9 @@ preserved the username/password, override employee/reason, confirmation checkbox
 and panel/filter positions. OPEN/BACKFILL, privacy notice, scoped access and
 lost-response tests still passed against the real APIs. A separate mobile check
 confirmed contained horizontal table scrolling and the exact primary RGB color.
+
+Fast admission form: choose the gate, enter the employee record ID, then tap a
+reason. Only Other asks for typed text. Open gate shows a review dialog before
+sending; no extra verification checkbox is required. Earlier admission is a
+secondary action. A decided result offers Next employee, clearing personal
+input while retaining the selected gate; an unknown result cannot use this shortcut.

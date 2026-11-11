@@ -67,6 +67,28 @@ body:has(.guard-page) {
   cursor: pointer;
   font-weight: 600;
 }
+.guard-page input:not([type='checkbox']),
+.guard-page select {
+  height: 44px;
+  line-height: 20px;
+}
+.guard-page select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 42px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2365748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+  background-size: 16px;
+}
+.guard-page textarea {
+  min-height: 96px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.guard-page label {
+  align-content: start;
+}
 .guard-page button:disabled {
   cursor: default;
   opacity: 0.6;
@@ -107,6 +129,25 @@ body:has(.guard-page) {
   cursor: pointer;
   font-weight: 600;
   color: var(--guard-primary);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  list-style: none;
+}
+.guard-card summary::-webkit-details-marker {
+  display: none;
+}
+.guard-card summary::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(-45deg);
+}
+.guard-card[open] > summary::before {
+  transform: rotate(45deg);
 }
 .guard-card li {
   margin: 10px 0;
@@ -346,9 +387,6 @@ body:has(.guard-page) {
 .guard-log-card {
   grid-column: 1;
 }
-.guard-override {
-  border-top: 3px solid var(--guard-primary);
-}
 .guard-page label {
   min-width: 0;
 }
@@ -524,10 +562,10 @@ body:has(.guard-page) {
   margin: 20px 0;
 }
 .guard-tab-panels .guard-override {
-  max-width: 1000px;
+  max-width: 760px;
 }
 .guard-tab-panels .guard-override fieldset {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   padding: 0;
   border: 0;
   column-gap: 24px;
@@ -636,4 +674,69 @@ body:has(.guard-page) {
 }
 .guard-selected-gate > small {
   flex-basis: 100%;
+}
+
+.guard-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+.guard-override form {
+  margin-top: 24px;
+}
+.guard-override label,
+.guard-step-label {
+  font-size: 15px;
+  font-weight: 650;
+}
+.guard-step-label {
+  margin: 0 0 12px;
+}
+.guard-override input:not([type='checkbox']),
+.guard-override select {
+  height: 52px;
+  font-size: 16px;
+}
+.guard-override .guard-reason-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.guard-override .guard-reason-options button {
+  min-height: 56px;
+  border-radius: 10px;
+  font-size: 15px;
+  text-align: left;
+  padding: 14px 16px;
+}
+.guard-custom-reason {
+  margin-top: 12px;
+}
+.guard-override .guard-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  margin-top: 4px;
+}
+.guard-override .guard-actions > .guard-primary {
+  min-height: 56px;
+  width: 100%;
+  font-size: 18px;
+}
+.guard-override .guard-backfill-toggle {
+  border: 0;
+  background: transparent;
+  color: #65748b;
+  font-size: 13px;
+}
+@media (max-width: 400px) {
+  .guard-override .guard-reason-options {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
