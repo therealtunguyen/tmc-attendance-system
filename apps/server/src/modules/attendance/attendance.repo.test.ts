@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { PrismaClient } from '../../shared/prisma.js';
-import type { EmployeeDirectory } from '../employee-qr/index.js';
+import type { EmployeeDirectory, EmployeeScopes } from '../employee-qr/index.js';
 import type { AuditLog } from '../iam/index.js';
-import { AttendanceRepo } from './attendance.repo.js';
+import { AttendanceRepo, recordLockKey } from './attendance.repo.js';
 import { AttendanceService } from './attendance.service.js';
 
 const select = {
@@ -80,9 +80,10 @@ describe('AttendanceRepo.accessLog (FR-4.4)', () => {
 });
 
 describe('AttendanceService.accessLog over AttendanceRepo (FR-4.4)', () => {
-  const directory: EmployeeDirectory = {
+  const directory: EmployeeDirectory & EmployeeScopes = {
     find: async () => null,
     list: async () => [],
+    scopesOf: async () => null,
   };
   // The access log writes no audit entry; the service only needs one to be constructed.
   const audit: AuditLog = { append: async () => {}, search: async () => [] };
@@ -123,5 +124,48 @@ describe('AttendanceService.accessLog over AttendanceRepo (FR-4.4)', () => {
     ).rejects.toThrow(RangeError);
     await expect(service.accessLog({ range, limit: 501 })).rejects.toThrow(RangeError);
     expect(findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('AttendanceRepo corrections (FR-3.6)', () => {
+  const day = new Date('2026-11-06T17:00:00Z');
+
+  it('reads corrections oldest first, the insert order breaking a tie', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const repo = new AttendanceRepo({ correction: { findMany } } as unknown as PrismaClient);
+    await repo.corrections(range.from, range.to, ['emp-1']);
+    await repo.correctionsOf('emp-1');
+    expect(findMany).toHaveBeenCalledTimes(2);
+    for (const [args] of findMany.mock.calls) {
+      expect(args.orderBy).toEqual([{ createdAt: 'asc' }, { seq: 'asc' }]);
+      expect(args.omit).toEqual({ id: true, seq: true });
+    }
+  });
+
+  it('runs the work in a transaction, after taking the lock of that record', async () => {
+    const steps: string[] = [];
+    const $executeRaw = vi.fn(async (..._args: unknown[]) => {
+      steps.push('lock');
+      return 1;
+    });
+    const $transaction = vi.fn(async (run: (tx: unknown) => Promise<unknown>) =>
+      run({ $executeRaw }),
+    );
+    const repo = new AttendanceRepo({ $transaction } as unknown as PrismaClient);
+    const result = await repo.withRecordLock('emp-1', day, async () => {
+      steps.push('work');
+      return 'done';
+    });
+    expect(result).toBe('done');
+    expect(steps).toEqual(['lock', 'work']);
+    expect($executeRaw.mock.calls[0]![1]).toBe(recordLockKey('emp-1', day));
+  });
+
+  it('gives each record its own key, the same one every time', () => {
+    expect(recordLockKey('emp-1', day)).toBe(recordLockKey('emp-1', new Date(day)));
+    expect(recordLockKey('emp-1', day)).not.toBe(recordLockKey('emp-2', day));
+    expect(recordLockKey('emp-1', day)).not.toBe(
+      recordLockKey('emp-1', new Date('2026-11-07T17:00:00Z')),
+    );
   });
 });

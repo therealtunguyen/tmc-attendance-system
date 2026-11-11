@@ -16,6 +16,7 @@ export type {
   EmployeeChanges,
   EmployeeDirectory,
   EmployeeRoster,
+  EmployeeScopes,
   EmployeeStore,
   EmployeeSummary,
   LiveQr,

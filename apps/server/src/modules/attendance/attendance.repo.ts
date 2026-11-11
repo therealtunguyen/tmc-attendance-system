@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { EdgeDenyReason } from '../../shared/contracts/edge.js';
 import type { PrismaClient } from '../../shared/prisma.js';
 import type { DailyInput } from './attendance.daily.js';
@@ -8,6 +9,26 @@ import type {
   ScanOutcome,
   StoredEvent,
 } from './attendance.service.js';
+
+/**
+ * Oldest first. createdAt comes from the service clock and can tie, so seq (assigned by the
+ * database on insert) decides: the order is always the order the corrections were stored in.
+ */
+const CORRECTION_ORDER = [{ createdAt: 'asc' as const }, { seq: 'asc' as const }];
+const CORRECTION_OMIT = { id: true, seq: true } as const;
+
+/** The longest one correction may hold its record: the reads, one insert and one audit append. */
+const RECORD_LOCK_TIMEOUT_MS = 10_000;
+
+/**
+ * The advisory lock key of one daily record. Two records with the same hash only wait for each
+ * other; they never fail.
+ */
+export const recordLockKey = (employeeId: string, day: Date): bigint =>
+  createHash('sha256')
+    .update(`attendance-record:${employeeId}:${day.toISOString()}`)
+    .digest()
+    .readBigInt64BE(0);
 
 /** Owns: AttendanceEvent, Correction. Daily records are computed on read, so they have no table. */
 export class AttendanceRepo implements AttendanceStore {
@@ -52,17 +73,29 @@ export class AttendanceRepo implements AttendanceStore {
         day: { gte: from, lt: to },
         ...(employeeIds ? { employeeId: { in: employeeIds } } : {}),
       },
-      orderBy: { createdAt: 'asc' },
-      omit: { id: true },
+      orderBy: CORRECTION_ORDER,
+      omit: CORRECTION_OMIT,
     });
   }
 
   correctionsOf(employeeId: string): Promise<Correction[]> {
     return this.db.correction.findMany({
       where: { employeeId },
-      orderBy: { createdAt: 'asc' },
-      omit: { id: true },
+      orderBy: CORRECTION_ORDER,
+      omit: CORRECTION_OMIT,
     });
+  }
+
+  withRecordLock<T>(employeeId: string, day: Date, work: () => Promise<T>): Promise<T> {
+    return this.db.$transaction(
+      async (tx) => {
+        // Held until this transaction ends. `work` runs on other connections, and the lock still
+        // keeps every other holder of the same key out until it is done.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(${recordLockKey(employeeId, day)})`;
+        return work();
+      },
+      { maxWait: RECORD_LOCK_TIMEOUT_MS, timeout: RECORD_LOCK_TIMEOUT_MS },
+    );
   }
 
   async insertCorrection(correction: Correction): Promise<string> {

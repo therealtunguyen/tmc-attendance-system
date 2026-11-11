@@ -64,6 +64,9 @@ const correctedValue = (
  * them. A day with a single granted scan has no lastOut and is flagged as a missing punch.
  * An HR correction replaces the value it names, and hours and the flag follow it (FR-3.6, UC-8);
  * the scans themselves are never changed.
+ * A scan that arrives late from an edge can put first in after last out on a corrected day. The
+ * pair is then not a working time, so the day has 0 hours and is flagged like a missing punch
+ * until HR corrects it again.
  * Sorted by employeeId, then day.
  */
 export const buildDailyRecords = (
@@ -94,7 +97,7 @@ export const buildDailyRecords = (
         lastOut,
         // Never negative: a late edge push can move a scan past a corrected value.
         hours: Math.round((Math.max(span, 0) / HOUR_MS) * 100) / 100,
-        missingPunch: lastOut === null,
+        missingPunch: lastOut === null || span < 0,
         ...(correctedIn || correctedOut ? { corrected: true } : {}),
       };
     })

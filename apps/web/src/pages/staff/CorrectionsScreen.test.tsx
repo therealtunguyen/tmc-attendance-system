@@ -1,7 +1,7 @@
 import { renderToString } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { CorrectableRecord } from './corrections';
-import { CorrectionHistory, RecordsTable } from './CorrectionsScreen';
+import { canCorrect, CorrectionHistory, RecordsTable } from './CorrectionsScreen';
 
 const record: CorrectableRecord = {
   recordId: 'emp-1_2026-11-07',
@@ -97,5 +97,16 @@ describe('CorrectionHistory', () => {
     const page = renderToString(<CorrectionHistory entries="loading" />);
     expect(page).toContain('Loading');
     expect(page).not.toContain('Not corrected yet');
+  });
+});
+
+describe('canCorrect', () => {
+  it('is off while the history is loading or failed to load', () => {
+    expect(canCorrect('loading')).toBe(false);
+    expect(canCorrect('failed')).toBe(false);
+  });
+
+  it('is on once the history is in view, corrected before or not', () => {
+    expect(canCorrect([])).toBe(true);
   });
 });

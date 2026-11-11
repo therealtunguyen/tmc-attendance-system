@@ -29,6 +29,7 @@ beforeEach(async () => {
     find: async (id: string) =>
       id === 'emp-1' ? { id, firstName: 'An', lastName: 'Nguyen', active: employeeActive } : null,
     list: async () => [],
+    scopesOf: async () => null,
   };
   const attendance = new AttendanceService(
     {
@@ -42,6 +43,7 @@ beforeEach(async () => {
       grantedEventsOf: async () => [],
       corrections: async () => [],
       correctionsOf: async () => [],
+      withRecordLock: async (_employeeId, _day, work) => work(),
       insertCorrection: async () => 'c-1',
       deleteCorrection: async () => {},
       accessLog: async () => [],

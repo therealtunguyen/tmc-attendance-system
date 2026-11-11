@@ -5,6 +5,7 @@ export {
   ACCESS_LOG_MAX_LIMIT,
   AttendanceService,
   InvalidCorrectionError,
+  MAX_RECORDS_RANGE_DAYS,
   OutcomeConflictError,
   RecordNotFoundError,
   UnknownEventError,

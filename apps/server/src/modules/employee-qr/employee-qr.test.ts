@@ -1728,3 +1728,19 @@ describe('roster (EmployeeRoster)', () => {
     expect(Object.keys(entries[1]!).sort()).toEqual(ROSTER_FIELDS);
   });
 });
+
+describe('scopesOf (EmployeeScopes)', () => {
+  it('gives the factory, then the team', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    expect(await eqr.scopesOf(id)).toEqual([lan.factoryId, lan.teamId]);
+  });
+
+  it('gives only the factory when the employee has no team', async () => {
+    const { id } = await eqr.createEmployee('hr-1', { ...lan, teamId: null });
+    expect(await eqr.scopesOf(id)).toEqual([lan.factoryId]);
+  });
+
+  it('is null for an employee that does not exist', async () => {
+    expect(await eqr.scopesOf('nope')).toBeNull();
+  });
+});

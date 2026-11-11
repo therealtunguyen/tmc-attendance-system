@@ -141,6 +141,12 @@ export interface EmployeeRoster {
   roster(scope?: Scope): Promise<RosterEntry[]>;
 }
 
+/** Where one employee belongs, for scope checks (BR-15): no personal data (NFR-4). */
+export interface EmployeeScopes {
+  /** The employee's factory, then their team if they have one; null when there is no such employee. */
+  scopesOf(id: string): Promise<Scope[] | null>;
+}
+
 /** Employees, QR issue/revoke/reissue, validation (FR-1.1 to FR-1.5). */
 export class EmployeeQrService
   implements
@@ -150,6 +156,7 @@ export class EmployeeQrService
     EdgeSnapshotSource,
     EmployeeDirectory,
     EmployeeRoster,
+    EmployeeScopes,
     EmployeeAdmin
 {
   private keyring?: QrKeyring;
@@ -318,6 +325,12 @@ export class EmployeeQrService
 
   async roster(scope?: Scope): Promise<RosterEntry[]> {
     return (await this.repo.list(scope)).map(rosterEntry);
+  }
+
+  async scopesOf(id: string): Promise<Scope[] | null> {
+    const employee = await this.repo.find(id);
+    if (!employee) return null;
+    return employee.teamId ? [employee.factoryId, employee.teamId] : [employee.factoryId];
   }
 
   private record(actorId: string, action: string, employeeId: string) {

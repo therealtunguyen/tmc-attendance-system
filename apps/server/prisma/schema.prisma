@@ -48,6 +48,8 @@ enum CorrectionField {
 // are computed on read, so this names the employee and the day; the scans stay as they were.
 model Correction {
   id             String          @id @default(uuid())
+  // Insert order. Breaks a tie between two corrections with the same createdAt.
+  seq            Int             @unique @default(autoincrement())
   employeeId     String
   // Start of the Vietnam local day.
   day            DateTime
