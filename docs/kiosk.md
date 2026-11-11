@@ -44,3 +44,14 @@ SQLite, TCS mock, Vite proxy and the frontend transport/controller. GRANTED took
 60 ms; the 1 s TCS timeout returned DENIED with firstName in 1,065 ms. Replayed,
 revoked and invalid QR cases also passed. These measurements exclude a physical
 scanner, browser rendering and real TCS/network latency; verify those for the demo.
+
+Browser E2E checked after #79 merged into main (`831b760`): real Chrome keyboard
+input and manual submit -> Vite proxy -> edge -> SQLite/TCS mock -> outbox ->
+central snapshot/attendance routes -> Prisma with temporary PGlite PostgreSQL.
+Visible results: GRANTED 46 ms, replay DENIED 57 ms, revoked DENIED 35 ms,
+invalid QR DENIED 35 ms, TCS timeout DENIED 1,294 ms, manual submit GRANTED 70 ms.
+Five attendance events synced; unidentified invalid QR was not stored by edge
+policy. Vietnamese/English switching, focus recovery, 3 s result clearing,
+network error feedback and a 390 px mobile viewport passed with no browser errors.
+This covers browser rendering; physical scanner, real PostgreSQL and physical TCS
+still require deployment testing.
