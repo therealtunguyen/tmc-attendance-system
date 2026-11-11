@@ -18,21 +18,33 @@ describe('kiosk screen', () => {
     expect(renderPage('/kiosk?gateId=invalid%2Fgate')).not.toContain('<form');
   });
 
-  it('provides a labelled scanner input and gate identity', () => {
+  it('opens display settings with both modes without submitting a scan', () => {
+    const page = renderPage('/kiosk/settings?gateId=gate-1');
+    expect(page).toContain('Chế độ hiển thị');
+    expect(page).toContain('Tiêu chuẩn');
+    expect(page).toContain('Chỉ vùng quét');
+    expect(page).toContain('Lưu và quay lại');
+    expect(page).not.toContain('id="scanner-input"');
+  });
+
+  it('keeps a labelled hardware-scanner input without manual entry', () => {
     const page = renderPage('/kiosk?gateId=gate-1');
     expect(page).toContain('gate-1');
-    expect(page).toContain('Đưa mã QR trước máy quét');
+    expect(page).toContain('Quét mã QR');
     expect(page).toContain('for="scanner-input"');
     expect(page).toContain('type="password"');
     expect(page).toContain('autoComplete="off"');
     expect(page).toContain('inputMode="none"');
-    expect(page).toContain('aria-expanded="false"');
+    expect(page).toContain('kiosk-scanner-capture');
+    expect(page).not.toContain('kiosk-entry-panel');
+    expect(page).not.toContain('placeholder=');
+    expect(page).not.toContain('kiosk-sidebar');
     expect(page).toContain('English');
     expect(page).toContain('lang="vi"');
   });
 
   it.each<[KioskView, string]>([
-    [{ kind: 'idle' }, 'Hold your QR code in front of the scanner'],
+    [{ kind: 'idle' }, 'Scan QR'],
     [{ kind: 'processing' }, 'Checking'],
     [
       { kind: 'result', decision: { eventId: 'edge-event', result: 'GRANTED', firstName: 'Lan' } },
