@@ -25,7 +25,7 @@ const input: OverrideInput = {
 };
 
 describe('guard access-log display', () => {
-  it('shows denied QR, manual overrides and pending events with Vietnam times and traceable IDs', () => {
+  it('shows denied QR, manual overrides and pending events with Vietnam times', () => {
     const page = renderToString(
       <AccessLogTable
         rows={[
@@ -57,9 +57,6 @@ describe('guard access-log display', () => {
       'REVOKED',
       'Phone broken',
       'guard-1',
-      'qr-1',
-      'manual-1',
-      'pending-1',
       'DENIED',
       'GRANTED',
       'PENDING',
@@ -68,6 +65,8 @@ describe('guard access-log display', () => {
     ]) {
       expect(page).toContain(text);
     }
+    expect(page).not.toContain('Event:');
+    expect(page).not.toContain('qr-1');
     expect(page).not.toContain('<script>');
     expect(page).toContain('&lt;script&gt;');
   });

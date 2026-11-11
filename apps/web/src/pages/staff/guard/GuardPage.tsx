@@ -1,4 +1,6 @@
 import {
+  createContext,
+  useContext,
   useCallback,
   useEffect,
   useId,
@@ -35,6 +37,8 @@ import {
   type GuardLanguage,
 } from './guard.i18n';
 import './guard.css';
+
+const PendingOverrideContext = createContext<(eventId: string | null) => void>(() => {});
 
 const timestamp = new Intl.DateTimeFormat('en-GB', {
   timeZone: 'Asia/Ho_Chi_Minh',
@@ -172,9 +176,6 @@ export function AccessLogTable({ rows }: { rows: AccessRow[] }) {
                       {gt('Guard:')} {row.guardId}
                     </div>
                   )}
-                  <small>
-                    {gt('Event:')} {row.eventId}
-                  </small>
                 </td>
               </tr>
             ))}
@@ -264,7 +265,17 @@ function GuardNotice({
   );
 }
 
-function AccessLog({ token, query, onEnd }: { token: string; query: string; onEnd: () => void }) {
+function AccessLog({
+  token,
+  query,
+  onEnd,
+  active,
+}: {
+  token: string;
+  query: string;
+  onEnd: () => void;
+  active: boolean;
+}) {
   const [result, setResult] = useState<ApiResult<AccessRow[]> | null>(null);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const [refresh, setRefresh] = useState(0);
@@ -272,6 +283,7 @@ function AccessLog({ token, query, onEnd }: { token: string; query: string; onEn
   const searchPlaceholder = useGuardString()('Employee code, name or event ID');
 
   useEffect(() => {
+    if (!active) return;
     let current = true;
     let busy = false;
     const load = async () => {
@@ -293,12 +305,12 @@ function AccessLog({ token, query, onEnd }: { token: string; query: string; onEn
       current = false;
       clearInterval(timer);
     };
-  }, [token, query, refresh, onEnd]);
+  }, [token, query, refresh, onEnd, active]);
 
   return (
     <>
       <div className="guard-toolbar">
-        <p role="status">
+        <p>
           {!result ? (
             gt('Loading access log…')
           ) : updatedAt ? (
@@ -385,7 +397,7 @@ export function OverrideStatus({
   );
 }
 
-function OverrideForm({
+export function OverrideForm({
   gates,
   token,
   onEnd,
@@ -399,6 +411,7 @@ function OverrideForm({
   onClose: () => void;
 }) {
   const t = useGuardString();
+  const setPending = useContext(PendingOverrideContext);
   const [gateId, setGateId] = useState(gates.find((gate) => gate.active)?.id ?? gates[0]?.id ?? '');
   const [employeeId, setEmployeeId] = useState('');
   const [reason, setReason] = useState('');
@@ -453,10 +466,12 @@ function OverrideForm({
       ...(time ? { occurredAt: time.toISOString() } : {}),
     };
     sending.current = true;
+    setPending(input.eventId);
     setBusy(true);
     setConfirming(false);
     setError('');
     const result = await submitOverride(token, gateId, input);
+    if (result.kind === 'decided' || result.kind === 'rejected') setPending(null);
     setAttempt({ input, result });
     setBusy(false);
     // A completed attempt cannot be submitted again, even after a timeout or conflict.
@@ -479,7 +494,7 @@ function OverrideForm({
             </div>
             <div>
               <dt>{gt('Reason')}</dt>
-              <dd>{reason}</dd>
+              <dd>{reasonChoice === 'Other' ? reason : gt(reason)}</dd>
             </div>
             <div>
               <dt>{gt('Action')}</dt>
@@ -509,6 +524,13 @@ function OverrideForm({
       <h3 id="override-heading">
         {gt(mode === 'OPEN' ? 'Manual override' : 'Record an earlier manual admission')}
       </h3>
+      <p className="guard-mode-hint">
+        {gt(
+          mode === 'OPEN'
+            ? 'This sends an open command to the selected turnstile and records your identity and reason.'
+            : 'Use only for an admission already performed by hand. This records attendance without opening the gate.',
+        )}
+      </p>
       {attempt ? (
         <>
           <OverrideStatus result={attempt.result} input={attempt.input} />
@@ -577,6 +599,12 @@ function OverrideForm({
                 ))}
               </select>
             </label>
+            {selected && (
+              <p className="guard-selected-status">
+                {gt('Gate status at page load')}:{' '}
+                <strong>{gt(selected.active ? selected.status : 'INACTIVE')}</strong>
+              </p>
+            )}
             <label>
               {gt('2. Employee')}
               <input
@@ -602,7 +630,7 @@ function OverrideForm({
                     onClick={() => {
                       setError('');
                       setReasonChoice(value);
-                      setReason(value === 'Other' ? '' : t(value));
+                      setReason(value === 'Other' ? '' : value);
                       if (value === 'Other')
                         requestAnimationFrame(() => reasonInput.current?.focus());
                     }}
@@ -645,6 +673,9 @@ function OverrideForm({
                 disabled={!selected || (mode === 'OPEN' && !selected.active)}
               >
                 {gt(busy ? 'Submitting…' : mode === 'OPEN' ? 'Open gate' : 'Record admission')}
+              </button>
+              <button type="button" onClick={onClose}>
+                {gt('Cancel')}
               </button>
               <button
                 type="button"
@@ -692,10 +723,35 @@ function GuardConsole({
   };
   return (
     <>
-      <div className="guard-tabs" role="tablist" aria-label={t('Gate operations')}>
+      <div
+        className="guard-tabs"
+        role="tablist"
+        aria-label={t('Gate operations')}
+        onKeyDown={(event) => {
+          const buttons = Array.from(
+            event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+          );
+          const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+          const next =
+            event.key === 'Home'
+              ? 0
+              : event.key === 'End'
+                ? buttons.length - 1
+                : event.key === 'ArrowRight'
+                  ? (index + 1) % buttons.length
+                  : event.key === 'ArrowLeft'
+                    ? (index - 1 + buttons.length) % buttons.length
+                    : -1;
+          if (next < 0) return;
+          event.preventDefault();
+          buttons[next]?.focus();
+          buttons[next]?.click();
+        }}
+      >
         <button
           role="tab"
           id="control-tab"
+          tabIndex={tab === 'control' ? 0 : -1}
           aria-selected={tab === 'control'}
           aria-controls="control-panel"
           onClick={() => {
@@ -708,6 +764,7 @@ function GuardConsole({
         <button
           role="tab"
           id="log-tab"
+          tabIndex={tab === 'log' ? 0 : -1}
           aria-selected={tab === 'log'}
           aria-controls="log-panel"
           onClick={() => setTab('log')}
@@ -815,6 +872,7 @@ function GuardConsole({
             {filterError && <p role="alert">{gt(filterError)}</p>}
             <AccessLog
               key={`${applied}:${revision}`}
+              active={tab === 'log'}
               token={session.token}
               query={applied}
               onEnd={onEnd}
@@ -880,6 +938,7 @@ function GuardPanel({ session, onEnd }: { session: Session; onEnd: () => void })
 /** Guard operations (FR-4.4, FR-2.5 / UC-4); the server enforces role and factory scope. */
 export function GuardPage() {
   const [language, setLanguage] = useState<GuardLanguage>('vi');
+  const [pendingEvent, setPendingEvent] = useState<string | null>(null);
   const [session, setSession] = useState(() => loadSession());
   const end = useCallback(() => {
     clearSession();
@@ -887,73 +946,85 @@ export function GuardPage() {
   }, []);
   return (
     <GuardLanguageContext.Provider value={language}>
-      <main className="guard-page" lang={language}>
-        <header className="guard-header">
-          <div className="guard-header-brand">
-            <span className="guard-brand-mark" aria-hidden="true">
-              <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="3">
-                <rect x="5" y="5" width="13" height="13" rx="1" />
-                <rect x="30" y="5" width="13" height="13" rx="1" />
-                <rect x="5" y="30" width="13" height="13" rx="1" />
-                <path d="M29 25v9h-6m20-10H35v11h8v8H26v-5M24 5v13M5 24h13" />
-              </svg>
-            </span>
-            <div>
-              <p className="guard-brand">TMC ATTENDANCE</p>
-              <h1>{gt('Guard console')}</h1>
-              <p>{gt('Access log & manual override')}</p>
+      <PendingOverrideContext.Provider value={setPendingEvent}>
+        <main className="guard-page" lang={language}>
+          <header className="guard-header">
+            <div className="guard-header-brand">
+              <span className="guard-brand-mark" aria-hidden="true">
+                <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="3">
+                  <rect x="5" y="5" width="13" height="13" rx="1" />
+                  <rect x="30" y="5" width="13" height="13" rx="1" />
+                  <rect x="5" y="30" width="13" height="13" rx="1" />
+                  <path d="M29 25v9h-6m20-10H35v11h8v8H26v-5M24 5v13M5 24h13" />
+                </svg>
+              </span>
+              <div>
+                <p className="guard-brand">TMC ATTENDANCE</p>
+                <h1>{gt('Guard console')}</h1>
+                <p>{gt('Access log & manual override')}</p>
+              </div>
             </div>
-          </div>
-          <nav
-            className="guard-header-actions"
-            aria-label={language === 'vi' ? 'Điều hướng' : 'Navigation'}
-          >
-            <button
-              type="button"
-              className="guard-language"
-              onClick={() => setLanguage(language === 'vi' ? 'en' : 'vi')}
+            <nav
+              className="guard-header-actions"
+              aria-label={language === 'vi' ? 'Điều hướng' : 'Navigation'}
             >
-              {language === 'vi' ? 'English' : 'Tiếng Việt'}
-            </button>
-            <Link to="/staff">{gt('Staff home')}</Link>
-            {session && (
               <button
                 type="button"
-                onClick={() => {
-                  void signOut(session);
-                  end();
-                }}
+                className="guard-language"
+                onClick={() => setLanguage(language === 'vi' ? 'en' : 'vi')}
               >
-                {gt('Sign out')}
+                {language === 'vi' ? 'English' : 'Tiếng Việt'}
               </button>
+              <Link to="/staff">{gt('Staff home')}</Link>
+              {session && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    void signOut(session);
+                    end();
+                  }}
+                >
+                  {gt('Sign out')}
+                </button>
+              )}
+            </nav>
+          </header>
+          <div className={`guard-content ${!session ? 'guard-auth-content' : ''}`}>
+            {pendingEvent && (
+              <aside className="guard-feedback guard-feedback-unknown" role="status">
+                <p>
+                  {gt(
+                    'Override sent. Keep this event ID to check the access log if your session ends. Do not send it again.',
+                  )}
+                </p>
+                <code>{pendingEvent}</code>
+              </aside>
             )}
-          </nav>
-        </header>
-        <div className={`guard-content ${!session ? 'guard-auth-content' : ''}`}>
-          {session ? (
-            <GuardPanel session={session} onEnd={end} />
-          ) : (
-            <>
-              <section className="guard-welcome">
-                <p className="guard-role">{gt('Guard account required')}</p>
-                <h2>{gt('Gate operations')}</h2>
-                <p>{gt('Monitor access and assist employees when scanning is unavailable.')}</p>
-                <div className="guard-welcome-features">
-                  <span>{gt('Access log')}</span>
-                  <span>{gt('Manual override')}</span>
+            {session ? (
+              <GuardPanel session={session} onEnd={end} />
+            ) : (
+              <>
+                <section className="guard-welcome">
+                  <p className="guard-role">{gt('Guard account required')}</p>
+                  <h2>{gt('Gate operations')}</h2>
+                  <p>{gt('Monitor access and assist employees when scanning is unavailable.')}</p>
+                  <div className="guard-welcome-features">
+                    <span>{gt('Access log')}</span>
+                    <span>{gt('Manual override')}</span>
+                  </div>
+                </section>
+                <div className="guard-login">
+                  <SignInForm
+                    heading="Sign in to monitor gates"
+                    translate={gt}
+                    onSignedIn={setSession}
+                  />
                 </div>
-              </section>
-              <div className="guard-login">
-                <SignInForm
-                  heading="Sign in to monitor gates"
-                  translate={gt}
-                  onSignedIn={setSession}
-                />
-              </div>
-            </>
-          )}
-        </div>
-      </main>
+              </>
+            )}
+          </div>
+        </main>
+      </PendingOverrideContext.Provider>
     </GuardLanguageContext.Provider>
   );
 }

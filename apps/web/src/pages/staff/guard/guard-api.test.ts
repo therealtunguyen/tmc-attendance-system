@@ -183,8 +183,28 @@ describe('override request', () => {
     await submitOverride('s', 'g1', backfill);
     expect(JSON.parse(fetch.mock.calls[0]![1].body)).toEqual(backfill);
   });
-  it.each([409, 500, 502, 504])('treats HTTP %s as unknown and never retries', async (status) => {
+  it.each([500, 502, 504])('treats HTTP %s as unknown and never retries', async (status) => {
     const fetch = vi.fn().mockResolvedValue(json(status, { error: 'Failed' }));
+    vi.stubGlobal('fetch', fetch);
+    expect(await submitOverride('s', 'g1', input)).toEqual({ kind: 'unknown' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+  it('reports an inactive gate/employee as a definite pre-write rejection', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(json(409, { error: 'Gate and employee must be active' })),
+    );
+    expect(await submitOverride('s', 'g1', input)).toEqual({
+      kind: 'rejected',
+      message: 'Gate and employee must be active',
+    });
+  });
+  it.each([
+    { error: 'Event already recorded; do not repeat the override' },
+    { error: 'Future conflict' },
+    {},
+  ])('keeps a duplicate or unrecognized 409 unknown: %j', async (body) => {
+    const fetch = vi.fn().mockResolvedValue(json(409, body));
     vi.stubGlobal('fetch', fetch);
     expect(await submitOverride('s', 'g1', input)).toEqual({ kind: 'unknown' });
     expect(fetch).toHaveBeenCalledTimes(1);

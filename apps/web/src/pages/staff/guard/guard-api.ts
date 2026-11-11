@@ -216,8 +216,14 @@ export async function submitOverride(
       body: JSON.stringify(input),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
-    // 409 can mean the event already exists; 5xx may happen after the gate opened.
-    if (res.status === 409 || res.status >= 500) return { kind: 'unknown' };
+    // Only the known pre-write rejection is definite. Unknown future conflicts stay conservative.
+    if (res.status === 409) {
+      const body: unknown = await res.json().catch(() => null);
+      return isObject(body) && body.error === 'Gate and employee must be active'
+        ? { kind: 'rejected', message: body.error }
+        : { kind: 'unknown' };
+    }
+    if (res.status >= 500) return { kind: 'unknown' };
     if (!res.ok) {
       const result = await failure(res);
       return result.kind === 'signed-out'

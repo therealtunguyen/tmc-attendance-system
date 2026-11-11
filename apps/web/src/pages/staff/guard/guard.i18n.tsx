@@ -4,6 +4,12 @@ export type GuardLanguage = 'vi' | 'en';
 export const GuardLanguageContext = createContext<GuardLanguage>('en');
 
 const vi: Record<string, string> = {
+  ONLINE: 'Có kết nối',
+  OFFLINE: 'Mất kết nối',
+  INACTIVE: 'Ngừng hoạt động',
+  'Override sent. Keep this event ID to check the access log if your session ends. Do not send it again.':
+    'Đã gửi yêu cầu. Giữ mã sự kiện này để tra nhật ký nếu phiên đăng nhập kết thúc. Không gửi lại.',
+
   'Choose a reason to continue.': 'Chọn lý do mở cổng để tiếp tục.',
   '1. Gate': '1. Chọn cổng',
   '2. Employee': '2. Nhân viên',
@@ -93,8 +99,6 @@ const vi: Record<string, string> = {
   'Choose a gate': 'Chọn cổng',
   ' · Inactive': ' · Ngừng hoạt động',
   'Employee ID': 'ID nhân viên',
-  'Use the employee record ID supplied by HR after verifying the person’s identity.':
-    'Xác minh danh tính và dùng ID hồ sơ nhân viên do HR cung cấp.',
   Reason: 'Lý do',
   Action: 'Thao tác',
   'Open gate now': 'Mở cổng ngay',
@@ -104,7 +108,6 @@ const vi: Record<string, string> = {
     'Gửi lệnh mở cổng đã chọn và lưu danh tính bảo vệ cùng lý do.',
   'Use only for an admission already performed by hand. This records attendance without opening the gate.':
     'Chỉ dùng cho lượt đã được cho qua bằng tay. Ghi nhận chấm công, không mở cổng.',
-  'I verified the employee and the selected gate.': 'Tôi đã xác minh nhân viên và cổng được chọn.',
   'Submitting…': 'Đang gửi…',
   'Confirm and open gate': 'Xác nhận mở cổng',
   'Record admission': 'Ghi nhận lượt qua',

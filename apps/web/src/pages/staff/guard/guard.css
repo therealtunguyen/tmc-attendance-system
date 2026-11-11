@@ -257,21 +257,16 @@ body:has(.guard-page) {
 .guard-outcome {
   display: inline-block;
   white-space: nowrap;
-  padding: 5px 8px;
-  border-radius: 6px;
-  font-size: 11px;
+  font-size: 12px;
 }
-.guard-outcome-granted,
 .guard-feedback-granted {
   color: #17643b;
   background: #e9f8f0;
 }
-.guard-outcome-denied,
 .guard-feedback-denied {
   color: #9c2738;
   background: #fff0f1;
 }
-.guard-outcome-pending,
 .guard-feedback-unknown {
   color: #855c14;
   background: #fff6e5;
@@ -739,4 +734,24 @@ body:has(.guard-page) {
   .guard-override .guard-reason-options {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+.guard-outcome-granted {
+  color: #17643b;
+}
+.guard-outcome-denied {
+  color: #9c2738;
+}
+.guard-outcome-pending {
+  color: #855c14;
+}
+
+.guard-mode-hint,
+.guard-selected-status {
+  color: #65748b;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.guard-auth-content > .guard-feedback {
+  grid-column: 1 / -1;
 }

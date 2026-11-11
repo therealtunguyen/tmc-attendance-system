@@ -33,7 +33,7 @@ gate. Guards cannot access the HR employee directory with their existing role.
 Each submission has a fresh UUID event ID. While it is pending, submission and
 cancel controls are disabled. The same form cannot submit a completed attempt
 again. Definite validation rejections can be edited. Network errors, timeouts,
-HTTP 409/5xx or an invalid success response are reported as **outcome unknown**:
+duplicate/unrecognized HTTP 409, HTTP 5xx or an invalid success response are reported as **outcome unknown**:
 there is no automatic retry. Use the displayed event ID to inspect the log before
 starting another override. Pending or missing events need operator reconciliation.
 After submission the log reloads with its current filters; adjust those filters if
@@ -45,14 +45,6 @@ transaction limitations. This page does not change the backend override contract
 The Guard console uses the same primary blue `rgb(42, 92, 206)` as the kiosk.
 It is a separate signed-in staff page; it does not add a guard PIN or manual QR
 entry to the public kiosk. Other portal sign-in behavior is unchanged.
-
-Review validation: real Chrome against the auth, notice, gate, access-log and
-attendance APIs with temporary PGlite/Prisma storage and TCS mock. Covered a notice
-version race, factory isolation, duplicate form submission, OPEN audit/attendance,
-BACKFILL of an inactive gate/employee, Vietnam date/outcome filters, TCS timeout,
-a dropped response after opening, notice publication during polling, expired
-sessions and non-GRD access. The audit chain verified successfully; physical TCS
-and production PostgreSQL remain deployment checks.
 
 Frontend: the header, QR brand mark, typography, white cards and controls follow
 the kiosk theme. Vietnamese is the default; use the header language button for
@@ -67,14 +59,14 @@ shift, full employee name or inferred link between separate events is fabricated
 The shared portal sign-in form accepts an optional renderer for Guard labels;
 its default employee-portal text and authentication behavior are preserved.
 
-The completed frontend was rechecked in Chrome in both languages: switching
-preserved the username/password, override employee/reason, confirmation checkbox
-and panel/filter positions. OPEN/BACKFILL, privacy notice, scoped access and
-lost-response tests still passed against the real APIs. A separate mobile check
-confirmed contained horizontal table scrolling and the exact primary RGB color.
-
 Fast admission form: choose the gate, enter the employee record ID, then tap a
 reason. Only Other asks for typed text. Open gate shows a review dialog before
 sending; no extra verification checkbox is required. Earlier admission is a
 secondary action. A decided result offers Next employee, clearing personal
 input while retaining the selected gate; an unknown result cannot use this shortcut.
+
+The known inactive gate/employee 409 is a definite rejection; correct the details
+before trying again. Quick reasons use stable English values in audit data and are
+translated only for display. The selected gate status is a page-load snapshot shown
+next to the selector. Hidden access logs do not poll. An in-flight event ID remains
+visible even if the session ends; do not resubmit an unknown outcome.
