@@ -7,7 +7,12 @@ import { TcsHttpClient } from './adapters/tcs/http.js';
 import { MockTurnstile } from './adapters/tcs/mock.js';
 import { createApp } from './app.js';
 import { AdminRepo, AdminService, adminRoutes } from './modules/admin/index.js';
-import { AttendanceRepo, AttendanceService, attendanceRoutes } from './modules/attendance/index.js';
+import {
+  AttendanceRepo,
+  AttendanceService,
+  attendanceRoutes,
+  SyncReconciler,
+} from './modules/attendance/index.js';
 import {
   EmployeeQrRepo,
   EmployeeQrService,
@@ -53,9 +58,16 @@ const eqr = new EmployeeQrService(
   () => new Date(),
   new QrLinkMail(mailer, config.portalUrl),
 );
-const attendance = new AttendanceService(new AttendanceRepo(db), eqr, iam);
-const reports = new MonthlyReportService(eqr, attendance, admin);
 const notifier = new MailNotifier(mailer, config.alertEmails);
+const attendanceRepo = new AttendanceRepo(db);
+const attendance = new AttendanceService(
+  attendanceRepo,
+  eqr,
+  iam,
+  () => new Date(),
+  new SyncReconciler(attendanceRepo, eqr, notifier),
+);
+const reports = new MonthlyReportService(eqr, attendance, admin);
 const gate = new GateService(new GateRepo(db), eqr, attendance, turnstile, admin, notifier, iam, {
   heartbeatTimeoutMs: config.heartbeatTimeoutMs,
   directory: eqr,

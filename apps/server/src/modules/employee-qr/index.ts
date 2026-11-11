@@ -13,6 +13,7 @@ export type {
   EdgeSnapshotSource,
   Employee,
   EmployeeAdmin,
+  EmployeeAdmission,
   EmployeeChanges,
   EmployeeDirectory,
   EmployeeRoster,

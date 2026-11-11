@@ -11,6 +11,7 @@ import {
   type AccessLogQuery,
   AttendanceService,
   attendanceRoutes,
+  SyncReconciler,
   type AttendanceStore,
   type StoredEvent,
 } from './modules/attendance/index.js';
@@ -95,7 +96,14 @@ class InMemoryEmployees implements Pick<
 /** Same contract as AttendanceRepo for what ingest and dailyRecords call: a known eventId is skipped. */
 class InMemoryEvents implements Pick<
   AttendanceStore,
-  'insert' | 'insertMany' | 'grantedEvents' | 'corrections' | 'accessLog' | 'decide' | 'outcomeOf'
+  | 'insert'
+  | 'insertMany'
+  | 'eventsWithJti'
+  | 'grantedEvents'
+  | 'corrections'
+  | 'accessLog'
+  | 'decide'
+  | 'outcomeOf'
 > {
   rows = new Map<string, StoredEvent>();
 
@@ -110,7 +118,15 @@ class InMemoryEvents implements Pick<
   }
 
   async insertMany(events: StoredEvent[]) {
-    for (const event of events) await this.insert(event);
+    const added: string[] = [];
+    for (const event of events) if (await this.insert(event)) added.push(event.eventId);
+    return added;
+  }
+
+  async eventsWithJti(jtis: string[]) {
+    return [...this.rows.values()]
+      .filter((e) => e.jti !== null && jtis.includes(e.jti))
+      .sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime());
   }
 
   /** Like the repo: only a PENDING row (or one already at this outcome) takes the outcome. */
@@ -222,6 +238,8 @@ let iamStore: ReturnType<typeof inMemoryIam>;
 let iam: IamService;
 let eqr: EmployeeQrService;
 let attendance: AttendanceService;
+/** What sync reconciliation raised (#33). */
+let syncAlerts: RecordingNotifier;
 let app: ReturnType<typeof createApp>;
 const HR_SESSION = 'hr-session-token';
 
@@ -238,7 +256,15 @@ beforeEach(() => {
     qrKeys,
     () => new Date(nowMs),
   );
-  attendance = new AttendanceService(events as unknown as AttendanceStore, eqr, iam);
+  syncAlerts = new RecordingNotifier();
+  // Wired like main.ts: the reconciler reads the event store and EQR, and alerts through the Notifier.
+  attendance = new AttendanceService(
+    events as unknown as AttendanceStore,
+    eqr,
+    iam,
+    () => new Date(),
+    new SyncReconciler(events, eqr, syncAlerts),
+  );
   app = createApp(
     [
       iamRoutes(iam, { login: false, mfa: false }),
@@ -442,7 +468,101 @@ describe('cross-module flow: real routes, in-memory stores, simulated edge', () 
   it.todo('edge agent: mock TCS timeout or error means DENIED, no attendance (#24, #30)');
   it.todo('POST /api/edge/heartbeat marks the edge online; silence raises GATE_OFFLINE (#28, #39)');
   it.todo('/api/edge/* rejects a request without a valid edge credential (#69)');
-  it.todo('sync flags a stale event for a revoked person, and one jti at two edges (#33)');
+  it('sync flags a stale entry of a revoked employee to the Notifier, once (#33)', async () => {
+    const lan = await onboard('BD-0007');
+    const qr = await issueQr(lan.session);
+    // The edge's snapshot still admits Lan: this is what it would decide while cut off.
+    const scan = await edgeScan(qr.body.token);
+    expect(scan.reason).toBeUndefined();
+
+    const revoked = await request(app)
+      .post(`/api/employees/${lan.id}/qr/revoke`)
+      .set('Authorization', `Bearer ${HR_SESSION}`)
+      .send();
+    expect(revoked.status).toBe(200);
+
+    // shortcut: a real edge sets `stale` itself once its snapshot is over 5 min old (#26).
+    const stale = { ...scan.event, stale: true };
+    expect((await push(stale)).body).toEqual({ accepted: [stale.eventId] });
+
+    expect(syncAlerts.alerts.map((a) => a.kind)).toEqual(['STALE_ENTRY_REVOKED']);
+    const message = syncAlerts.alerts[0]!.message;
+    expect(message).toContain(`Edge ${EDGE} synced 1 entry `);
+    expect(message).toContain(
+      `- employee ${lan.id} (REVOKED now) entered at gate ${GATE} at ${IN_AT} (event ${stale.eventId})`,
+    );
+    // No name or email in the alert (NFR-4).
+    expect(message).not.toContain('Lan');
+    expect(message).not.toContain('@tmc.vn');
+
+    // The event stays as the edge sent it: the person did go in, so the day still counts.
+    expect(events.rows.get(stale.eventId)).toMatchObject({ outcome: 'GRANTED', stale: true });
+    expect(await attendance.dailyRecords(TODAY, FACTORY)).toHaveLength(1);
+
+    // The outbox sends the same batch again after a lost reply: no second alert.
+    expect((await push(stale)).status).toBe(200);
+    expect(syncAlerts.alerts).toHaveLength(1);
+  });
+
+  it('sync says nothing about a stale entry of an employee who is still admitted (#33)', async () => {
+    const lan = await onboard('BD-0008');
+    const scan = await edgeScan((await issueQr(lan.session)).body.token);
+    expect((await push({ ...scan.event, stale: true })).status).toBe(200);
+    expect(syncAlerts.alerts).toEqual([]);
+  });
+
+  it('sync flags one token used at two edges, and not a token seen twice at one edge (#33)', async () => {
+    const lan = await onboard('BD-0009');
+    const qr = await issueQr(lan.session);
+    // Two edges check the same token inside its window. Each only knows the tokens it has seen itself.
+    const here = await edgeScan(qr.body.token);
+    const there = await edgeScan(qr.body.token);
+    expect(there.event.jti).toBe(here.event.jti);
+
+    // Same edge, same token again: that edge's own replay check covers it (#25).
+    const replay = { ...(await edgeScan(qr.body.token)).event, outcome: 'DENIED' as const };
+    expect((await push(here.event, replay)).status).toBe(200);
+    expect(syncAlerts.alerts).toEqual([]);
+
+    const other = await request(app)
+      .post('/api/edge/events')
+      .send({ edgeId: 'edge-la', events: [{ ...there.event, gateId: 'la-gate-1' }] });
+    expect(other.status).toBe(200);
+
+    expect(syncAlerts.alerts.map((a) => a.kind)).toEqual(['QR_USED_AT_TWO_EDGES']);
+    const message = syncAlerts.alerts[0]!.message;
+    expect(message).toContain('Edge edge-la synced 1 QR token ');
+    expect(message).toContain(`- token ${here.event.jti}: `);
+    expect(message).toContain(`edge ${EDGE}, gate ${GATE}, ${IN_AT}, GRANTED, employee ${lan.id}`);
+    expect(message).toContain(
+      `edge edge-la, gate la-gate-1, ${IN_AT}, GRANTED, employee ${lan.id}`,
+    );
+  });
+
+  it('a sync alert that cannot be sent does not fail the push (#33)', async () => {
+    const lan = await onboard('BD-0010');
+    const scan = await edgeScan((await issueQr(lan.session)).body.token);
+    await request(app)
+      .post(`/api/employees/${lan.id}/qr/revoke`)
+      .set('Authorization', `Bearer ${HR_SESSION}`)
+      .send();
+    syncAlerts.fail = true;
+    const errors: unknown[][] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => void errors.push(args);
+    try {
+      const pushed = await push({ ...scan.event, stale: true });
+      expect(pushed.status).toBe(200);
+      expect(pushed.body).toEqual({ accepted: [scan.event.eventId] });
+    } finally {
+      console.error = original;
+    }
+    expect(events.rows.has(scan.event.eventId)).toBe(true);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]![0]).toBe(
+      `Sync reconciliation: the STALE_ENTRY_REVOKED check of a push from edge ${EDGE} failed`,
+    );
+  });
   it.todo('edge outbox: does not push a PENDING event while its TCS call is still running (#27)');
   // The month of the events above (2026-11, Vietnam time) and a minimal org tree: this file has no admin module.
   const MONTH = '2026-11';

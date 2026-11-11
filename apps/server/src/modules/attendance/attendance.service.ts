@@ -55,6 +55,21 @@ export interface StoredEvent extends Omit<
 
 export type AccessOutcome = StoredEvent['outcome']; // 'GRANTED' | 'DENIED' | 'PENDING'
 
+/** One stored use of a QR token: what reconciliation needs to compare edges (ADR-10). */
+export type JtiSighting = Pick<
+  StoredEvent,
+  'eventId' | 'employeeId' | 'gateId' | 'edgeId' | 'outcome' | 'occurredAt' | 'jti'
+>;
+
+/** Checks what an edge decided on its own against what the server knows (ADR-9, ADR-10). */
+export interface SyncReconciliation {
+  /**
+   * `stored` are the events one push has just added. Never rejects: the events are already
+   * stored, so a failed check must not make the edge send them again.
+   */
+  reconcile(edgeId: string, stored: StoredEvent[]): Promise<void>;
+}
+
 /** FR-4.4: one page of the access log holds at most this many rows; callers page by time. */
 export const ACCESS_LOG_MAX_LIMIT = 500;
 
@@ -137,8 +152,13 @@ export class OutcomeConflictError extends Error {
 export interface AttendanceStore {
   /** Inserts unless the eventId exists; true if inserted. Must be atomic (two racing inserts -> one true). */
   insert(event: StoredEvent): Promise<boolean>;
-  /** Inserts every event whose eventId is new, in one atomic write; existing ones are skipped. */
-  insertMany(events: StoredEvent[]): Promise<void>;
+  /**
+   * Inserts every event whose eventId is new, in one atomic write; existing ones are skipped.
+   * Returns the eventIds this call stored.
+   */
+  insertMany(events: StoredEvent[]): Promise<string[]>;
+  /** Every stored event that carries one of these token IDs, oldest first. */
+  eventsWithJti(jtis: string[]): Promise<JtiSighting[]>;
   /** GRANTED events with an employee, occurredAt in [from, to); only these employees if given. */
   grantedEvents(from: Date, to: Date, employeeIds?: string[]): Promise<DailyInput[]>;
   /** Every GRANTED event of one employee, whatever the date. */
@@ -200,6 +220,7 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
     private directory: EmployeeDirectory & EmployeeScopes,
     private audit: AuditLog,
     private now: () => Date = () => new Date(),
+    private reconciliation: SyncReconciliation = { reconcile: async () => {} },
   ) {}
 
   /**
@@ -248,25 +269,27 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
 
   /**
    * The edge decided these scans locally (ADR-9), so each is stored as sent: outcome, jti and
-   * stale included. A known eventId is skipped, never updated (contract: shared/contracts/edge.ts).
-   * TODO(#33): a skipped duplicate drops the edge's jti and stale, so a row first written PENDING by
-   * record() never gets them; reconciliation must decide whether to merge them in.
+   * stale included. A known eventId is skipped, never updated (contract: shared/contracts/edge.ts),
+   * so the jti and stale of a skipped duplicate are not merged into the stored row.
+   * Only the events this push added are reconciled (#33): a batch sent again raises no second alert.
    */
   async ingest({ edgeId, events }: PushEventsRequest): Promise<PushEventsResponse> {
-    await this.repo.insertMany(
-      events.map((e) => ({
-        eventId: e.eventId,
-        employeeId: e.employeeId,
-        gateId: e.gateId,
-        method: e.method,
-        occurredAt: new Date(e.occurredAt),
-        outcome: e.outcome,
-        denyReason: e.denyReason ?? null,
-        edgeId,
-        jti: e.jti,
-        stale: e.stale,
-      })),
-    );
+    const rows: StoredEvent[] = events.map((e) => ({
+      eventId: e.eventId,
+      employeeId: e.employeeId,
+      gateId: e.gateId,
+      method: e.method,
+      occurredAt: new Date(e.occurredAt),
+      outcome: e.outcome,
+      denyReason: e.denyReason ?? null,
+      edgeId,
+      jti: e.jti,
+      stale: e.stale,
+    }));
+    const added = new Set(await this.repo.insertMany(rows));
+    // delete() is true once per eventId, so a duplicate inside the batch counts once: the first, as stored.
+    const stored = rows.filter((row) => added.delete(row.eventId));
+    if (stored.length > 0) await this.reconciliation.reconcile(edgeId, stored);
     // New and duplicate alike: the server now holds every one, so the edge drops them all.
     return { accepted: [...new Set(events.map((e) => e.eventId))] };
   }

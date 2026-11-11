@@ -38,7 +38,8 @@ beforeEach(async () => {
         events.set(event.eventId, { ...event });
         return true;
       },
-      insertMany: async () => {},
+      insertMany: async () => [],
+      eventsWithJti: async () => [],
       grantedEvents: async () => [],
       grantedEventsOf: async () => [],
       corrections: async () => [],
