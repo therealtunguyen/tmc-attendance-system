@@ -10,6 +10,8 @@
   },
   "scripts": {
     "dev": "concurrently -n server,edge,web -c blue,cyan,green \"npm run dev -w apps/server\" \"npm run dev -w apps/edge\" \"npm run dev -w apps/web\"",
+    "demo:kiosk": "concurrently --kill-others -n web,demo -c green,cyan \"npm run dev -w apps/web -- --host 127.0.0.1 --port 5173 --strictPort\" \"tsx scripts/kiosk-demo.mjs\"",
+    "demo:kiosk:phone": "DEMO_HOST=0.0.0.0 npm run demo:kiosk",
     "build": "npm run build --workspaces",
     "lint": "eslint .",
     "format": "prettier --write .",
