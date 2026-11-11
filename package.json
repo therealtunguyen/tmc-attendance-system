@@ -9,7 +9,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "dev": "concurrently -n server,web -c blue,green \"npm run dev -w apps/server\" \"npm run dev -w apps/web\"",
+    "dev": "concurrently -n server,edge,web -c blue,cyan,green \"npm run dev -w apps/server\" \"npm run dev -w apps/edge\" \"npm run dev -w apps/web\"",
     "build": "npm run build --workspaces",
     "lint": "eslint .",
     "format": "prettier --write .",
@@ -29,7 +29,8 @@
     "prisma@7.10.1": true,
     "@prisma/engines@7.10.1": true,
     "esbuild@0.28.2": true,
-    "fsevents@2.3.3": true
+    "fsevents@2.3.3": true,
+    "better-sqlite3@11.10.0": true
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

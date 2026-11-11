@@ -357,6 +357,35 @@ describe('GET /api/access-log (FR-4.4)', () => {
     });
   });
 
+  describe('offset forms', () => {
+    const rowIds = async (qs: string) => {
+      const { service } = setup();
+      const res = await request(app(guard, service)).get(`${URL}?${qs}`);
+      return { status: res.status, ids: res.body.rows?.map((r: { eventId: string }) => r.eventId) };
+    };
+
+    it('accepts an unencoded + offset (decoded as a space) like the %2B form', async () => {
+      const encoded = await rowIds(RANGE_QS);
+      const raw = await rowIds('from=2026-11-01T00:00:00+07:00&to=2026-11-02T00:00:00+07:00');
+      expect(raw.status).toBe(200);
+      expect(raw).toEqual(encoded);
+      expect(raw.ids).toEqual(['ev-2', 'ev-1']);
+    });
+
+    it('still accepts -07:00 and Z', async () => {
+      expect(
+        (await rowIds('from=2026-11-01T00:00:00-07:00&to=2026-11-02T00:00:00-07:00')).status,
+      ).toBe(200);
+      expect((await rowIds('from=2026-11-01T00:00:00Z&to=2026-11-02T00:00:00Z')).status).toBe(200);
+    });
+
+    it('400 for a space between date and time, or no offset', async () => {
+      const bad = 'from=2026-11-01 00:00:00+07:00&to=2026-11-02T00:00:00%2B07:00';
+      expect((await rowIds(bad)).status).toBe(400);
+      expect((await rowIds('from=2026-11-01T00:00:00&to=2026-11-02T00:00:00')).status).toBe(400);
+    });
+  });
+
   it.each([
     [
       'from=2026-11-01T00:00:00%2B07:00',

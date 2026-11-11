@@ -543,6 +543,42 @@ describe('unexpected failures', () => {
   });
 });
 
+describe('a run taken over by a newer one', () => {
+  const T1 = new Date(NOW.getTime() + 1000);
+  /** The first run is in its source read when a second claim takes the month over (as after a stale RUNNING). */
+  const takeoverDuringRead = () => {
+    const inner = source;
+    source = {
+      company: async (range) => {
+        const second = await runs.claim('2026-10', 'MANUAL', T1, new Date(NOW.getTime() + 500));
+        expect(second).not.toBeNull();
+        return inner.company(range);
+      },
+    };
+  };
+  const TAKEN = 'Export of 2026-10 was taken over by a newer run; this outcome is dropped';
+
+  it('keeps the newer run and skips audit and alert when the first one is ACCEPTED', async () => {
+    takeoverDuringRead();
+    const run = await build(['ACCEPTED']).runScheduled('2026-10', false);
+    expect(run).toMatchObject({ status: 'RUNNING', trigger: 'MANUAL', startedAt: T1 });
+    expect(runs.rows.get('2026-10')).toMatchObject({ status: 'RUNNING', startedAt: T1 });
+    expect(audit.entries.map((e) => e.action)).toEqual(['EXPORT_RUN']);
+    expect(notifier.alerts).toEqual([]);
+    expect(log).toHaveBeenCalledWith(TAKEN);
+  });
+
+  it('keeps the newer run and skips audit and alert when the first one fails', async () => {
+    takeoverDuringRead();
+    const run = await build(['throw']).runScheduled('2026-10', false);
+    expect(run).toMatchObject({ status: 'RUNNING', startedAt: T1 });
+    expect(runs.rows.get('2026-10')).toMatchObject({ status: 'RUNNING', startedAt: T1 });
+    expect(audit.entries.map((e) => e.action)).toEqual(['EXPORT_RUN']);
+    expect(notifier.alerts).toEqual([]);
+    expect(log).toHaveBeenCalledWith(TAKEN);
+  });
+});
+
 describe('status', () => {
   it('returns the stored run or null', async () => {
     const svc = build();

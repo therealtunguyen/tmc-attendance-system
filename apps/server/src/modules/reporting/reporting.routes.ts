@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type { Request, RequestHandler, Response } from 'express';
 import { notImplemented } from '../../shared/errors.js';
-import type { AccessOutcome } from '../attendance/index.js';
+import { ACCESS_LOG_MAX_LIMIT, type AccessOutcome } from '../attendance/index.js';
 import { requirePermission } from '../iam/index.js';
 import type { UserRef } from '../iam/index.js';
 import { REPORT_BY } from './reporting.aggregate.js';
@@ -30,19 +30,21 @@ export interface ReportingRouteDeps {
 }
 
 const ISO_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
+const PLUS_DECODED_AS_SPACE = /(T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?) (\d{2}:\d{2})$/;
 const MAX_RANGE_MS = 31 * 24 * 3_600_000;
 const OUTCOMES: readonly string[] = ['GRANTED', 'DENIED', 'PENDING'];
 const DEFAULT_LIMIT = 100;
-const MAX_LIMIT = 500;
 
 /** An ISO 8601 date-time with an offset, e.g. 2026-11-01T00:00:00+07:00; null if it is not one. */
 const parseIsoDate = (value: unknown): Date | null => {
   if (typeof value !== 'string') return null;
-  const match = ISO_DATE_TIME.exec(value);
-  if (!match || Number.isNaN(Date.parse(value))) return null;
+  // An unencoded "+" in a query string is decoded as a space, so restore it at the offset position.
+  const iso = value.replace(PLUS_DECODED_AS_SPACE, '$1+$2');
+  const match = ISO_DATE_TIME.exec(iso);
+  if (!match || Number.isNaN(Date.parse(iso))) return null;
   const [year, month, day] = match.slice(1, 4).map(Number) as [number, number, number];
   if (new Date(Date.UTC(year, month - 1, day)).getUTCDate() !== day) return null;
-  return new Date(value);
+  return new Date(iso);
 };
 
 /** Columns are the JSON field names, in order, so CSV and JSON match (FR-4.2). */
@@ -156,7 +158,9 @@ export const reportingRoutes = ({
     let limit = DEFAULT_LIMIT;
     if (rawLimit !== undefined) {
       limit = typeof rawLimit === 'string' && /^\d+$/.test(rawLimit) ? Number(rawLimit) : 0;
-      if (limit < 1 || limit > MAX_LIMIT) return 'limit must be an integer from 1 to 500';
+      if (limit < 1 || limit > ACCESS_LOG_MAX_LIMIT) {
+        return `limit must be an integer from 1 to ${ACCESS_LOG_MAX_LIMIT}`;
+      }
     }
     return {
       range: { from, to },

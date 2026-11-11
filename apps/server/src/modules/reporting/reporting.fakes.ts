@@ -147,10 +147,13 @@ export class InMemoryExportRuns implements ExportRunStore {
 
   async finish(
     month: string,
+    startedAt: Date,
     { status, attempts, lastError, at }: ExportResult,
-  ): Promise<ExportRun> {
+  ): Promise<ExportRun | null> {
     const row = this.rows.get(month);
-    if (!row) throw new Error(`No export run for ${month}`);
+    if (!row || row.status !== 'RUNNING' || row.startedAt.getTime() !== startedAt.getTime()) {
+      return null;
+    }
     const run = { ...row, status, attempts, lastError, finishedAt: at };
     this.rows.set(month, run);
     return { ...run };
