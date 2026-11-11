@@ -59,6 +59,8 @@ Gate registry data and CRUD rules (FR-2.1): [docs/gate-registry.md](docs/gate-re
 
 Gate online/offline monitoring and ADM alerts (FR-2.6): [docs/gate-heartbeat.md](docs/gate-heartbeat.md).
 
+Guard access log and manual override (FR-4.4, FR-2.5 / UC-4): [docs/guard.md](docs/guard.md).
+
 ## Deployment notes
 
 The server assumes a single instance for now. These in-process caches would go stale across instances:
