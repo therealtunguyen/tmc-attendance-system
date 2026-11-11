@@ -232,9 +232,11 @@ export const gateRoutes = (gate: GateService) =>
       }
     })
     // Edge agent (ADR-9). Body: EdgeHeartbeat. Response: 204.
-    // Edge authentication is shared integration work (#44), like /edge/events and /edge/snapshot.
+    // Authenticated by authenticateEdge (#69), mounted on /api/edge; edgeId comes from the token, never the body.
     .post('/edge/heartbeat', async (req, res) => {
-      const hb = parseHeartbeat(req.body);
+      const edgeId = res.locals.edgeId as string | undefined;
+      if (!edgeId) return void res.status(401).json({ error: 'Edge authentication required' });
+      const hb = parseHeartbeat(req.body, edgeId);
       if (!hb) return void res.status(400).json({ error: 'Invalid edge heartbeat' });
       try {
         await gate.edgeHeartbeat(hb);

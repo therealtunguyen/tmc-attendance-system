@@ -15,7 +15,7 @@ import { SnapshotManager } from './snapshot.js';
 mkdirSync(config.dataDir, { recursive: true });
 
 const db = openDb(config.dataDir, { pendingGraceS: config.pendingGraceS });
-const serverClient = new ServerClient(config.serverBaseUrl);
+const serverClient = new ServerClient(config.serverBaseUrl, config.edgeToken);
 const snapshots = new SnapshotManager(db, serverClient, config.edgeId);
 const turnstile =
   config.tcsMode === 'http'

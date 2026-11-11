@@ -17,6 +17,7 @@ import {
 import { GateRepo, GateService, gateRoutes, startGateMonitor } from './modules/gate/index.js';
 import {
   authenticate,
+  authenticateEdge,
   IamRepo,
   IamService,
   iamRoutes,
@@ -83,7 +84,10 @@ const app = createApp(
     reportingRoutes({ reports, exports, accessLog: new AccessLogService(attendance, gate, eqr) }),
     gateRoutes(gate),
   ],
-  { before: [authenticate(iam, admin), requireNoticeAck(iam)] },
+  {
+    before: [authenticate(iam, admin), requireNoticeAck(iam)],
+    edge: authenticateEdge(config.edgeTokens),
+  },
 );
 
 const server = app.listen(config.port, () => {

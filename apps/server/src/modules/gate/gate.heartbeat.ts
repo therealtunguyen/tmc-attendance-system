@@ -22,17 +22,23 @@ export const connectionStatus = (at: Date | null, now: Date, timeout: number) =>
     ? ('ONLINE' as const)
     : ('OFFLINE' as const);
 
-export const parseHeartbeat = (body: unknown): EdgeHeartbeat | null => {
+export const parseHeartbeat = (
+  body: unknown,
+  authenticatedEdgeId?: string,
+): EdgeHeartbeat | null => {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return null;
-  const { edgeId, sentAt, snapshotAt, outboxSize } = body as Record<string, unknown>;
+  const { edgeId: bodyEdgeId, sentAt, snapshotAt, outboxSize } = body as Record<string, unknown>;
   const timestamp = (value: unknown): value is string =>
     typeof value === 'string' &&
     /T.*(Z|[+-]\d{2}:\d{2})$/.test(value) &&
     Number.isFinite(Date.parse(value));
+  const resolvedEdgeId =
+    authenticatedEdgeId ??
+    (typeof bodyEdgeId === 'string' && bodyEdgeId.trim() && bodyEdgeId === bodyEdgeId.trim()
+      ? bodyEdgeId
+      : null);
   if (
-    typeof edgeId !== 'string' ||
-    !edgeId.trim() ||
-    edgeId !== edgeId.trim() ||
+    !resolvedEdgeId ||
     !timestamp(sentAt) ||
     (snapshotAt !== null && !timestamp(snapshotAt)) ||
     typeof outboxSize !== 'number' ||
@@ -40,7 +46,7 @@ export const parseHeartbeat = (body: unknown): EdgeHeartbeat | null => {
     outboxSize < 0
   )
     return null;
-  return { edgeId, sentAt, snapshotAt, outboxSize };
+  return { edgeId: resolvedEdgeId, sentAt, snapshotAt, outboxSize };
 };
 
 /** Serial checks; stop waits for the current check before closing the database. */

@@ -60,10 +60,9 @@ const invalidEvent = (e: unknown): string | null => {
 };
 
 /** The whole batch is checked first, so a bad event stores nothing (the edge must fix it). */
-const parseBatch = (req: Request): PushEventsRequest | string => {
+const parseBatch = (req: Request, edgeId: string): PushEventsRequest | string => {
   const body: unknown = req.body ?? {};
   if (!isObject(body)) return 'body must be a JSON object';
-  if (!isText(body.edgeId)) return 'edgeId must be a non-empty string';
   if (!Array.isArray(body.events)) return 'events must be an array';
   if (body.events.length > MAX_EDGE_BATCH) {
     return `events must hold at most ${MAX_EDGE_BATCH} events; split the outbox into batches`;
@@ -72,7 +71,8 @@ const parseBatch = (req: Request): PushEventsRequest | string => {
     const error = invalidEvent(e);
     if (error) return `events[${i}]${error.startsWith('.') ? '' : ' '}${error}`;
   }
-  return { edgeId: body.edgeId, events: body.events as EdgeEvent[] };
+  // edgeId comes from the authenticated token (#69), never from body.edgeId.
+  return { edgeId, events: body.events as EdgeEvent[] };
 };
 
 export const attendanceRoutes = (attendance: AttendanceService) =>
@@ -88,10 +88,11 @@ export const attendanceRoutes = (attendance: AttendanceService) =>
       res.set('Cache-Control', 'no-store').json({ records: await attendance.history(employeeId) });
     })
     .post('/attendance/:recordId/corrections', notImplemented)
-    // Edge outbox (ADR-9). Body: PushEventsRequest. Response: PushEventsResponse.
-    // TODO(#44): authenticate the edge agent.
+    // Edge outbox (ADR-9). Authenticated by authenticateEdge (#69), mounted on /api/edge.
     .post('/edge/events', async (req, res) => {
-      const batch = parseBatch(req);
+      const edgeId = res.locals.edgeId as string | undefined;
+      if (!edgeId) return void res.status(401).json({ error: 'Edge authentication required' });
+      const batch = parseBatch(req, edgeId);
       if (typeof batch === 'string') return void res.status(400).json({ error: batch });
       res.json(await attendance.ingest(batch));
     });

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { parseEmailList, parseMailMode, positiveInt } from './config.js';
+import { parseEdgeTokens, parseEmailList, parseMailMode, positiveInt } from './config.js';
 
 describe('parseMailMode', () => {
   it.each([
@@ -60,5 +60,30 @@ describe('positiveInt', () => {
   it('throws for a digit string beyond the safe integer range', () => {
     vi.stubEnv('LIMIT_TEST', '9'.repeat(400));
     expect(() => positiveInt('LIMIT_TEST', 10)).toThrow(/LIMIT_TEST/);
+  });
+});
+
+describe('parseEdgeTokens', () => {
+  it.each([undefined, '', '  '])('reads %j as empty map (fail closed)', (value) => {
+    expect(parseEdgeTokens(value)).toEqual({});
+  });
+
+  it('parses comma-separated edgeId:token pairs (allowing colons/equals in base64/hex tokens)', () => {
+    expect(parseEdgeTokens(' edge-bd : tok== , edge-la:abc:def ')).toEqual({
+      'edge-bd': 'tok==',
+      'edge-la': 'abc:def',
+    });
+  });
+
+  it.each(['no-colon', ':secret', 'edge-bd:', 'edge-bd:  '])(
+    'rejects malformed entry %j',
+    (value) => {
+      expect(() => parseEdgeTokens(value)).toThrow(/EDGE_TOKENS/);
+    },
+  );
+
+  it('rejects duplicate edgeId or duplicate token', () => {
+    expect(() => parseEdgeTokens('edge-bd:a,edge-bd:b')).toThrow(/duplicate edgeId/);
+    expect(() => parseEdgeTokens('edge-bd:same,edge-la:same')).toThrow(/duplicate token/);
   });
 });

@@ -310,14 +310,29 @@ describe('AttendanceService.ingest (ADR-9, FR-3.2)', () => {
 });
 
 describe('POST /api/edge/events', () => {
-  const app = () => createApp([attendanceRoutes(attendance)]);
+  const edgeAs = (edgeId: string | null) =>
+    Router().use((_req, res, next) => {
+      if (edgeId) res.locals.edgeId = edgeId;
+      next();
+    });
+  const app = (edgeId: string | null = 'edge-bd') =>
+    createApp([edgeAs(edgeId), attendanceRoutes(attendance)]);
 
-  it('returns the accepted eventIds (200)', async () => {
-    const res = await request(app())
+  it('rejects unauthenticated requests without an edge credential (401)', async () => {
+    const res = await request(app(null))
       .post('/api/edge/events')
-      .send({ edgeId: 'edge-bd', events: [edgeEvent('x-1'), edgeEvent('x-2')] });
+      .send({ edgeId: 'edge-bd', events: [edgeEvent('x-1')] });
+    expect(res.status).toBe(401);
+    expect(store.rows.size).toBe(0);
+  });
+
+  it('returns the accepted eventIds (200) and uses edgeId from the credential, not the body', async () => {
+    const res = await request(app('edge-bd'))
+      .post('/api/edge/events')
+      .send({ edgeId: 'spoofed-edge', events: [edgeEvent('x-1'), edgeEvent('x-2')] });
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ accepted: ['x-1', 'x-2'] });
+    expect(store.rows.get('x-1')?.edgeId).toBe('edge-bd');
     expect(store.rows.get('x-2')?.occurredAt).toEqual(new Date('2026-11-07T00:58:00.000Z'));
   });
 
@@ -352,7 +367,6 @@ describe('POST /api/edge/events', () => {
 
   it.each([
     ['an array body', [edgeEvent('x-1')], 'body must be a JSON object'],
-    ['no edgeId', { events: [] }, 'edgeId must be a non-empty string'],
     ['events not an array', { edgeId: 'e', events: {} }, 'events must be an array'],
     ['a non-object event', { edgeId: 'e', events: ['x'] }, 'events[0] must be an object'],
     [
