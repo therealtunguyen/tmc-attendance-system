@@ -1741,6 +1741,31 @@ describe('roster (EmployeeRoster)', () => {
   });
 });
 
+describe('denyOf (EmployeeAdmission)', () => {
+  it('is null for an active employee whose QR is valid', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    expect(await eqr.denyOf(id)).toBeNull();
+  });
+
+  it('is REVOKED after a revoke and null again after a reissue', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    await eqr.revokeQr('hr-1', id);
+    expect(await eqr.denyOf(id)).toBe('REVOKED');
+    await eqr.reissueQr('hr-1', id);
+    expect(await eqr.denyOf(id)).toBeNull();
+  });
+
+  it('is INACTIVE for a deactivated employee', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    await eqr.deactivateEmployee('hr-1', id);
+    expect(await eqr.denyOf(id)).toBe('INACTIVE');
+  });
+
+  it('is UNKNOWN for an employee that does not exist', async () => {
+    expect(await eqr.denyOf('nope')).toBe('UNKNOWN');
+  });
+});
+
 describe('scopesOf (EmployeeScopes)', () => {
   it('gives the factory, then the team', async () => {
     const { id } = await eqr.createEmployee('hr-1', lan);

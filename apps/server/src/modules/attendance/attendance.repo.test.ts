@@ -128,6 +128,62 @@ describe('AttendanceService.accessLog over AttendanceRepo (FR-4.4)', () => {
   });
 });
 
+describe('AttendanceRepo edge ingest (#33)', () => {
+  const stored = {
+    eventId: 'x-1',
+    employeeId: 'emp-1',
+    gateId: 'g1',
+    method: 'QR' as const,
+    occurredAt: range.from,
+    outcome: 'GRANTED' as const,
+    denyReason: null,
+    edgeId: 'edge-bd',
+    jti: 'jti-1',
+    stale: true,
+  };
+
+  it('inserts in one statement that skips known eventIds and returns the new ones', async () => {
+    const createManyAndReturn = vi.fn().mockResolvedValue([{ eventId: 'x-1' }]);
+    const repo = new AttendanceRepo({
+      attendanceEvent: { createManyAndReturn },
+    } as unknown as PrismaClient);
+    const events = [stored, { ...stored, eventId: 'x-2' }];
+    expect(await repo.insertMany(events)).toEqual(['x-1']);
+    expect(createManyAndReturn).toHaveBeenCalledTimes(1);
+    expect(createManyAndReturn).toHaveBeenCalledWith({
+      data: events,
+      skipDuplicates: true,
+      select: { eventId: true },
+    });
+  });
+
+  it('reads the uses of the given tokens, oldest first', async () => {
+    const { repo, findMany } = repoWith([{ eventId: 'x-1', jti: 'jti-1' }]);
+    expect(await repo.eventsWithJti(['jti-1', 'jti-2'])).toEqual([
+      { eventId: 'x-1', jti: 'jti-1' },
+    ]);
+    expect(findMany).toHaveBeenCalledWith({
+      where: { jti: { in: ['jti-1', 'jti-2'] } },
+      orderBy: [{ occurredAt: 'asc' }, { eventId: 'asc' }],
+      select: {
+        eventId: true,
+        employeeId: true,
+        gateId: true,
+        edgeId: true,
+        outcome: true,
+        occurredAt: true,
+        jti: true,
+      },
+    });
+  });
+
+  it('an empty batch or token list never reaches the database', async () => {
+    const repo = new AttendanceRepo({} as unknown as PrismaClient);
+    expect(await repo.insertMany([])).toEqual([]);
+    expect(await repo.eventsWithJti([])).toEqual([]);
+  });
+});
+
 describe('AttendanceRepo corrections (FR-3.6)', () => {
   const day = new Date('2026-11-06T17:00:00Z');
 

@@ -1,4 +1,6 @@
 export { buildDailyRecords } from './attendance.daily.js';
+export { SyncReconciler } from './attendance.reconcile.js';
+export type { SyncAlertKind, SyncAlerts } from './attendance.reconcile.js';
 export { AttendanceRepo } from './attendance.repo.js';
 export { attendanceRoutes } from './attendance.routes.js';
 export {
@@ -21,8 +23,10 @@ export type {
   CorrectionRequest,
   DailyRecord,
   EdgeIngest,
+  JtiSighting,
   LockedRecordStore,
   ScanEvent,
   ScanOutcome,
   StoredEvent,
+  SyncReconciliation,
 } from './attendance.service.js';

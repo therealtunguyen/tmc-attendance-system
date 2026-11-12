@@ -7,6 +7,7 @@ import type {
   AccessLogQuery,
   AttendanceStore,
   Correction,
+  JtiSighting,
   LockedRecordStore,
   ScanOutcome,
   StoredEvent,
@@ -45,10 +46,33 @@ export class AttendanceRepo implements AttendanceStore {
     return count === 1;
   }
 
-  async insertMany(events: StoredEvent[]): Promise<void> {
-    if (events.length === 0) return;
-    // One INSERT ... ON CONFLICT DO NOTHING: all new rows land together, duplicates are skipped.
-    await this.db.attendanceEvent.createMany({ data: events, skipDuplicates: true });
+  async insertMany(events: StoredEvent[]): Promise<string[]> {
+    if (events.length === 0) return [];
+    // One INSERT ... ON CONFLICT DO NOTHING RETURNING: all new rows land together, duplicates are
+    // skipped, and only the rows this statement inserted come back.
+    const added = await this.db.attendanceEvent.createManyAndReturn({
+      data: events,
+      skipDuplicates: true,
+      select: { eventId: true },
+    });
+    return added.map((row) => row.eventId);
+  }
+
+  async eventsWithJti(jtis: string[]): Promise<JtiSighting[]> {
+    if (jtis.length === 0) return [];
+    return this.db.attendanceEvent.findMany({
+      where: { jti: { in: jtis } },
+      orderBy: [{ occurredAt: 'asc' }, { eventId: 'asc' }],
+      select: {
+        eventId: true,
+        employeeId: true,
+        gateId: true,
+        edgeId: true,
+        outcome: true,
+        occurredAt: true,
+        jti: true,
+      },
+    });
   }
 
   grantedEvents(from: Date, to: Date, employeeIds?: string[]): Promise<DailyInput[]> {

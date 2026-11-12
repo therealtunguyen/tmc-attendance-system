@@ -85,7 +85,15 @@ class InMemoryEvents implements AttendanceStore {
   }
 
   async insertMany(events: StoredEvent[]) {
-    for (const event of events) await this.insert(event);
+    const added: string[] = [];
+    for (const event of events) if (await this.insert(event)) added.push(event.eventId);
+    return added;
+  }
+
+  async eventsWithJti(jtis: string[]) {
+    return [...this.rows.values()]
+      .filter((e) => e.jti !== null && jtis.includes(e.jti))
+      .sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime());
   }
 
   async decide(eventId: string, outcome: ScanOutcome) {
@@ -395,6 +403,75 @@ describe('AttendanceService.ingest (ADR-9, FR-3.2)', () => {
   it('an empty batch stores nothing', async () => {
     expect(await attendance.ingest({ edgeId: 'edge-bd', events: [] })).toEqual({ accepted: [] });
     expect(store.rows.size).toBe(0);
+  });
+
+  describe('reconciliation of a push (#33)', () => {
+    /** A service whose reconciliation only records what it was given, and what was stored by then. */
+    const reconciling = () => {
+      const calls: { edgeId: string; stored: StoredEvent[]; rowsByThen: number }[] = [];
+      const service = new AttendanceService(
+        store,
+        new FakeDirectory({ 'binh-duong': ['emp-1'] }),
+        audit,
+        () => NOW,
+        {
+          reconcile: async (edgeId, stored) => {
+            calls.push({ edgeId, stored, rowsByThen: store.rows.size });
+          },
+        },
+      );
+      return { calls, service };
+    };
+
+    it('hands over the events the push added, as stored, after storing them', async () => {
+      const { calls, service } = reconciling();
+      await service.ingest({
+        edgeId: 'edge-bd',
+        events: [edgeEvent('x-1', { stale: true }), edgeEvent('x-2')],
+      });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.edgeId).toBe('edge-bd');
+      expect(calls[0]!.rowsByThen).toBe(2);
+      expect(calls[0]!.stored).toEqual([store.rows.get('x-1'), store.rows.get('x-2')]);
+      expect(calls[0]!.stored[0]).toMatchObject({ stale: true, jti: 'jti-x-1', edgeId: 'edge-bd' });
+    });
+
+    it('leaves out the events the server already had', async () => {
+      const { calls, service } = reconciling();
+      await service.ingest({ edgeId: 'edge-bd', events: [edgeEvent('x-1'), edgeEvent('x-2')] });
+      await service.ingest({
+        edgeId: 'edge-bd',
+        events: [edgeEvent('x-1'), edgeEvent('x-2'), edgeEvent('x-3')],
+      });
+      expect(calls.map((c) => c.stored.map((e) => e.eventId))).toEqual([['x-1', 'x-2'], ['x-3']]);
+    });
+
+    it('does not run when a push adds nothing, so a batch sent again cannot alert twice', async () => {
+      const { calls, service } = reconciling();
+      const batch = { edgeId: 'edge-bd', events: [edgeEvent('x-1', { stale: true })] };
+      await service.ingest(batch);
+      expect(await service.ingest(batch)).toEqual({ accepted: ['x-1'] });
+      expect(await service.ingest({ edgeId: 'edge-bd', events: [] })).toEqual({ accepted: [] });
+      expect(calls).toHaveLength(1);
+    });
+
+    it('counts a duplicate inside one batch once: the first, which is the one stored', async () => {
+      const { calls, service } = reconciling();
+      await service.ingest({
+        edgeId: 'edge-bd',
+        events: [edgeEvent('x-1'), edgeEvent('x-1', { outcome: 'DENIED' })],
+      });
+      expect(calls[0]!.stored).toEqual([store.rows.get('x-1')]);
+      expect(calls[0]!.stored[0]!.outcome).toBe('GRANTED');
+    });
+
+    it('is not asked about an event that record() wrote first: the stored row keeps no jti or stale', async () => {
+      const { calls, service } = reconciling();
+      await service.record({ ...scan, eventId: 'x-1' });
+      await service.ingest({ edgeId: 'edge-bd', events: [edgeEvent('x-1', { stale: true })] });
+      expect(calls).toEqual([]);
+      expect(store.rows.get('x-1')).toMatchObject({ jti: null, stale: false });
+    });
   });
 });
 

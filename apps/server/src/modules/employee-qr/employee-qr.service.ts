@@ -147,6 +147,12 @@ export interface EmployeeScopes {
   scopesOf(id: string): Promise<Scope[] | null>;
 }
 
+/** Whether a gate would turn one employee away now (FR-1.4, FR-1.5): no personal data (NFR-4). */
+export interface EmployeeAdmission {
+  /** Null = admit, like the edge snapshot. UNKNOWN when there is no such employee. */
+  denyOf(id: string): Promise<'UNKNOWN' | 'INACTIVE' | 'REVOKED' | null>;
+}
+
 /** Employees, QR issue/revoke/reissue, validation (FR-1.1 to FR-1.5). */
 export class EmployeeQrService
   implements
@@ -157,6 +163,7 @@ export class EmployeeQrService
     EmployeeDirectory,
     EmployeeRoster,
     EmployeeScopes,
+    EmployeeAdmission,
     EmployeeAdmin
 {
   private keyring?: QrKeyring;
@@ -331,6 +338,11 @@ export class EmployeeQrService
     const employee = await this.repo.find(id);
     if (!employee) return null;
     return employee.teamId ? [employee.factoryId, employee.teamId] : [employee.factoryId];
+  }
+
+  async denyOf(id: string): Promise<'UNKNOWN' | 'INACTIVE' | 'REVOKED' | null> {
+    const employee = await this.repo.find(id);
+    return employee ? admission(employee).deny : 'UNKNOWN';
   }
 
   private record(actorId: string, action: string, employeeId: string) {
