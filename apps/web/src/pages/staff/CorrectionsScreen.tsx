@@ -53,6 +53,10 @@ export function RecordsTable({
 /** The corrections of the open record: still loading, failed to load, or loaded. */
 export type HistoryState = 'loading' | 'failed' | CorrectionEntry[];
 
+/** HR corrects a day only with its history in view: the form is off until it has loaded. */
+export const canCorrect = (history: HistoryState): history is CorrectionEntry[] =>
+  Array.isArray(history);
+
 /**
  * Every change to one record, so the original values stay visible (FR-3.6). A failed load never
  * says "not corrected": the record may have corrections that could not be read.
@@ -63,7 +67,7 @@ export function CorrectionHistory({ entries }: { entries: HistoryState }) {
     return (
       <p>
         <strong>The correction history could not be loaded.</strong> Earlier corrections and
-        original values are not shown. Open the day again before correcting it.
+        original values are not shown, so this day cannot be corrected until it loads.
       </p>
     );
   }

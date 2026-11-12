@@ -168,11 +168,37 @@ describe('buildDailyRecords with HR corrections (FR-3.6)', () => {
     expect(buildDailyRecords([], [correction('LAST_OUT', '2026-11-07T10:00:00Z')])).toEqual([]);
   });
 
-  it('hours are never negative when a late scan passes a corrected value', () => {
+  it('a late scan after a corrected last out gives 0 hours and flags the day', () => {
     const [record] = buildDailyRecords(
       [granted('emp-1', '2026-11-07T11:00:00Z')],
       [correction('LAST_OUT', '2026-11-07T10:00:00Z')],
     );
-    expect(record?.hours).toBe(0);
+    expect(record).toMatchObject({ hours: 0, missingPunch: true });
+  });
+
+  it('a late scan before a corrected first in gives 0 hours and flags the day', () => {
+    // One scan at 12:00, first in corrected to 15:00; then two earlier scans arrive from an edge.
+    const [record] = buildDailyRecords(
+      [
+        granted('emp-1', '2026-11-07T05:00:00Z'),
+        granted('emp-1', '2026-11-07T01:00:00Z'),
+        granted('emp-1', '2026-11-07T03:00:00Z'),
+      ],
+      [correction('FIRST_IN', '2026-11-07T08:00:00Z')],
+    );
+    expect(record).toMatchObject({
+      firstIn: new Date('2026-11-07T08:00:00Z'),
+      lastOut: new Date('2026-11-07T05:00:00Z'),
+      hours: 0,
+      missingPunch: true,
+    });
+  });
+
+  it('two scans at the same instant are 0 hours, not a missing punch', () => {
+    const [record] = buildDailyRecords([
+      granted('emp-1', '2026-11-07T01:00:00Z'),
+      granted('emp-1', '2026-11-07T01:00:00Z'),
+    ]);
+    expect(record).toMatchObject({ hours: 0, missingPunch: false });
   });
 });

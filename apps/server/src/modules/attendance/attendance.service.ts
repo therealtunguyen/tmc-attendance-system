@@ -4,8 +4,9 @@ import {
   type PushEventsRequest,
   type PushEventsResponse,
 } from '../../shared/contracts/edge.js';
+import type { Transaction } from '../../shared/transaction.js';
 import type { DateRange, Scope } from '../../shared/types.js';
-import type { EmployeeDirectory } from '../employee-qr/index.js';
+import type { EmployeeDirectory, EmployeeScopes } from '../employee-qr/index.js';
 import type { AuditLog } from '../iam/index.js';
 import {
   buildDailyRecords,
@@ -57,6 +58,9 @@ export type AccessOutcome = StoredEvent['outcome']; // 'GRANTED' | 'DENIED' | 'P
 
 /** FR-4.4: one page of the access log holds at most this many rows; callers page by time. */
 export const ACCESS_LOG_MAX_LIMIT = 500;
+
+/** HR opens at most this many days of one employee's records at a time: a quarter. */
+export const MAX_RECORDS_RANGE_DAYS = 92;
 
 /** What the security access log asks for (FR-4.4). Filters, order and limit run in the database. */
 export interface AccessLogQuery {
@@ -144,10 +148,19 @@ export interface AttendanceStore {
   corrections(from: Date, to: Date, employeeIds?: string[]): Promise<Correction[]>;
   /** Every correction of one employee, oldest first. */
   correctionsOf(employeeId: string): Promise<Correction[]>;
-  /** Returns the ID of the new row. */
-  insertCorrection(correction: Correction): Promise<string>;
-  /** Only to undo a correction whose audit entry could not be written. */
-  deleteCorrection(id: string): Promise<void>;
+  /**
+   * Runs `work` in one transaction that holds the lock of one daily record: two calls for the
+   * same employee and day never overlap, so each one validates against what the other stored.
+   * Other records do not wait. `work` gets a store and a transaction bound to that one
+   * connection and must use only them, so a correction never needs a second connection. If
+   * `work` throws, everything it wrote is rolled back.
+   */
+  withRecordLock<T>(
+    employeeId: string,
+    day: Date,
+    work: (store: LockedRecordStore, tx: Transaction) => Promise<T>,
+  ): Promise<T>;
+  insertCorrection(correction: Correction): Promise<void>;
   /** Sets the outcome only while it is PENDING or already equal; true if the row now has it. */
   decide(eventId: string, outcome: ScanOutcome): Promise<boolean>;
   /** Null when there is no such event. */
@@ -155,6 +168,12 @@ export interface AttendanceStore {
   /** Every scan matching the query, denied ones included, newest first by occurredAt then eventId ascending; rows as stored. */
   accessLog(query: AccessLogQuery): Promise<StoredEvent[]>;
 }
+
+/** What a correction reads and writes while it holds the lock of its record. */
+export type LockedRecordStore = Pick<
+  AttendanceStore,
+  'grantedEvents' | 'corrections' | 'insertCorrection'
+>;
 
 export interface AttendanceRecorder {
   /**
@@ -188,7 +207,7 @@ export interface AttendanceQuery {
 export class AttendanceService implements AttendanceRecorder, EdgeIngest, AttendanceQuery {
   constructor(
     private repo: AttendanceStore,
-    private directory: EmployeeDirectory,
+    private directory: EmployeeDirectory & EmployeeScopes,
     private audit: AuditLog,
     private now: () => Date = () => new Date(),
   ) {}
@@ -305,30 +324,41 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
   /**
    * HR changes one value of a daily record, with a reason (FR-3.6, UC-8). The scans are not touched:
    * the correction is stored beside them, with the value it replaced. Returns the recomputed record.
-   * The correction is stored first and then audited. The audit log belongs to the IAM module and
-   * cannot share a transaction with this write, so if the audit append fails the correction is
-   * deleted again and the error is rethrown: no unaudited change, and no audit entry for a change
-   * that never happened.
+   * Read, validate, store and audit all run in one transaction that holds the lock of that one
+   * record (ADR-2), on one connection. So two corrections of the same day cannot both pass against
+   * the old state, and the correction and its audit entry commit together or not at all. The audit
+   * entry is still written by IAM, which only borrows the transaction.
    */
   async correct(
     actorId: string,
     recordId: string,
-    { field, value, reason }: CorrectionRequest,
+    request: CorrectionRequest,
   ): Promise<DailyRecord> {
     const key = parseRecordId(recordId);
     if (!key) throw new RecordNotFoundError(recordId);
-    const { employeeId, day } = key;
-    const trimmed = reason.trim();
-    if (!trimmed) throw new InvalidCorrectionError('reason is required');
-    if (trimmed.length > MAX_REASON_LENGTH) {
+    const reason = request.reason.trim();
+    if (!reason) throw new InvalidCorrectionError('reason is required');
+    if (reason.length > MAX_REASON_LENGTH) {
       throw new InvalidCorrectionError(`reason must be at most ${MAX_REASON_LENGTH} characters`);
     }
+    return this.repo.withRecordLock(key.employeeId, key.day, (store, tx) =>
+      this.correctLocked(store, tx, actorId, recordId, key, { ...request, reason }),
+    );
+  }
 
+  /** The body of correct(): runs in the transaction that holds the lock, the reason trimmed. */
+  private async correctLocked(
+    store: LockedRecordStore,
+    tx: Transaction,
+    actorId: string,
+    recordId: string,
+    { employeeId, day }: Pick<DailyRecord, 'employeeId' | 'day'>,
+    { field, value, reason: trimmed }: CorrectionRequest,
+  ): Promise<DailyRecord> {
     const to = nextDay(day);
-    const [events, corrections] = await Promise.all([
-      this.repo.grantedEvents(day, to, [employeeId]),
-      this.repo.corrections(day, to, [employeeId]),
-    ]);
+    // One after the other: both run on the one connection of the transaction.
+    const events = await store.grantedEvents(day, to, [employeeId]);
+    const corrections = await store.corrections(day, to, [employeeId]);
     const [before] = buildDailyRecords(events, corrections);
     if (!before) throw new RecordNotFoundError(recordId);
     if (localDayStart(value).getTime() !== day.getTime()) {
@@ -356,33 +386,30 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
       createdAt: now,
     };
     const [after] = buildDailyRecords(events, [...corrections, correction]);
-    const id = await this.repo.insertCorrection(correction);
-    try {
-      await this.audit.append({
+    await store.insertCorrection(correction);
+    // A failure here rolls the correction back with the transaction.
+    await this.audit.append(
+      {
         actorId,
         action: 'ATTENDANCE_CORRECT',
         target: `attendance:${recordId}`,
         at: correction.createdAt,
         before,
         after: { ...after, field, reason: trimmed },
-      });
-    } catch (error) {
-      // The caller must see the audit failure, so a failed undo is only logged, never rethrown.
-      await this.repo.deleteCorrection(id).catch((undoError: unknown) => {
-        console.error(
-          `Correction ${id} is stored but not audited, and could not be removed`,
-          undoError,
-        );
-      });
-      throw error;
-    }
+      },
+      tx,
+    );
     return after as DailyRecord;
   }
 
-  /** Whether the employee belongs to one of these factories or teams (BR-15). */
+  /**
+   * Whether the employee belongs to one of these factories or teams (BR-15). One lookup of the
+   * employee's own factory and team, not a listing of every scope.
+   */
   async inScopes(employeeId: string, scopes: Scope[]): Promise<boolean> {
-    const lists = await Promise.all(scopes.map((scope) => this.directory.list(scope)));
-    return lists.some((list) => list.some((e) => e.id === employeeId));
+    if (scopes.length === 0) return false;
+    const own = await this.directory.scopesOf(employeeId);
+    return own !== null && own.some((scope) => scopes.includes(scope));
   }
 
   /** The one path to a daily record, so reports, exports and the portal all see corrections. */

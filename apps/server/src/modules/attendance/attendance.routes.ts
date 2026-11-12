@@ -10,9 +10,12 @@ import { isRestricted, requirePermission, type UserRef } from '../iam/index.js';
 import { parseRecordId } from './attendance.daily.js';
 import {
   InvalidCorrectionError,
+  MAX_RECORDS_RANGE_DAYS,
   RecordNotFoundError,
   type AttendanceService,
 } from './attendance.service.js';
+
+const DAY_MS = 86_400_000;
 
 const isText = (value: unknown): value is string =>
   typeof value === 'string' && value.trim() !== '';
@@ -113,6 +116,11 @@ export const attendanceRoutes = (attendance: AttendanceService, gates?: EdgeGate
       }
       if (Date.parse(from) > Date.parse(to)) {
         return void res.status(400).json({ error: 'from must not be after to' });
+      }
+      if (Date.parse(to) - Date.parse(from) > MAX_RECORDS_RANGE_DAYS * DAY_MS) {
+        return void res
+          .status(400)
+          .json({ error: `the range must be at most ${MAX_RECORDS_RANGE_DAYS} days` });
       }
       // Out of scope looks the same as no records, so existence does not leak.
       const records = (await reachable(attendance, res, employeeId))

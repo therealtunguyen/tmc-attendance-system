@@ -13,6 +13,7 @@ import {
   type EmployeeOption,
 } from './corrections';
 import {
+  canCorrect,
   CorrectionHistory,
   FIELD_LABEL,
   RecordsTable,
@@ -82,7 +83,7 @@ function Panel({ session, onEnd }: { session: Session; onEnd: () => void }) {
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
-    if (!open) return;
+    if (!open || !canCorrect(entries)) return;
     setMessage('');
     const saved = unwrap(
       await submitCorrection(session.token, open.recordId, target, time, reason),
@@ -154,42 +155,53 @@ function Panel({ session, onEnd }: { session: Session; onEnd: () => void }) {
         <section>
           <h3>{formatDay(open.day)}</h3>
           <CorrectionHistory entries={entries} />
+          {entries === 'failed' && (
+            <button type="button" onClick={() => void loadHistory(open)}>
+              Load the history again
+            </button>
+          )}
           <form onSubmit={(event) => void save(event)} style={{ maxWidth: 480, marginTop: 12 }}>
-            <label>
-              Value to change
-              <select
-                style={field}
-                value={target}
-                onChange={(event) => setTarget(event.target.value as CorrectionField)}
-              >
-                {(Object.keys(FIELD_LABEL) as CorrectionField[]).map((key) => (
-                  <option key={key} value={key}>
-                    {FIELD_LABEL[key]}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              New time (Vietnam)
-              <input
-                style={field}
-                type="time"
-                value={time}
-                onChange={(event) => setTime(event.target.value)}
-                required
-              />
-            </label>
-            <label>
-              Reason
-              <textarea
-                style={field}
-                value={reason}
-                onChange={(event) => setReason(event.target.value)}
-                maxLength={500}
-                required
-              />
-            </label>
-            <button type="submit">Save correction</button>
+            {/* Off until the history is in view, so HR never corrects a day blind. */}
+            <fieldset
+              disabled={!canCorrect(entries)}
+              style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
+            >
+              <label>
+                Value to change
+                <select
+                  style={field}
+                  value={target}
+                  onChange={(event) => setTarget(event.target.value as CorrectionField)}
+                >
+                  {(Object.keys(FIELD_LABEL) as CorrectionField[]).map((key) => (
+                    <option key={key} value={key}>
+                      {FIELD_LABEL[key]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                New time (Vietnam)
+                <input
+                  style={field}
+                  type="time"
+                  value={time}
+                  onChange={(event) => setTime(event.target.value)}
+                  required
+                />
+              </label>
+              <label>
+                Reason
+                <textarea
+                  style={field}
+                  value={reason}
+                  onChange={(event) => setReason(event.target.value)}
+                  maxLength={500}
+                  required
+                />
+              </label>
+              <button type="submit">Save correction</button>
+            </fieldset>
           </form>
         </section>
       )}

@@ -1,13 +1,36 @@
+import { createHash } from 'node:crypto';
 import type { EdgeDenyReason } from '../../shared/contracts/edge.js';
 import type { PrismaClient } from '../../shared/prisma.js';
+import { asTransaction, type Transaction } from '../../shared/transaction.js';
 import type { DailyInput } from './attendance.daily.js';
 import type {
   AccessLogQuery,
   AttendanceStore,
   Correction,
+  LockedRecordStore,
   ScanOutcome,
   StoredEvent,
 } from './attendance.service.js';
+
+/**
+ * Oldest first. createdAt comes from the service clock and can tie, so seq (assigned by the
+ * database on insert) decides: the order is always the order the corrections were stored in.
+ */
+const CORRECTION_ORDER = [{ createdAt: 'asc' as const }, { seq: 'asc' as const }];
+const CORRECTION_OMIT = { id: true, seq: true } as const;
+
+/** The longest one correction may hold its record: the reads, one insert and one audit append. */
+const RECORD_LOCK_TIMEOUT_MS = 10_000;
+
+/**
+ * The advisory lock key of one daily record. Two records with the same hash only wait for each
+ * other; they never fail.
+ */
+export const recordLockKey = (employeeId: string, day: Date): bigint =>
+  createHash('sha256')
+    .update(`attendance-record:${employeeId}:${day.toISOString()}`)
+    .digest()
+    .readBigInt64BE(0);
 
 /** Owns: AttendanceEvent, Correction. Daily records are computed on read, so they have no table. */
 export class AttendanceRepo implements AttendanceStore {
@@ -52,26 +75,39 @@ export class AttendanceRepo implements AttendanceStore {
         day: { gte: from, lt: to },
         ...(employeeIds ? { employeeId: { in: employeeIds } } : {}),
       },
-      orderBy: { createdAt: 'asc' },
-      omit: { id: true },
+      orderBy: CORRECTION_ORDER,
+      omit: CORRECTION_OMIT,
     });
   }
 
   correctionsOf(employeeId: string): Promise<Correction[]> {
     return this.db.correction.findMany({
       where: { employeeId },
-      orderBy: { createdAt: 'asc' },
-      omit: { id: true },
+      orderBy: CORRECTION_ORDER,
+      omit: CORRECTION_OMIT,
     });
   }
 
-  async insertCorrection(correction: Correction): Promise<string> {
-    const { id } = await this.db.correction.create({ data: correction, select: { id: true } });
-    return id;
+  withRecordLock<T>(
+    employeeId: string,
+    day: Date,
+    work: (store: LockedRecordStore, tx: Transaction) => Promise<T>,
+  ): Promise<T> {
+    return this.db.$transaction(
+      async (tx) => {
+        // Held until this transaction ends. Everything `work` does runs on this same connection,
+        // so a correction never waits for a second one from the pool.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(${recordLockKey(employeeId, day)})`;
+        // The same queries as this repo, sent through the transaction. Only the read and write
+        // methods are used on it, never $transaction.
+        return work(new AttendanceRepo(tx as unknown as PrismaClient), asTransaction(tx));
+      },
+      { maxWait: RECORD_LOCK_TIMEOUT_MS, timeout: RECORD_LOCK_TIMEOUT_MS },
+    );
   }
 
-  async deleteCorrection(id: string): Promise<void> {
-    await this.db.correction.deleteMany({ where: { id } });
+  async insertCorrection(correction: Correction): Promise<void> {
+    await this.db.correction.create({ data: correction, select: { id: true } });
   }
 
   async decide(eventId: string, outcome: ScanOutcome): Promise<boolean> {

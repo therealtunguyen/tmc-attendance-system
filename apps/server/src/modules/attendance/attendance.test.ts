@@ -1,10 +1,11 @@
 import { Router } from 'express';
 import request from 'supertest';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../app.js';
 import { MAX_EDGE_BATCH, type EdgeEvent } from '../../shared/contracts/edge.js';
 import type { Scope } from '../../shared/types.js';
-import type { EmployeeDirectory } from '../employee-qr/index.js';
+import type { EmployeeDirectory, EmployeeScopes } from '../employee-qr/index.js';
+import type { Transaction } from '../../shared/transaction.js';
 import type { AuditEntry, AuditLog, UserRef } from '../iam/index.js';
 import { attendanceRoutes } from './attendance.routes.js';
 import {
@@ -17,6 +18,7 @@ import {
   type AccessLogQuery,
   type AttendanceStore,
   type Correction,
+  type LockedRecordStore,
   type ScanEvent,
   type ScanOutcome,
   type StoredEvent,
@@ -37,20 +39,43 @@ class InMemoryEvents implements AttendanceStore {
     return this.correctionRows.filter((c) => c.employeeId === employeeId);
   }
 
-  correctionIds: string[] = [];
+  private locks = new Map<string, Promise<void>>();
+  /** Each transaction handed to a holder of the lock, in order. */
+  transactions: Transaction[] = [];
 
-  async insertCorrection(correction: Correction) {
-    const id = `c-${this.correctionIds.length + 1}`;
-    this.correctionRows.push(correction);
-    this.correctionIds.push(id);
-    return id;
+  /**
+   * One holder per record at a time, in the order they asked; other records do not wait. Like the
+   * repo's transaction, the corrections a failed holder stored are rolled back.
+   */
+  async withRecordLock<T>(
+    employeeId: string,
+    day: Date,
+    work: (store: LockedRecordStore, tx: Transaction) => Promise<T>,
+  ) {
+    const key = `${employeeId}:${day.getTime()}`;
+    const run = (this.locks.get(key) ?? Promise.resolve()).then(async () => {
+      const tx = { id: this.transactions.length + 1 } as unknown as Transaction;
+      this.transactions.push(tx);
+      const saved = [...this.correctionRows];
+      try {
+        return await work(this, tx);
+      } catch (error) {
+        this.correctionRows = saved;
+        throw error;
+      }
+    });
+    this.locks.set(
+      key,
+      run.then(
+        () => {},
+        () => {},
+      ),
+    );
+    return run;
   }
 
-  async deleteCorrection(id: string) {
-    const index = this.correctionIds.indexOf(id);
-    if (index === -1) return;
-    this.correctionRows.splice(index, 1);
-    this.correctionIds.splice(index, 1);
+  async insertCorrection(correction: Correction) {
+    this.correctionRows.push(correction);
   }
 
   async insert(event: StoredEvent) {
@@ -114,9 +139,12 @@ class InMemoryEvents implements AttendanceStore {
 
 class RecordingAudit implements AuditLog {
   entries: AuditEntry[] = [];
+  /** The transaction each entry was written in; undefined when it was committed on its own. */
+  transactions: (Transaction | undefined)[] = [];
 
-  async append(entry: AuditEntry) {
+  async append(entry: AuditEntry, tx?: Transaction) {
     this.entries.push(entry);
+    this.transactions.push(tx);
   }
 
   async search() {
@@ -124,15 +152,27 @@ class RecordingAudit implements AuditLog {
   }
 }
 
-/** Stands in for EQR's EmployeeDirectory: scope is a factory ID. */
-class FakeDirectory implements EmployeeDirectory {
+/** Stands in for EQR's EmployeeDirectory and EmployeeScopes: a scope is a factory or team ID. */
+class FakeDirectory implements EmployeeDirectory, EmployeeScopes {
+  listCalls = 0;
+  scopesOfCalls = 0;
+
   constructor(private byFactory: Record<string, string[]>) {}
+
+  async scopesOf(id: string) {
+    this.scopesOfCalls++;
+    const scopes = Object.keys(this.byFactory).filter((scope) =>
+      this.byFactory[scope]!.includes(id),
+    );
+    return scopes.length > 0 ? scopes : null;
+  }
 
   async find(id: string) {
     return { id, firstName: id, lastName: 'X', active: true };
   }
 
   async list(scope: Scope) {
+    this.listCalls++;
     return (this.byFactory[scope] ?? []).map((id) => ({
       id,
       firstName: id,
@@ -948,7 +988,69 @@ describe('HR corrections (FR-3.6, UC-8)', () => {
       expect(seen).toEqual([1]);
     });
 
-    it('removes the correction again when the audit entry cannot be written', async () => {
+    it('two corrections of one day sent together cannot leave first in after last out', async () => {
+      // Each is valid alone against the single 07:58 scan; together they are not.
+      const results = await Promise.allSettled([
+        attendance.correct('hr-1', recordId, {
+          field: 'FIRST_IN',
+          value: at('18:00'),
+          reason: 'Late shift',
+        }),
+        attendance.correct('hr-2', recordId, {
+          field: 'LAST_OUT',
+          value: at('17:00'),
+          reason: 'Forgot to scan out',
+        }),
+      ]);
+      expect(results.map((r) => r.status).sort()).toEqual(['fulfilled', 'rejected']);
+      const refused = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
+      expect(refused.reason).toBeInstanceOf(InvalidCorrectionError);
+      expect((refused.reason as Error).message).toBe('first in must be before last out');
+      expect(store.correctionRows).toHaveLength(1);
+      expect(audit.entries).toHaveLength(1);
+      const [day] = await attendance.employeeRecords('emp-1', {
+        from: at('00:00'),
+        to: at('23:00'),
+      });
+      expect(day).toMatchObject({ firstIn: at('18:00'), lastOut: null, missingPunch: true });
+    });
+
+    it('the second of two corrections sent together sees what the first stored', async () => {
+      const [first, second] = await Promise.all([
+        attendance.correct('hr-1', recordId, {
+          field: 'LAST_OUT',
+          value: at('17:00'),
+          reason: 'First',
+        }),
+        attendance.correct('hr-2', recordId, {
+          field: 'LAST_OUT',
+          value: at('18:00'),
+          reason: 'Second',
+        }),
+      ]);
+      expect(first.lastOut).toEqual(at('17:00'));
+      expect(second.lastOut).toEqual(at('18:00'));
+      expect(store.correctionRows.map((c) => c.originalValue)).toEqual([null, at('17:00')]);
+    });
+
+    it('a refused correction releases the record for the next one', async () => {
+      await expect(
+        attendance.correct('hr-1', recordId, {
+          field: 'LAST_OUT',
+          value: at('07:00'),
+          reason: 'Typo',
+        }),
+      ).rejects.toThrow(InvalidCorrectionError);
+      await expect(
+        attendance.correct('hr-1', recordId, {
+          field: 'LAST_OUT',
+          value: at('17:00'),
+          reason: 'Fixed',
+        }),
+      ).resolves.toMatchObject({ lastOut: at('17:00') });
+    });
+
+    it('rolls the correction back when the audit entry cannot be written', async () => {
       await attendance.correct('hr-1', recordId, {
         field: 'FIRST_IN',
         value: at('07:30'),
@@ -980,37 +1082,44 @@ describe('HR corrections (FR-3.6, UC-8)', () => {
       expect(day).toMatchObject({ lastOut: null, missingPunch: true });
     });
 
-    it('reports the audit failure, not the undo failure, when both fail', async () => {
-      const log = vi.spyOn(console, 'error').mockImplementation(() => {});
-      store.deleteCorrection = async () => {
-        throw new Error('database down');
-      };
-      const service = new AttendanceService(
-        store,
-        new FakeDirectory({ 'binh-duong': ['emp-1'] }),
-        {
-          append: async () => {
-            throw new Error('audit log down');
-          },
-          search: async () => [],
-        },
-        () => NOW,
-      );
-      try {
-        await expect(
-          service.correct('hr-1', recordId, {
-            field: 'LAST_OUT',
-            value: at('17:00'),
-            reason: 'Forgot to scan out',
-          }),
-        ).rejects.toThrow('audit log down');
-        expect(log).toHaveBeenCalledWith(
-          expect.stringContaining('not audited'),
-          new Error('database down'),
-        );
-      } finally {
-        log.mockRestore();
+    it('writes the audit entry in the transaction that holds the record lock (ADR-2)', async () => {
+      await attendance.correct('hr-1', recordId, {
+        field: 'LAST_OUT',
+        value: at('17:00'),
+        reason: 'Forgot to scan out',
+      });
+      await attendance.correct('hr-1', recordId, {
+        field: 'LAST_OUT',
+        value: at('17:30'),
+        reason: 'Left later',
+      });
+      expect(store.transactions).toHaveLength(2);
+      expect(audit.transactions).toEqual(store.transactions);
+      expect(audit.transactions[0]).not.toBe(audit.transactions[1]);
+    });
+
+    it('reads and writes the record only through the store it is given under the lock', async () => {
+      const outside: string[] = [];
+      for (const name of ['grantedEvents', 'corrections', 'insertCorrection'] as const) {
+        const real = store[name].bind(store) as (...args: unknown[]) => Promise<unknown>;
+        (store as unknown as Record<string, unknown>)[name] = (...args: unknown[]) => {
+          outside.push(name);
+          return real(...args);
+        };
       }
+      const locked = {
+        grantedEvents: InMemoryEvents.prototype.grantedEvents.bind(store),
+        corrections: InMemoryEvents.prototype.corrections.bind(store),
+        insertCorrection: InMemoryEvents.prototype.insertCorrection.bind(store),
+      };
+      store.withRecordLock = async (_employeeId, _day, work) => work(locked, {} as Transaction);
+      await attendance.correct('hr-1', recordId, {
+        field: 'LAST_OUT',
+        value: at('17:00'),
+        reason: 'Forgot to scan out',
+      });
+      expect(store.correctionRows).toHaveLength(1);
+      expect(outside).toEqual([]);
     });
 
     it.each([
@@ -1147,10 +1256,22 @@ describe('HR corrections (FR-3.6, UC-8)', () => {
         'employeeId=emp-1&from=2026-11-08T00:00:00Z&to=2026-11-07T00:00:00Z',
         'from must not be after to',
       ],
+      [
+        'a range of 93 days',
+        'employeeId=emp-1&from=2026-08-01T00:00:00Z&to=2026-11-02T00:00:00Z',
+        'the range must be at most 92 days',
+      ],
     ])('GET records answers 400 for %s', async (_name, query, error) => {
       const res = await request(app(hr)).get(`${records}?${query}`);
       expect(res.status).toBe(400);
       expect(res.body).toEqual({ error });
+    });
+
+    it('GET records accepts a range of exactly 92 days', async () => {
+      const res = await request(app(hr)).get(
+        `${records}?employeeId=emp-1&from=2026-08-01T00:00:00Z&to=2026-11-01T00:00:00Z`,
+      );
+      expect(res.status).toBe(200);
     });
 
     it('GET corrections shows the original value and the reason', async () => {
@@ -1283,5 +1404,35 @@ describe('AttendanceService.accessLog (FR-4.4)', () => {
     expect(
       await attendance.accessLog({ range: { from: day.to, to: day.from }, limit: 10 }),
     ).toEqual([]);
+  });
+});
+
+describe('AttendanceService.inScopes (BR-15)', () => {
+  const setup = () => {
+    const directory = new FakeDirectory({
+      'binh-duong': ['emp-1', 'emp-2'],
+      'bd-line-1': ['emp-1'],
+      'long-an': ['emp-3'],
+    });
+    return { directory, service: new AttendanceService(store, directory, audit) };
+  };
+
+  it.each([
+    ['their factory', 'emp-1', ['binh-duong'], true],
+    ['their team', 'emp-1', ['bd-line-1'], true],
+    ['one of several scopes', 'emp-1', ['long-an', 'bd-line-1'], true],
+    ['another factory', 'emp-1', ['long-an'], false],
+    ['another team of their factory', 'emp-2', ['bd-line-1'], false],
+    ['an employee that does not exist', 'emp-9', ['binh-duong'], false],
+    ['no scopes at all', 'emp-1', [], false],
+  ])('%s -> %s', async (_name, employeeId, scopes, expected) => {
+    expect(await setup().service.inScopes(employeeId, scopes)).toBe(expected);
+  });
+
+  it('looks the employee up once and lists no scope', async () => {
+    const { directory, service } = setup();
+    await service.inScopes('emp-1', ['long-an', 'binh-duong', 'bd-line-1']);
+    expect(directory.scopesOfCalls).toBe(1);
+    expect(directory.listCalls).toBe(0);
   });
 });
