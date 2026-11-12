@@ -51,14 +51,15 @@ export const positiveInt = (name: string, fallback: number): number => {
 export const parseEdgeTokens = (value: string | undefined): Record<string, string> => {
   const tokens: Record<string, string> = {};
   const seenSecrets = new Set<string>();
-  for (const raw of (value ?? '').split(',')) {
+  for (const [index, raw] of (value ?? '').split(',').entries()) {
     const item = raw.trim();
     if (item === '') continue;
     const sep = item.indexOf(':');
     const edgeId = sep > 0 ? item.slice(0, sep).trim() : '';
     const secret = sep > 0 ? item.slice(sep + 1).trim() : '';
     if (!edgeId || !secret) {
-      throw new Error(`EDGE_TOKENS entries must be "edgeId:token", got "${item}"`);
+      // Never log `item` — a secret pasted without `edgeId:` would leak into boot logs.
+      throw new Error(`EDGE_TOKENS[${index}] must be "edgeId:token"`);
     }
     if (Object.hasOwn(tokens, edgeId)) {
       throw new Error(`EDGE_TOKENS has duplicate edgeId "${edgeId}"`);

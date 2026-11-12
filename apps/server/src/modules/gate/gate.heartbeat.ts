@@ -24,19 +24,15 @@ export const connectionStatus = (at: Date | null, now: Date, timeout: number) =>
 
 export const parseHeartbeat = (
   body: unknown,
-  authenticatedEdgeId?: string,
+  authenticatedEdgeId: string,
 ): EdgeHeartbeat | null => {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return null;
-  const { edgeId: bodyEdgeId, sentAt, snapshotAt, outboxSize } = body as Record<string, unknown>;
+  const { sentAt, snapshotAt, outboxSize } = body as Record<string, unknown>;
   const timestamp = (value: unknown): value is string =>
     typeof value === 'string' &&
     /T.*(Z|[+-]\d{2}:\d{2})$/.test(value) &&
     Number.isFinite(Date.parse(value));
-  const resolvedEdgeId =
-    authenticatedEdgeId ??
-    (typeof bodyEdgeId === 'string' && bodyEdgeId.trim() && bodyEdgeId === bodyEdgeId.trim()
-      ? bodyEdgeId
-      : null);
+  const resolvedEdgeId = authenticatedEdgeId.trim();
   if (
     !resolvedEdgeId ||
     !timestamp(sentAt) ||

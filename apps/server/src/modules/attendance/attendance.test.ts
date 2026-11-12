@@ -441,6 +441,31 @@ describe('POST /api/edge/events', () => {
     expect(res.body).toEqual({ error });
     expect(store.rows.size).toBe(0);
   });
+
+  it('rejects events for gates the authenticated edge does not own (400) and stores nothing', async () => {
+    const gateDirectory = {
+      listGates: async ({ edgeId }: { edgeId: string; active: boolean }) =>
+        edgeId === 'edge-la' ? [{ id: 'la-gate-1' }] : [{ id: 'bd-gate-1' }],
+    };
+    const scopedApp = (edgeId: string) =>
+      createApp([edgeAs(edgeId), attendanceRoutes(attendance, gateDirectory)]);
+
+    // edge-la pushing a Binh Duong gate or an unknown gate -> 400, nothing stored.
+    for (const gateId of ['bd-gate-1', 'no-such-gate']) {
+      const res = await request(scopedApp('edge-la'))
+        .post('/api/edge/events')
+        .send({ edgeId: 'edge-bd', events: [edgeEvent('x-1', { gateId })] });
+      expect(res.status).toBe(400);
+      expect(store.rows.size).toBe(0);
+    }
+
+    // edge-la pushing its own active gate -> 200 and stored under edge-la.
+    const ok = await request(scopedApp('edge-la'))
+      .post('/api/edge/events')
+      .send({ events: [edgeEvent('x-2', { gateId: 'la-gate-1' })] });
+    expect(ok.status).toBe(200);
+    expect(store.rows.get('x-2')).toMatchObject({ edgeId: 'edge-la', gateId: 'la-gate-1' });
+  });
 });
 
 describe('AttendanceService.dailyRecords (FR-3.4, FR-3.5)', () => {

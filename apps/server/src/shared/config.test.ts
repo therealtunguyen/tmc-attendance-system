@@ -76,9 +76,13 @@ describe('parseEdgeTokens', () => {
   });
 
   it.each(['no-colon', ':secret', 'edge-bd:', 'edge-bd:  '])(
-    'rejects malformed entry %j',
+    'rejects malformed entry %j without leaking its secret value',
     (value) => {
-      expect(() => parseEdgeTokens(value)).toThrow(/EDGE_TOKENS/);
+      expect(() => parseEdgeTokens(value)).toThrow(/EDGE_TOKENS\[0\] must be "edgeId:token"/);
+      expect(() => parseEdgeTokens(`edge-ok:tok,${value}`)).toThrow(
+        /EDGE_TOKENS\[1\] must be "edgeId:token"/,
+      );
+      expect(() => parseEdgeTokens(value)).not.toThrow(/secret|no-colon/);
     },
   );
 

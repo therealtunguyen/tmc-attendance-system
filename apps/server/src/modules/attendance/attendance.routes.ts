@@ -75,7 +75,12 @@ const parseBatch = (req: Request, edgeId: string): PushEventsRequest | string =>
   return { edgeId, events: body.events as EdgeEvent[] };
 };
 
-export const attendanceRoutes = (attendance: AttendanceService) =>
+/** Gate ownership lookup for edge event ingest (#69). Implemented by GateService. */
+export interface EdgeGateDirectory {
+  listGates(filters: { edgeId: string; active: boolean }): Promise<{ id: string }[]>;
+}
+
+export const attendanceRoutes = (attendance: AttendanceService, gates?: EdgeGateDirectory) =>
   Router()
     // Own history only (FR-1.6): the employee comes from the verified session, never a request field.
     .get('/me/attendance', requirePermission('self:read'), async (_req, res) => {
@@ -94,5 +99,14 @@ export const attendanceRoutes = (attendance: AttendanceService) =>
       if (!edgeId) return void res.status(401).json({ error: 'Edge authentication required' });
       const batch = parseBatch(req, edgeId);
       if (typeof batch === 'string') return void res.status(400).json({ error: batch });
+      if (gates && batch.events.length > 0) {
+        const allowed = new Set((await gates.listGates({ edgeId, active: true })).map((g) => g.id));
+        const bad = batch.events.findIndex((e) => !allowed.has(e.gateId));
+        if (bad !== -1) {
+          return void res.status(400).json({
+            error: `events[${bad}].gateId does not belong to an active gate on this edge`,
+          });
+        }
+      }
       res.json(await attendance.ingest(batch));
     });

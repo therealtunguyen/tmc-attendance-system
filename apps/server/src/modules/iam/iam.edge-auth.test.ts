@@ -1,8 +1,10 @@
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createApp } from '../../app.js';
 import { Router } from 'express';
 import { authenticateEdge } from './iam.edge-auth.js';
+import { authenticate } from './iam.routes.js';
+import type { Authenticator } from './iam.service.js';
 
 describe('authenticateEdge (#69)', () => {
   const probe = () =>
@@ -31,5 +33,17 @@ describe('authenticateEdge (#69)', () => {
   it('fails closed with 401 when EDGE_TOKENS is empty', async () => {
     const res = await request(app({})).get('/api/edge/probe').set('Authorization', 'Bearer sec-bd');
     expect(res.status).toBe(401);
+  });
+
+  it('skips user session lookup in authenticate() for /api/edge/* routes', async () => {
+    const authenticateFn = vi.fn(async () => null);
+    const authSpy = { authenticate: authenticateFn } as unknown as Authenticator;
+    const wired = createApp([probe()], {
+      before: [authenticate(authSpy)],
+      edge: authenticateEdge({ 'edge-bd': 'sec-bd' }),
+    });
+    const res = await request(wired).get('/api/edge/probe').set('Authorization', 'Bearer sec-bd');
+    expect(res.status).toBe(200);
+    expect(authenticateFn).not.toHaveBeenCalled();
   });
 });
