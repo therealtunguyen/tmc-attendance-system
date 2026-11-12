@@ -444,7 +444,7 @@ describe('POST /api/edge/events', () => {
 
   it('rejects events for gates the authenticated edge does not own (400) and stores nothing', async () => {
     const gateDirectory = {
-      listGates: async ({ edgeId }: { edgeId: string; active: boolean }) =>
+      listGates: async ({ edgeId }: { edgeId: string }) =>
         edgeId === 'edge-la' ? [{ id: 'la-gate-1' }] : [{ id: 'bd-gate-1' }],
     };
     const scopedApp = (edgeId: string) =>
@@ -465,6 +465,21 @@ describe('POST /api/edge/events', () => {
       .send({ events: [edgeEvent('x-2', { gateId: 'la-gate-1' })] });
     expect(ok.status).toBe(200);
     expect(store.rows.get('x-2')).toMatchObject({ edgeId: 'edge-la', gateId: 'la-gate-1' });
+  });
+
+  it('accepts buffered events for an owned gate that was deactivated meanwhile (no outbox block, #96)', async () => {
+    // Like GateService.listGates: only an `active: true` filter hides the deactivated gate.
+    const gateDirectory = {
+      listGates: async (filters: { edgeId: string; active?: boolean }) =>
+        filters.active ? [] : [{ id: 'la-gate-1' }],
+    };
+    const res = await request(
+      createApp([edgeAs('edge-la'), attendanceRoutes(attendance, gateDirectory)]),
+    )
+      .post('/api/edge/events')
+      .send({ events: [edgeEvent('x-3', { gateId: 'la-gate-1' })] });
+    expect(res.status).toBe(200);
+    expect(store.rows.has('x-3')).toBe(true);
   });
 });
 

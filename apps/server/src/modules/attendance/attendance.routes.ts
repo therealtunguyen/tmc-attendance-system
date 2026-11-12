@@ -77,7 +77,7 @@ const parseBatch = (req: Request, edgeId: string): PushEventsRequest | string =>
 
 /** Gate ownership lookup for edge event ingest (#69). Implemented by GateService. */
 export interface EdgeGateDirectory {
-  listGates(filters: { edgeId: string; active: boolean }): Promise<{ id: string }[]>;
+  listGates(filters: { edgeId: string }): Promise<{ id: string }[]>;
 }
 
 export const attendanceRoutes = (attendance: AttendanceService, gates?: EdgeGateDirectory) =>
@@ -100,11 +100,13 @@ export const attendanceRoutes = (attendance: AttendanceService, gates?: EdgeGate
       const batch = parseBatch(req, edgeId);
       if (typeof batch === 'string') return void res.status(400).json({ error: batch });
       if (gates && batch.events.length > 0) {
-        const allowed = new Set((await gates.listGates({ edgeId, active: true })).map((g) => g.id));
+        // Ownership only, not active: a gate deactivated while the edge was offline still has real
+        // buffered scans, and a permanent 400 would block the edge outbox (#96).
+        const allowed = new Set((await gates.listGates({ edgeId })).map((g) => g.id));
         const bad = batch.events.findIndex((e) => !allowed.has(e.gateId));
         if (bad !== -1) {
           return void res.status(400).json({
-            error: `events[${bad}].gateId does not belong to an active gate on this edge`,
+            error: `events[${bad}].gateId does not belong to a gate on this edge`,
           });
         }
       }
