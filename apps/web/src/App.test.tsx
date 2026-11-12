@@ -28,4 +28,11 @@ describe('AppRoutes', () => {
     expect(page).toContain('Employee portal');
     expect(page).toContain('Sign in to see your QR code');
   });
+
+  it('links staff to the guard page and asks for a guard sign-in', () => {
+    expect(renderAt('/staff')).toContain('href="/staff/guard"');
+    const page = renderAt('/staff/guard');
+    expect(page).toContain('Sign in to monitor gates');
+    expect(page).not.toContain('Confirm and open gate');
+  });
 });

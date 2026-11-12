@@ -20,7 +20,8 @@ An offline edge does not prevent this central API from operating.
 For an admission already performed by hand during an outage, use `mode: "BACKFILL"`
 and `occurredAt`, an ISO timestamp with timezone no later than the server's current
 time. The employee and gate must exist but may now be inactive. This records GRANTED
-and an audit without calling TCS. No frontend or edge-agent changes are included.
+and an audit without calling TCS. The [Guard page](guard.md) supports both modes;
+the edge-agent contract is unchanged.
 
 Success returns 201 with `{ "eventId": "...", "outcome": "GRANTED" }` (or DENIED).
 A repeated eventId returns 409, including when its payload differs or the original
