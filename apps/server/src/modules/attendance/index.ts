@@ -21,6 +21,7 @@ export type {
   CorrectionRequest,
   DailyRecord,
   EdgeIngest,
+  LockedRecordStore,
   ScanEvent,
   ScanOutcome,
   StoredEvent,

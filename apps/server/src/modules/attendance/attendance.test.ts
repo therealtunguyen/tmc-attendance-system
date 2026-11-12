@@ -1,10 +1,11 @@
 import { Router } from 'express';
 import request from 'supertest';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../app.js';
 import { MAX_EDGE_BATCH, type EdgeEvent } from '../../shared/contracts/edge.js';
 import type { Scope } from '../../shared/types.js';
 import type { EmployeeDirectory, EmployeeScopes } from '../employee-qr/index.js';
+import type { Transaction } from '../../shared/transaction.js';
 import type { AuditEntry, AuditLog, UserRef } from '../iam/index.js';
 import { attendanceRoutes } from './attendance.routes.js';
 import {
@@ -17,6 +18,7 @@ import {
   type AccessLogQuery,
   type AttendanceStore,
   type Correction,
+  type LockedRecordStore,
   type ScanEvent,
   type ScanOutcome,
   type StoredEvent,
@@ -37,14 +39,31 @@ class InMemoryEvents implements AttendanceStore {
     return this.correctionRows.filter((c) => c.employeeId === employeeId);
   }
 
-  correctionIds: string[] = [];
-  private nextCorrection = 1;
   private locks = new Map<string, Promise<void>>();
+  /** Each transaction handed to a holder of the lock, in order. */
+  transactions: Transaction[] = [];
 
-  /** One holder per record at a time, in the order they asked; other records do not wait. */
-  async withRecordLock<T>(employeeId: string, day: Date, work: () => Promise<T>) {
+  /**
+   * One holder per record at a time, in the order they asked; other records do not wait. Like the
+   * repo's transaction, the corrections a failed holder stored are rolled back.
+   */
+  async withRecordLock<T>(
+    employeeId: string,
+    day: Date,
+    work: (store: LockedRecordStore, tx: Transaction) => Promise<T>,
+  ) {
     const key = `${employeeId}:${day.getTime()}`;
-    const run = (this.locks.get(key) ?? Promise.resolve()).then(work);
+    const run = (this.locks.get(key) ?? Promise.resolve()).then(async () => {
+      const tx = { id: this.transactions.length + 1 } as unknown as Transaction;
+      this.transactions.push(tx);
+      const saved = [...this.correctionRows];
+      try {
+        return await work(this, tx);
+      } catch (error) {
+        this.correctionRows = saved;
+        throw error;
+      }
+    });
     this.locks.set(
       key,
       run.then(
@@ -56,18 +75,7 @@ class InMemoryEvents implements AttendanceStore {
   }
 
   async insertCorrection(correction: Correction) {
-    // A counter, so an ID is never reused after a delete.
-    const id = `c-${this.nextCorrection++}`;
     this.correctionRows.push(correction);
-    this.correctionIds.push(id);
-    return id;
-  }
-
-  async deleteCorrection(id: string) {
-    const index = this.correctionIds.indexOf(id);
-    if (index === -1) return;
-    this.correctionRows.splice(index, 1);
-    this.correctionIds.splice(index, 1);
   }
 
   async insert(event: StoredEvent) {
@@ -131,9 +139,12 @@ class InMemoryEvents implements AttendanceStore {
 
 class RecordingAudit implements AuditLog {
   entries: AuditEntry[] = [];
+  /** The transaction each entry was written in; undefined when it was committed on its own. */
+  transactions: (Transaction | undefined)[] = [];
 
-  async append(entry: AuditEntry) {
+  async append(entry: AuditEntry, tx?: Transaction) {
     this.entries.push(entry);
+    this.transactions.push(tx);
   }
 
   async search() {
@@ -985,7 +996,7 @@ describe('HR corrections (FR-3.6, UC-8)', () => {
       ).resolves.toMatchObject({ lastOut: at('17:00') });
     });
 
-    it('removes the correction again when the audit entry cannot be written', async () => {
+    it('rolls the correction back when the audit entry cannot be written', async () => {
       await attendance.correct('hr-1', recordId, {
         field: 'FIRST_IN',
         value: at('07:30'),
@@ -1017,37 +1028,44 @@ describe('HR corrections (FR-3.6, UC-8)', () => {
       expect(day).toMatchObject({ lastOut: null, missingPunch: true });
     });
 
-    it('reports the audit failure, not the undo failure, when both fail', async () => {
-      const log = vi.spyOn(console, 'error').mockImplementation(() => {});
-      store.deleteCorrection = async () => {
-        throw new Error('database down');
-      };
-      const service = new AttendanceService(
-        store,
-        new FakeDirectory({ 'binh-duong': ['emp-1'] }),
-        {
-          append: async () => {
-            throw new Error('audit log down');
-          },
-          search: async () => [],
-        },
-        () => NOW,
-      );
-      try {
-        await expect(
-          service.correct('hr-1', recordId, {
-            field: 'LAST_OUT',
-            value: at('17:00'),
-            reason: 'Forgot to scan out',
-          }),
-        ).rejects.toThrow('audit log down');
-        expect(log).toHaveBeenCalledWith(
-          expect.stringContaining('not audited'),
-          new Error('database down'),
-        );
-      } finally {
-        log.mockRestore();
+    it('writes the audit entry in the transaction that holds the record lock (ADR-2)', async () => {
+      await attendance.correct('hr-1', recordId, {
+        field: 'LAST_OUT',
+        value: at('17:00'),
+        reason: 'Forgot to scan out',
+      });
+      await attendance.correct('hr-1', recordId, {
+        field: 'LAST_OUT',
+        value: at('17:30'),
+        reason: 'Left later',
+      });
+      expect(store.transactions).toHaveLength(2);
+      expect(audit.transactions).toEqual(store.transactions);
+      expect(audit.transactions[0]).not.toBe(audit.transactions[1]);
+    });
+
+    it('reads and writes the record only through the store it is given under the lock', async () => {
+      const outside: string[] = [];
+      for (const name of ['grantedEvents', 'corrections', 'insertCorrection'] as const) {
+        const real = store[name].bind(store) as (...args: unknown[]) => Promise<unknown>;
+        (store as unknown as Record<string, unknown>)[name] = (...args: unknown[]) => {
+          outside.push(name);
+          return real(...args);
+        };
       }
+      const locked = {
+        grantedEvents: InMemoryEvents.prototype.grantedEvents.bind(store),
+        corrections: InMemoryEvents.prototype.corrections.bind(store),
+        insertCorrection: InMemoryEvents.prototype.insertCorrection.bind(store),
+      };
+      store.withRecordLock = async (_employeeId, _day, work) => work(locked, {} as Transaction);
+      await attendance.correct('hr-1', recordId, {
+        field: 'LAST_OUT',
+        value: at('17:00'),
+        reason: 'Forgot to scan out',
+      });
+      expect(store.correctionRows).toHaveLength(1);
+      expect(outside).toEqual([]);
     });
 
     it.each([

@@ -1,3 +1,4 @@
+import type { Transaction } from '../../shared/transaction.js';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../../app.js';
@@ -43,9 +44,16 @@ beforeEach(async () => {
       grantedEventsOf: async () => [],
       corrections: async () => [],
       correctionsOf: async () => [],
-      withRecordLock: async (_employeeId, _day, work) => work(),
-      insertCorrection: async () => 'c-1',
-      deleteCorrection: async () => {},
+      withRecordLock: async (_employeeId, _day, work) =>
+        work(
+          {
+            grantedEvents: async () => [],
+            corrections: async () => [],
+            insertCorrection: async () => {},
+          },
+          {} as Transaction,
+        ),
+      insertCorrection: async () => {},
       accessLog: async () => [],
       decide: async (id, outcome) => {
         const event = events.get(id);

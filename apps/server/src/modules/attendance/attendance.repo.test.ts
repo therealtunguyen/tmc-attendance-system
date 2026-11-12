@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { PrismaClient } from '../../shared/prisma.js';
+import { prismaOf } from '../../shared/transaction.js';
 import type { EmployeeDirectory, EmployeeScopes } from '../employee-qr/index.js';
 import type { AuditLog } from '../iam/index.js';
 import { AttendanceRepo, recordLockKey } from './attendance.repo.js';
@@ -142,23 +143,63 @@ describe('AttendanceRepo corrections (FR-3.6)', () => {
     }
   });
 
-  it('runs the work in a transaction, after taking the lock of that record', async () => {
+  /** A client whose only connection is the transaction: the outer client has no query methods. */
+  const lockedClient = () => {
     const steps: string[] = [];
     const $executeRaw = vi.fn(async (..._args: unknown[]) => {
       steps.push('lock');
       return 1;
     });
-    const $transaction = vi.fn(async (run: (tx: unknown) => Promise<unknown>) =>
-      run({ $executeRaw }),
-    );
+    const tx = {
+      $executeRaw,
+      correction: {
+        findMany: vi.fn(async () => {
+          steps.push('read');
+          return [];
+        }),
+        create: vi.fn(async () => {
+          steps.push('insert');
+          return { id: 'c-1' };
+        }),
+      },
+      attendanceEvent: { findMany: vi.fn(async () => []) },
+    };
+    const $transaction = vi.fn(async (run: (tx: unknown) => Promise<unknown>) => run(tx));
     const repo = new AttendanceRepo({ $transaction } as unknown as PrismaClient);
+    return { repo, tx, steps, $executeRaw, $transaction };
+  };
+
+  it('runs the work in one transaction, after taking the lock of that record', async () => {
+    const { repo, steps, $executeRaw, $transaction } = lockedClient();
     const result = await repo.withRecordLock('emp-1', day, async () => {
       steps.push('work');
       return 'done';
     });
     expect(result).toBe('done');
+    expect($transaction).toHaveBeenCalledTimes(1);
     expect(steps).toEqual(['lock', 'work']);
     expect($executeRaw.mock.calls[0]![1]).toBe(recordLockKey('emp-1', day));
+  });
+
+  it('gives the work a store and a transaction on that same connection', async () => {
+    const { repo, tx, steps } = lockedClient();
+    await repo.withRecordLock('emp-1', day, async (store, handle) => {
+      expect(prismaOf(handle)).toBe(tx);
+      await store.corrections(day, range.to, ['emp-1']);
+      await store.grantedEvents(day, range.to, ['emp-1']);
+      await store.insertCorrection({
+        employeeId: 'emp-1',
+        day,
+        field: 'LAST_OUT',
+        originalValue: null,
+        correctedValue: range.to,
+        reason: 'r',
+        correctedBy: 'hr-1',
+        createdAt: range.to,
+      });
+    });
+    expect(steps).toEqual(['lock', 'read', 'insert']);
+    expect(tx.attendanceEvent.findMany).toHaveBeenCalledTimes(1);
   });
 
   it('gives each record its own key, the same one every time', () => {
