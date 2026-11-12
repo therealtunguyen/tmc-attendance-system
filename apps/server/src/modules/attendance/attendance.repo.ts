@@ -1,12 +1,14 @@
 import { createHash } from 'node:crypto';
 import type { EdgeDenyReason } from '../../shared/contracts/edge.js';
 import type { PrismaClient } from '../../shared/prisma.js';
+import { asTransaction, type Transaction } from '../../shared/transaction.js';
 import type { DailyInput } from './attendance.daily.js';
 import type {
   AccessLogQuery,
   AttendanceStore,
   Correction,
   JtiSighting,
+  LockedRecordStore,
   ScanOutcome,
   StoredEvent,
 } from './attendance.service.js';
@@ -110,25 +112,26 @@ export class AttendanceRepo implements AttendanceStore {
     });
   }
 
-  withRecordLock<T>(employeeId: string, day: Date, work: () => Promise<T>): Promise<T> {
+  withRecordLock<T>(
+    employeeId: string,
+    day: Date,
+    work: (store: LockedRecordStore, tx: Transaction) => Promise<T>,
+  ): Promise<T> {
     return this.db.$transaction(
       async (tx) => {
-        // Held until this transaction ends. `work` runs on other connections, and the lock still
-        // keeps every other holder of the same key out until it is done.
+        // Held until this transaction ends. Everything `work` does runs on this same connection,
+        // so a correction never waits for a second one from the pool.
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(${recordLockKey(employeeId, day)})`;
-        return work();
+        // The same queries as this repo, sent through the transaction. Only the read and write
+        // methods are used on it, never $transaction.
+        return work(new AttendanceRepo(tx as unknown as PrismaClient), asTransaction(tx));
       },
       { maxWait: RECORD_LOCK_TIMEOUT_MS, timeout: RECORD_LOCK_TIMEOUT_MS },
     );
   }
 
-  async insertCorrection(correction: Correction): Promise<string> {
-    const { id } = await this.db.correction.create({ data: correction, select: { id: true } });
-    return id;
-  }
-
-  async deleteCorrection(id: string): Promise<void> {
-    await this.db.correction.deleteMany({ where: { id } });
+  async insertCorrection(correction: Correction): Promise<void> {
+    await this.db.correction.create({ data: correction, select: { id: true } });
   }
 
   async decide(eventId: string, outcome: ScanOutcome): Promise<boolean> {

@@ -1,3 +1,4 @@
+import type { Transaction } from '../../shared/transaction.js';
 import { createHash } from 'node:crypto';
 import type { Scope } from '../../shared/types.js';
 import {
@@ -159,7 +160,11 @@ export interface Authorizer {
 }
 
 export interface AuditLog {
-  append(entry: AuditEntry): Promise<void>;
+  /**
+   * With `tx`, the entry is written in that transaction and commits or rolls back with the
+   * caller's own change (ADR-2). Without it, the entry is committed on its own.
+   */
+  append(entry: AuditEntry, tx?: Transaction): Promise<void>;
   search(filter: AuditFilter): Promise<AuditEntry[]>;
 }
 
@@ -171,8 +176,8 @@ export interface AuditReader {
 
 /** Append-only, hash-chained storage (FR-4.9). There is no update or delete. */
 export interface AuditStore {
-  /** Links the entry to the end of the chain atomically. */
-  append(entry: AuditEntry): Promise<void>;
+  /** Links the entry to the end of the chain atomically; inside `tx` when one is given. */
+  append(entry: AuditEntry, tx?: Transaction): Promise<void>;
   /** Newest first. */
   search(filter: AuditFilter): Promise<ChainedEntry[]>;
   /** Every entry, ordered by seq ascending. */
@@ -208,8 +213,8 @@ export class IamService implements Authorizer, AuditLog, AuditReader, Authentica
     return check(user, permission, scope);
   }
 
-  append(entry: AuditEntry): Promise<void> {
-    return this.store.append(entry);
+  append(entry: AuditEntry, tx?: Transaction): Promise<void> {
+    return this.store.append(entry, tx);
   }
 
   search(filter: AuditFilter = {}): Promise<ChainedEntry[]> {

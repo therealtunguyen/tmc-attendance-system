@@ -24,6 +24,7 @@ export type {
   DailyRecord,
   EdgeIngest,
   JtiSighting,
+  LockedRecordStore,
   ScanEvent,
   ScanOutcome,
   StoredEvent,
