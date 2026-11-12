@@ -21,6 +21,8 @@ Check: <http://localhost:3000/health> returns `{ "ok": true }`, and <http://loca
 
 TCS (turnstiles) and HRS (HR/Payroll) are mocked in-process by default. Set `TCS_MODE=http` / `HRS_MODE=http` in `.env` to call the real systems. Mail is mocked too: set `MAIL_MODE=smtp` and `SMTP_URL` to send it.
 
+Edge agents authenticate to `/api/edge/*` with a shared secret (#69). Set `EDGE_TOKENS=edgeId:token,...` on the server and the matching `EDGE_TOKEN` on each edge (`.env.example` has a local pair). Left empty, edge sync fails closed with 401.
+
 ## Scripts (run from the root)
 
 | Script              | Does                               |

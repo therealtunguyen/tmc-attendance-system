@@ -251,9 +251,11 @@ export const employeeQrRoutes = (
           res.status(409).json({ error: e.message, reason: e.reason });
         }
       })
-      // Edge agent (ADR-9). Response: EdgeSnapshot.
-      // An edge has no user session, so no requirePermission. TODO(#44): authenticate the edge agent.
+      // Edge agent (ADR-9). Response: EdgeSnapshot. Authenticated by authenticateEdge (#69), mounted on /api/edge.
       .get('/edge/snapshot', async (_req, res) => {
+        if (!res.locals.edgeId) {
+          return void res.status(401).json({ error: 'Edge authentication required' });
+        }
         try {
           res.set('Cache-Control', 'no-store').json(await eqr.snapshot());
         } catch (e) {

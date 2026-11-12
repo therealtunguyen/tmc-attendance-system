@@ -2,7 +2,7 @@
 
 - `POST /api/edge/heartbeat` nhận contract `EdgeHeartbeat`, trả `204`, `400` nếu
   body sai hoặc `404` nếu edge không tồn tại. Lưu giờ server nhận, không dùng giờ
-  edge; xác thực edge là phần tích hợp chung #44 như các endpoint edge khác.
+  edge; xác thực edge qua `EDGE_TOKENS` (#69) tại middleware gắn trên `/api/edge`.
 - GET Gate trả thêm `status` và `lastHeartbeatAt`: không quá 90 giây là ONLINE,
   quá ngưỡng hoặc chưa có heartbeat là OFFLINE. Quyền/scope CRUD được giữ nguyên.
 - Monitor kiểm tra mỗi 15 giây, gọi `Notifier.alert('GATE_OFFLINE', message)` một

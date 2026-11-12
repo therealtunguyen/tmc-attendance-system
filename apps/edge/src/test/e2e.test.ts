@@ -65,6 +65,11 @@ describe('Edge HTTP end-to-end (#27-#30)', () => {
         res.end('Service Unavailable');
         return;
       }
+      if (req.headers.authorization !== 'Bearer edge-secret') {
+        res.statusCode = 401;
+        res.end('Unauthorized');
+        return;
+      }
       const chunks: Buffer[] = [];
       for await (const chunk of req) chunks.push(chunk as Buffer);
       const bodyText = Buffer.concat(chunks).toString('utf8');
@@ -97,7 +102,7 @@ describe('Edge HTTP end-to-end (#27-#30)', () => {
     });
 
     const centralUrl = await listen(centralHttp);
-    const client = new ServerClient(centralUrl);
+    const client = new ServerClient(centralUrl, 'edge-secret');
     const snapshots = new SnapshotManager(db, client, 'edge-bd');
     await snapshots.pull();
 

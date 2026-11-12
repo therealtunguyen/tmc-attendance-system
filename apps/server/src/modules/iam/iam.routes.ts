@@ -34,6 +34,8 @@ const bearer = (req: Request): string | undefined => {
 export const authenticate =
   (auth: Authenticator, resolver?: ScopeResolver): RequestHandler =>
   async (req, res, next) => {
+    // /api/edge/* uses shared-secret edge credentials (#69), never user sessions.
+    if (req.path === '/edge' || req.path.startsWith('/edge/')) return void next();
     const token = bearer(req);
     if (token) {
       const user = await auth.authenticate(token);

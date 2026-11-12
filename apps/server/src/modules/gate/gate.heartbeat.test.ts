@@ -1,3 +1,4 @@
+import { Router } from 'express';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../../app.js';
@@ -198,16 +199,31 @@ describe('Gate heartbeat (FR-2.6)', () => {
     expect(notify).toHaveBeenCalledTimes(2);
   });
 
-  it('validates heartbeat requests and returns 404 for unknown edges', async () => {
-    const app = createApp([gateRoutes(service())]);
-    expect((await request(app).post('/api/edge/heartbeat').send(hb)).status).toBe(204);
+  it('validates heartbeat requests, uses edgeId from credential, and returns 404 for unknown edges', async () => {
+    const edgeAs = (edgeId?: string) =>
+      Router().use((_req, res, next) => {
+        if (edgeId) res.locals.edgeId = edgeId;
+        next();
+      });
+    const appFor = (edgeId?: string) => createApp([edgeAs(edgeId), gateRoutes(service())]);
+
+    expect((await request(appFor(undefined)).post('/api/edge/heartbeat').send(hb)).status).toBe(
+      401,
+    );
+    expect((await request(appFor('edge-bd')).post('/api/edge/heartbeat').send(hb)).status).toBe(
+      204,
+    );
+    // Spoofed body.edgeId is ignored when authenticated as edge-bd.
     expect(
       (
-        await request(app)
+        await request(appFor('edge-bd'))
           .post('/api/edge/heartbeat')
           .send({ ...hb, edgeId: 'missing' })
       ).status,
-    ).toBe(404);
+    ).toBe(204);
+    expect((await request(appFor('missing')).post('/api/edge/heartbeat').send(hb)).status).toBe(
+      404,
+    );
     for (const body of [
       [],
       {},
@@ -215,7 +231,9 @@ describe('Gate heartbeat (FR-2.6)', () => {
       { ...hb, outboxSize: -1 },
       { ...hb, snapshotAt: undefined },
     ]) {
-      expect((await request(app).post('/api/edge/heartbeat').send(body)).status).toBe(400);
+      expect((await request(appFor('edge-bd')).post('/api/edge/heartbeat').send(body)).status).toBe(
+        400,
+      );
     }
   });
 
