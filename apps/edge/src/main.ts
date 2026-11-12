@@ -14,8 +14,12 @@ import { SnapshotManager } from './snapshot.js';
 // Ensure the data directory exists.
 mkdirSync(config.dataDir, { recursive: true });
 
+if (!config.edgeToken) {
+  console.warn('[edge] EDGE_TOKEN is empty; server /api/edge/* requests will fail with 401');
+}
+
 const db = openDb(config.dataDir, { pendingGraceS: config.pendingGraceS });
-const serverClient = new ServerClient(config.serverBaseUrl);
+const serverClient = new ServerClient(config.serverBaseUrl, config.edgeToken);
 const snapshots = new SnapshotManager(db, serverClient, config.edgeId);
 const turnstile =
   config.tcsMode === 'http'

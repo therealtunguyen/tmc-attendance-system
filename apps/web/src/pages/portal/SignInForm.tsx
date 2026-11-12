@@ -1,13 +1,15 @@
-import { useState, type FormEvent } from 'react';
+import { useState, type FormEvent, type ReactNode } from 'react';
 import { passMfa, saveSession, signIn, type Session, type SignIn } from '../../session';
 
 /** Stays on the page it was opened from, so the link in the email lands on the QR (FR-1.3). */
 export function SignInForm({
   onSignedIn,
-  title = 'Sign in to see your QR code',
+  heading = 'Sign in to see your QR code',
+  translate = (text) => text,
 }: {
   onSignedIn: (session: Session) => void;
-  title?: string;
+  heading?: string;
+  translate?: (text: string) => ReactNode;
 }) {
   const [pendingToken, setPendingToken] = useState<string | null>(null);
   const [username, setUsername] = useState('');
@@ -44,10 +46,10 @@ export function SignInForm({
 
   return (
     <form onSubmit={(event) => void submit(event)} style={{ maxWidth: 320 }}>
-      <h2>{title}</h2>
+      <h2>{translate(heading)}</h2>
       {pendingToken ? (
         <label>
-          Authenticator code
+          {translate('Authenticator code')}
           <input
             style={field}
             value={code}
@@ -60,7 +62,7 @@ export function SignInForm({
       ) : (
         <>
           <label>
-            Username
+            {translate('Username')}
             <input
               style={field}
               value={username}
@@ -70,7 +72,7 @@ export function SignInForm({
             />
           </label>
           <label>
-            Password
+            {translate('Password')}
             <input
               style={field}
               type="password"
@@ -82,9 +84,9 @@ export function SignInForm({
           </label>
         </>
       )}
-      {error && <p role="alert">{error}</p>}
+      {error && <p role="alert">{translate(error)}</p>}
       <button type="submit" disabled={busy}>
-        Continue
+        {translate('Continue')}
       </button>
     </form>
   );

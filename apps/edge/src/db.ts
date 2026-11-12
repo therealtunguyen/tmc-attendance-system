@@ -121,8 +121,24 @@ export const openDb = (dataDir: string, options: DbOptions = {}) => {
   `);
 
   const setOutcome = db.prepare<[{ eventId: string; outcome: 'GRANTED' | 'DENIED' }]>(
-    'UPDATE scan_event SET outcome = @outcome WHERE event_id = @eventId',
+    'UPDATE scan_event SET outcome = @outcome WHERE event_id = @eventId AND pushed_at IS NULL',
   );
+
+  const getEvent = db.prepare<[string], LocalEvent>(`
+    SELECT event_id      AS eventId,
+           gate_id       AS gateId,
+           employee_id   AS employeeId,
+           method,
+           outcome,
+           occurred_at   AS occurredAt,
+           jti,
+           stale,
+           deny_reason   AS denyReason,
+           pushed_at     AS pushedAt,
+           push_attempts AS pushAttempts
+    FROM   scan_event
+    WHERE  event_id = ?
+  `);
 
   // Exclude in-flight PENDING rows until pendingGraceS has elapsed (crash recovery),
   // and park rows that exceeded maxPushAttempts so stuck events cannot starve newer ones.
@@ -206,9 +222,17 @@ export const openDb = (dataDir: string, options: DbOptions = {}) => {
     },
     // scan_event
     commitScan,
-    setOutcome: (eventId: string, outcome: 'GRANTED' | 'DENIED'): void => {
-      setOutcome.run({ eventId, outcome });
+    setOutcome: (eventId: string, outcome: 'GRANTED' | 'DENIED'): boolean => {
+      const { changes } = setOutcome.run({ eventId, outcome });
+      if (changes === 0) {
+        console.error(
+          `[db] setOutcome(${eventId}, ${outcome}) updated 0 rows (already pushed or missing; see #33)`,
+        );
+        return false;
+      }
+      return true;
     },
+    getEvent: (eventId: string): LocalEvent | null => getEvent.get(eventId) ?? null,
     unpushedEvents: (): LocalEvent[] =>
       unpushedEvents.all({
         maxAttempts: maxPushAttempts,

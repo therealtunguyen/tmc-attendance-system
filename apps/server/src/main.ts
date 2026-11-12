@@ -22,6 +22,7 @@ import {
 import { GateRepo, GateService, gateRoutes, startGateMonitor } from './modules/gate/index.js';
 import {
   authenticate,
+  authenticateEdge,
   IamRepo,
   IamService,
   iamRoutes,
@@ -91,12 +92,19 @@ const app = createApp(
     }),
     adminRoutes(admin),
     employeeQrRoutes(eqr, admin, { qrToken: { max: config.qrTokenRateLimitPerMin } }),
-    attendanceRoutes(attendance),
+    attendanceRoutes(attendance, gate),
     reportingRoutes({ reports, exports, accessLog: new AccessLogService(attendance, gate, eqr) }),
     gateRoutes(gate),
   ],
-  { before: [authenticate(iam, admin), requireNoticeAck(iam)] },
+  {
+    before: [authenticate(iam, admin), requireNoticeAck(iam)],
+    edge: authenticateEdge(config.edgeTokens),
+  },
 );
+
+if (Object.keys(config.edgeTokens).length === 0) {
+  console.warn('[edge-auth] EDGE_TOKENS is empty; all /api/edge/* requests will return 401');
+}
 
 const server = app.listen(config.port, () => {
   console.log(
