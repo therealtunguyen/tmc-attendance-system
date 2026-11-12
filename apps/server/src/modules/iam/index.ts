@@ -12,6 +12,7 @@ export {
   requirePermission,
 } from './iam.rbac.js';
 export type { Permission } from './iam.rbac.js';
+export { authenticateEdge } from './iam.edge-auth.js';
 export { authenticate, iamRoutes, requireNoticeAck } from './iam.routes.js';
 export { IamService, NoticeError } from './iam.service.js';
 export type {

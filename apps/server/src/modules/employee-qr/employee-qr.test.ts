@@ -1083,10 +1083,22 @@ describe('EmployeeQrService.snapshot (ADR-9)', () => {
 });
 
 describe('GET /api/edge/snapshot', () => {
-  const app = (keys = keysK1) =>
-    createApp([employeeQrRoutes(new EmployeeQrService(store, audit, keys, () => NOW))]);
+  const edgeAs = (edgeId: string | null) =>
+    Router().use((_req, res, next) => {
+      if (edgeId) res.locals.edgeId = edgeId;
+      next();
+    });
+  const app = (keys = keysK1, edgeId: string | null = 'edge-bd') =>
+    createApp([
+      edgeAs(edgeId),
+      employeeQrRoutes(new EmployeeQrService(store, audit, keys, () => NOW)),
+    ]);
 
-  it('needs no user session: the edge has none', async () => {
+  it('rejects requests without an authenticated edge credential (401)', async () => {
+    expect((await request(app(keysK1, null)).get('/api/edge/snapshot')).status).toBe(401);
+  });
+
+  it('returns the snapshot for an authenticated edge without a user session', async () => {
     const { id } = await eqr.createEmployee('hr-1', lan);
     const res = await request(app()).get('/api/edge/snapshot?edgeId=edge-bd');
     expect(res.status).toBe(200);
