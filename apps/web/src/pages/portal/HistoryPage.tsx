@@ -43,6 +43,8 @@ export function HistoryPage() {
     clearSession();
     setSession(null);
   };
-  if (!session) return <SignInForm onSignedIn={setSession} />;
+  if (!session) {
+    return <SignInForm onSignedIn={setSession} heading="Sign in to see your attendance" />;
+  }
   return <HistoryPanel session={session} onEnd={end} />;
 }

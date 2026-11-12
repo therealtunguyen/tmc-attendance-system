@@ -36,7 +36,6 @@ export const PERMISSIONS: Record<Role, readonly Permission[]> = {
   SUP: [
     'self:read',
     'attendance:read:team',
-    'attendance:correct',
     'attendance:request-correction',
     'report:read',
     'dashboard:read',

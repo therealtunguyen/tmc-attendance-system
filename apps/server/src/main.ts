@@ -54,7 +54,7 @@ const eqr = new EmployeeQrService(
   () => new Date(),
   new QrLinkMail(mailer, config.portalUrl),
 );
-const attendance = new AttendanceService(new AttendanceRepo(db), eqr);
+const attendance = new AttendanceService(new AttendanceRepo(db), eqr, iam);
 const reports = new MonthlyReportService(eqr, attendance, admin);
 const notifier = new MailNotifier(mailer, config.alertEmails);
 const gate = new GateService(new GateRepo(db), eqr, attendance, turnstile, admin, notifier, iam, {

@@ -4,7 +4,9 @@ export { attendanceRoutes } from './attendance.routes.js';
 export {
   ACCESS_LOG_MAX_LIMIT,
   AttendanceService,
+  InvalidCorrectionError,
   OutcomeConflictError,
+  RecordNotFoundError,
   UnknownEventError,
 } from './attendance.service.js';
 export type {
@@ -13,6 +15,9 @@ export type {
   AttendanceQuery,
   AttendanceRecorder,
   AttendanceStore,
+  Correction,
+  CorrectionField,
+  CorrectionRequest,
   DailyRecord,
   EdgeIngest,
   ScanEvent,

@@ -59,6 +59,7 @@ export function HistoryScreen({ view }: { view: HistoryView }) {
                       <td style={cell}>{formatTime(record.lastOut)}</td>
                       <td style={cell}>
                         {record.missingPunch ? <strong>Missing punch</strong> : record.hours}
+                        {record.corrected && <small style={quiet}> Corrected by HR</small>}
                       </td>
                     </tr>
                   ))}
