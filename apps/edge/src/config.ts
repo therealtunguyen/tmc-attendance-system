@@ -18,6 +18,8 @@ export const config = {
   dataDir: process.env.EDGE_DATA_DIR ?? '.',
   /** Base URL of the central server. */
   serverBaseUrl: process.env.SERVER_BASE_URL ?? 'http://localhost:3000',
+  /** Shared secret matching EDGE_ID in the server's EDGE_TOKENS (#69). */
+  edgeToken: process.env.EDGE_TOKEN ?? '',
   /** Kiosk HTTP port. */
   port: num(process.env.PORT, 3100),
   // TCS

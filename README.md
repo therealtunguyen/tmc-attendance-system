@@ -21,6 +21,8 @@ Check: <http://localhost:3000/health> returns `{ "ok": true }`, and <http://loca
 
 TCS (turnstiles) and HRS (HR/Payroll) are mocked in-process by default. Set `TCS_MODE=http` / `HRS_MODE=http` in `.env` to call the real systems. Mail is mocked too: set `MAIL_MODE=smtp` and `SMTP_URL` to send it.
 
+Edge agents authenticate to `/api/edge/*` with a shared secret (#69). Set `EDGE_TOKENS=edgeId:token,...` on the server and the matching `EDGE_TOKEN` on each edge (`.env.example` has a local pair). Left empty, edge sync fails closed with 401.
+
 ## Scripts (run from the root)
 
 | Script              | Does                               |
@@ -58,6 +60,8 @@ apps/web/               React + Vite single app
 Gate registry data and CRUD rules (FR-2.1): [docs/gate-registry.md](docs/gate-registry.md).
 
 Gate online/offline monitoring and ADM alerts (FR-2.6): [docs/gate-heartbeat.md](docs/gate-heartbeat.md).
+
+Guard access log and manual override (FR-4.4, FR-2.5 / UC-4): [docs/guard.md](docs/guard.md).
 
 ## Deployment notes
 

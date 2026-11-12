@@ -223,7 +223,7 @@ export function CorrectionsPage() {
     setSession(null);
   };
   if (!session) {
-    return <SignInForm onSignedIn={setSession} title="Sign in to correct attendance" />;
+    return <SignInForm onSignedIn={setSession} heading="Sign in to correct attendance" />;
   }
   return <Panel session={session} onEnd={end} />;
 }

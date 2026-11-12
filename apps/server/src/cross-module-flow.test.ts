@@ -24,6 +24,7 @@ import {
 } from './modules/employee-qr/index.js';
 import {
   authenticate,
+  authenticateEdge,
   hashPassword,
   IamService,
   iamRoutes,
@@ -224,6 +225,7 @@ let eqr: EmployeeQrService;
 let attendance: AttendanceService;
 let app: ReturnType<typeof createApp>;
 const HR_SESSION = 'hr-session-token';
+const EDGE_TOKEN = 'edge-bd-secret-token';
 
 beforeEach(() => {
   nowMs = Date.parse(IN_AT);
@@ -245,7 +247,10 @@ beforeEach(() => {
       employeeQrRoutes(eqr),
       attendanceRoutes(attendance),
     ],
-    { before: [authenticate(iam), requireNoticeAck(iam)] },
+    {
+      before: [authenticate(iam), requireNoticeAck(iam)],
+      edge: authenticateEdge({ [EDGE]: EDGE_TOKEN }),
+    },
   );
 });
 
@@ -297,7 +302,9 @@ const issueQr = (session: string) =>
  * own input for the push; nothing here asserts what a real edge would store, or whether it opens TCS.
  */
 const edgeScan = async (token: string): Promise<{ event: EdgeEvent; reason?: string }> => {
-  const snapshot = (await request(app).get('/api/edge/snapshot')).body as EdgeSnapshot;
+  const snapshot = (
+    await request(app).get('/api/edge/snapshot').set('Authorization', `Bearer ${EDGE_TOKEN}`)
+  ).body as EdgeSnapshot;
   const result = await checkQrToken(token, {
     publicKeys: Object.fromEntries(
       snapshot.publicKeys.map(({ kid, spki }) => [
@@ -324,7 +331,10 @@ const edgeScan = async (token: string): Promise<{ event: EdgeEvent; reason?: str
 };
 
 const push = (...batch: EdgeEvent[]) =>
-  request(app).post('/api/edge/events').send({ edgeId: EDGE, events: batch });
+  request(app)
+    .post('/api/edge/events')
+    .set('Authorization', `Bearer ${EDGE_TOKEN}`)
+    .send({ edgeId: EDGE, events: batch });
 
 describe('cross-module flow: real routes, in-memory stores, simulated edge', () => {
   it('a portal token passes the snapshot check, and its pushed event shows up in the daily record', async () => {
@@ -425,7 +435,10 @@ describe('cross-module flow: real routes, in-memory stores, simulated edge', () 
   });
 
   it('the user-session check does not block /api/edge/*, and user routes still need a session', async () => {
-    expect((await request(app).get('/api/edge/snapshot')).status).toBe(200);
+    expect(
+      (await request(app).get('/api/edge/snapshot').set('Authorization', `Bearer ${EDGE_TOKEN}`))
+        .status,
+    ).toBe(200);
     expect((await push()).status).toBe(200);
     expect((await request(app).get('/api/employees')).status).toBe(401);
     expect((await request(app).post('/api/qr/token').send()).status).toBe(401);
@@ -441,7 +454,30 @@ describe('cross-module flow: real routes, in-memory stores, simulated edge', () 
   it.todo('edge outbox: a network drop then recovery loses and duplicates nothing (#27, #30)');
   it.todo('edge agent: mock TCS timeout or error means DENIED, no attendance (#24, #30)');
   it.todo('POST /api/edge/heartbeat marks the edge online; silence raises GATE_OFFLINE (#28, #39)');
-  it.todo('/api/edge/* rejects a request without a valid edge credential (#69)');
+  it('/api/edge/* rejects a request without a valid edge credential (#69)', async () => {
+    await seedHrSession();
+    expect((await request(app).get('/api/edge/snapshot')).status).toBe(401);
+    expect(
+      (await request(app).get('/api/edge/snapshot').set('Authorization', 'Bearer wrong')).status,
+    ).toBe(401);
+    expect(
+      (await request(app).get('/api/edge/snapshot').set('Authorization', `Bearer ${HR_SESSION}`))
+        .status,
+    ).toBe(401);
+    expect((await request(app).post('/api/edge/events').send({ events: [] })).status).toBe(401);
+    expect((await request(app).post('/api/edge/heartbeat').send({})).status).toBe(401);
+
+    // Spoofed body.edgeId is ignored; server stores the edgeId from the matched token.
+    const lan = await onboard('BD-0008');
+    const qr = await issueQr(lan.session);
+    const scanned = await edgeScan(qr.body.token);
+    const spoofed = await request(app)
+      .post('/api/edge/events')
+      .set('Authorization', `Bearer ${EDGE_TOKEN}`)
+      .send({ edgeId: 'spoofed-edge', events: [scanned.event] });
+    expect(spoofed.status).toBe(200);
+    expect(events.rows.get(scanned.event.eventId)?.edgeId).toBe(EDGE);
+  });
   it.todo('sync flags a stale event for a revoked person, and one jti at two edges (#33)');
   it.todo('edge outbox: does not push a PENDING event while its TCS call is still running (#27)');
   // The month of the events above (2026-11, Vietnam time) and a minimal org tree: this file has no admin module.
@@ -483,7 +519,10 @@ describe('cross-module flow: real routes, in-memory stores, simulated edge', () 
     );
     const reportApp = createApp(
       [reportingRoutes({ reports, exports: exportsSvc, now: () => new Date(nowMs) })],
-      { before: [authenticate(iam), requireNoticeAck(iam)] },
+      {
+        before: [authenticate(iam), requireNoticeAck(iam)],
+        edge: authenticateEdge({ [EDGE]: EDGE_TOKEN }),
+      },
     );
 
     expect((await request(reportApp).get(`/api/reports/monthly?month=${MONTH}`)).status).toBe(401);
@@ -612,7 +651,10 @@ describe('cross-module flow: real routes, in-memory stores, simulated edge', () 
           accessLog: new AccessLogService(attendance, gateLookup, eqr),
         }),
       ],
-      { before: [authenticate(iam), requireNoticeAck(iam)] },
+      {
+        before: [authenticate(iam), requireNoticeAck(iam)],
+        edge: authenticateEdge({ [EDGE]: EDGE_TOKEN }),
+      },
     );
     const qs = `from=${encodeURIComponent('2026-11-07T00:00:00Z')}&to=${encodeURIComponent('2026-11-07T01:00:00Z')}`;
 
@@ -680,7 +722,10 @@ describe('cross-module flow: real routes, in-memory stores, simulated edge', () 
           ),
         ),
       ],
-      { before: [authenticate(iam), requireNoticeAck(iam)] },
+      {
+        before: [authenticate(iam), requireNoticeAck(iam)],
+        edge: authenticateEdge({ [EDGE]: EDGE_TOKEN }),
+      },
     );
     const guard = user({ username: 'guard', passwordHash: 'unused', role: 'GRD' });
     Object.assign(guard, { scoped: true, scopes: [FACTORY] });

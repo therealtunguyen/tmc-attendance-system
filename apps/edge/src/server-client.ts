@@ -17,6 +17,7 @@ const json = async <T>(res: Response): Promise<FetchResult<T>> => {
 export class ServerClient {
   constructor(
     private baseUrl: string,
+    private edgeToken = '',
     private timeoutMs = 10_000,
   ) {}
 
@@ -24,11 +25,15 @@ export class ServerClient {
     return AbortSignal.timeout(this.timeoutMs);
   }
 
+  private headers(extra: Record<string, string> = {}): Record<string, string> {
+    return this.edgeToken ? { ...extra, authorization: `Bearer ${this.edgeToken}` } : extra;
+  }
+
   async getSnapshot(edgeId: string): Promise<FetchResult<EdgeSnapshot>> {
     try {
       const res = await fetch(
         `${this.baseUrl}/api/edge/snapshot?edgeId=${encodeURIComponent(edgeId)}`,
-        { signal: this.signal() },
+        { headers: this.headers(), signal: this.signal() },
       );
       return json<EdgeSnapshot>(res);
     } catch (err) {
@@ -40,7 +45,7 @@ export class ServerClient {
     try {
       const res = await fetch(`${this.baseUrl}/api/edge/events`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: this.headers({ 'content-type': 'application/json' }),
         body: JSON.stringify(req),
         signal: this.signal(),
       });
@@ -54,7 +59,7 @@ export class ServerClient {
     try {
       const res = await fetch(`${this.baseUrl}/api/edge/heartbeat`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: this.headers({ 'content-type': 'application/json' }),
         body: JSON.stringify(hb),
         signal: this.signal(),
       });

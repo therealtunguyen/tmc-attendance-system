@@ -43,6 +43,36 @@ export const positiveInt = (name: string, fallback: number): number => {
   return n;
 };
 
+/**
+ * Comma-separated `edgeId:token` pairs from EDGE_TOKENS (#69).
+ * Unset or blank = {} (all /api/edge/* requests fail closed with 401).
+ * Malformed entries, duplicate edgeIds, or duplicate tokens stop the server on boot.
+ */
+export const parseEdgeTokens = (value: string | undefined): Record<string, string> => {
+  const tokens: Record<string, string> = {};
+  const seenSecrets = new Set<string>();
+  for (const [index, raw] of (value ?? '').split(',').entries()) {
+    const item = raw.trim();
+    if (item === '') continue;
+    const sep = item.indexOf(':');
+    const edgeId = sep > 0 ? item.slice(0, sep).trim() : '';
+    const secret = sep > 0 ? item.slice(sep + 1).trim() : '';
+    if (!edgeId || !secret) {
+      // Never log `item` — a secret pasted without `edgeId:` would leak into boot logs.
+      throw new Error(`EDGE_TOKENS[${index}] must be "edgeId:token"`);
+    }
+    if (Object.hasOwn(tokens, edgeId)) {
+      throw new Error(`EDGE_TOKENS has duplicate edgeId "${edgeId}"`);
+    }
+    if (seenSecrets.has(secret)) {
+      throw new Error(`EDGE_TOKENS has duplicate token for "${edgeId}"`);
+    }
+    tokens[edgeId] = secret;
+    seenSecrets.add(secret);
+  }
+  return tokens;
+};
+
 export const config = {
   port: Number(process.env.PORT ?? 3000),
   databaseUrl: process.env.DATABASE_URL ?? '',
@@ -73,4 +103,5 @@ export const config = {
   qrTokenRateLimitPerMin: positiveInt('QR_TOKEN_RATE_LIMIT_PER_MIN', 10),
   heartbeatTimeoutMs: positiveMs('EDGE_HEARTBEAT_TIMEOUT_MS', HEARTBEAT_TIMEOUT_MS),
   heartbeatCheckMs: positiveMs('EDGE_HEARTBEAT_CHECK_MS', HEARTBEAT_CHECK_INTERVAL_MS),
+  edgeTokens: parseEdgeTokens(process.env.EDGE_TOKENS),
 };

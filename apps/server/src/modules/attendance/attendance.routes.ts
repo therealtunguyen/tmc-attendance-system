@@ -67,10 +67,9 @@ const invalidEvent = (e: unknown): string | null => {
 };
 
 /** The whole batch is checked first, so a bad event stores nothing (the edge must fix it). */
-const parseBatch = (req: Request): PushEventsRequest | string => {
+const parseBatch = (req: Request, edgeId: string): PushEventsRequest | string => {
   const body: unknown = req.body ?? {};
   if (!isObject(body)) return 'body must be a JSON object';
-  if (!isText(body.edgeId)) return 'edgeId must be a non-empty string';
   if (!Array.isArray(body.events)) return 'events must be an array';
   if (body.events.length > MAX_EDGE_BATCH) {
     return `events must hold at most ${MAX_EDGE_BATCH} events; split the outbox into batches`;
@@ -79,8 +78,14 @@ const parseBatch = (req: Request): PushEventsRequest | string => {
     const error = invalidEvent(e);
     if (error) return `events[${i}]${error.startsWith('.') ? '' : ' '}${error}`;
   }
-  return { edgeId: body.edgeId, events: body.events as EdgeEvent[] };
+  // edgeId comes from the authenticated token (#69), never from body.edgeId.
+  return { edgeId, events: body.events as EdgeEvent[] };
 };
+
+/** Gate ownership lookup for edge event ingest (#69). Implemented by GateService. */
+export interface EdgeGateDirectory {
+  listGates(filters: { edgeId: string }): Promise<{ id: string }[]>;
+}
 
 /** A user limited to some factories or teams only reaches employees in them (BR-15). */
 const reachable = async (attendance: AttendanceService, res: Response, employeeId: string) => {
@@ -88,7 +93,7 @@ const reachable = async (attendance: AttendanceService, res: Response, employeeI
   return !isRestricted(user) || attendance.inScopes(employeeId, user.scopes ?? []);
 };
 
-export const attendanceRoutes = (attendance: AttendanceService) =>
+export const attendanceRoutes = (attendance: AttendanceService, gates?: EdgeGateDirectory) =>
   Router()
     // Own history only (FR-1.6): the employee comes from the verified session, never a request field.
     .get('/me/attendance', requirePermission('self:read'), async (_req, res) => {
@@ -177,10 +182,22 @@ export const attendanceRoutes = (attendance: AttendanceService) =>
         }
       },
     )
-    // Edge outbox (ADR-9). Body: PushEventsRequest. Response: PushEventsResponse.
-    // TODO(#44): authenticate the edge agent.
+    // Edge outbox (ADR-9). Authenticated by authenticateEdge (#69), mounted on /api/edge.
     .post('/edge/events', async (req, res) => {
-      const batch = parseBatch(req);
+      const edgeId = res.locals.edgeId as string | undefined;
+      if (!edgeId) return void res.status(401).json({ error: 'Edge authentication required' });
+      const batch = parseBatch(req, edgeId);
       if (typeof batch === 'string') return void res.status(400).json({ error: batch });
+      if (gates && batch.events.length > 0) {
+        // Ownership only, not active: a gate deactivated while the edge was offline still has real
+        // buffered scans, and a permanent 400 would block the edge outbox (#96).
+        const allowed = new Set((await gates.listGates({ edgeId })).map((g) => g.id));
+        const bad = batch.events.findIndex((e) => !allowed.has(e.gateId));
+        if (bad !== -1) {
+          return void res.status(400).json({
+            error: `events[${bad}].gateId does not belong to a gate on this edge`,
+          });
+        }
+      }
       res.json(await attendance.ingest(batch));
     });
