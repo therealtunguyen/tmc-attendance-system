@@ -89,9 +89,12 @@ export const startOutboxLoop = (
   edgeId: string,
   intervalMs: number,
 ): (() => void) => {
-  void flushOutbox(db, client, edgeId);
-  const id = setInterval(() => {
-    void flushOutbox(db, client, edgeId);
-  }, intervalMs);
+  // #113 B1: never leave a floating rejection (would crash the process).
+  const run = () =>
+    void flushOutbox(db, client, edgeId).catch((err) =>
+      console.warn(`[outbox] flush failed: ${String(err)}`),
+    );
+  run();
+  const id = setInterval(run, intervalMs);
   return () => clearInterval(id);
 };

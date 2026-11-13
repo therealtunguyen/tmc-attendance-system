@@ -128,15 +128,30 @@ export class GateRepo implements GateStore {
     }));
   }
 
-  offlineEdges(cutoff: Date): Promise<OfflineEdge[]> {
-    return this.db.edge.findMany({
-      where: { lastHeartbeatAt: { lt: cutoff }, gates: { some: { active: true } } },
+  async offlineEdges(cutoff: Date): Promise<OfflineEdge[]> {
+    // #113 B3: an edge that never sent a heartbeat (NULL) counts as offline once its
+    // oldest active gate is older than the timeout (Edge has no createdAt).
+    const edges = await this.db.edge.findMany({
+      where: {
+        OR: [
+          {
+            lastHeartbeatAt: null,
+            gates: { some: { active: true, createdAt: { lt: cutoff } } },
+          },
+          { lastHeartbeatAt: { lt: cutoff }, gates: { some: { active: true } } },
+        ],
+      },
       select: {
         id: true,
         factoryId: true,
         lastHeartbeatAt: true,
-        gates: { where: { active: true }, select: { id: true, name: true } },
+        gates: { where: { active: true }, select: { id: true, name: true, createdAt: true } },
       },
     });
+    return edges.map(({ gates, ...edge }) => ({
+      ...edge,
+      since: edge.lastHeartbeatAt ?? new Date(Math.min(...gates.map((g) => g.createdAt.getTime()))),
+      gates: gates.map(({ id, name }) => ({ id, name })),
+    }));
   }
 }

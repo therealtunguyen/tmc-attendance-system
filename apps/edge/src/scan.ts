@@ -136,8 +136,9 @@ export const scan = async (
   const tcsResult = await turnstile.open(input.gateId);
   const outcome: ScanOutcome = tcsResult === 'OPENED' ? 'GRANTED' : 'DENIED';
 
-  // 5: Persist final outcome.
-  db.setOutcome(eventId, outcome);
+  // 5: Persist final outcome. #113 B2: a TCS failure releases the jti so the same QR can retry.
+  if (outcome === 'GRANTED') db.setOutcome(eventId, outcome);
+  else db.denyAfterTcs(eventId, jti);
 
   if (outcome === 'GRANTED') {
     return { outcome: 'GRANTED', firstName, eventId };

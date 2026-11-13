@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import request from 'supertest';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../../app.js';
 import { MAX_EDGE_BATCH, type EdgeEvent } from '../../shared/contracts/edge.js';
 import type { Scope } from '../../shared/types.js';
@@ -398,6 +398,23 @@ describe('AttendanceService.ingest (ADR-9, FR-3.2)', () => {
     expect(store.rows.get('d-1')?.denyReason).toBe('REVOKED');
     expect(store.rows.get('d-2')?.denyReason).toBeNull();
     expect(store.rows.get('d-3')?.denyReason).toBeNull();
+  });
+
+  it('rejects a future-dated event per event, keeps the rest of the batch (#113 C4)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const res = await attendance.ingest({
+      edgeId: 'edge-bd',
+      events: [
+        edgeEvent('ok-1'),
+        edgeEvent('far', { occurredAt: new Date(NOW.getTime() + 5 * 60_000 + 1).toISOString() }),
+        edgeEvent('near', { occurredAt: new Date(NOW.getTime() + 4 * 60_000).toISOString() }),
+      ],
+    });
+    expect(res).toEqual({ accepted: ['ok-1', 'near'] });
+    expect(store.rows.has('far')).toBe(false);
+    expect(store.rows.has('near')).toBe(true);
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
   });
 
   it('an empty batch stores nothing', async () => {

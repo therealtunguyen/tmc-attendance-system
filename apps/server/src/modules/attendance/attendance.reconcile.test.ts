@@ -173,6 +173,14 @@ describe('SyncReconciler: one token at two edges (#33)', () => {
     expect(sightings.queries).toEqual([['jti-shared']]);
   });
 
+  it('says nothing when a TCS-failed denial and the later granted rescan share a jti on one edge (#113 B2)', async () => {
+    await reconcile(new FakeAdmission(), [
+      event('bd-1', { jti: 'jti-shared', outcome: 'DENIED' }),
+      event('bd-2', { jti: 'jti-shared', outcome: 'GRANTED' }),
+    ]);
+    expect(alerts.alerts).toEqual([]);
+  });
+
   it('lists only the shared tokens of a push', async () => {
     sightings.rows.push(atOtherEdge);
     await reconcile(new FakeAdmission(), [

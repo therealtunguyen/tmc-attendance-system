@@ -71,16 +71,31 @@ describe('Gate heartbeat (FR-2.6)', () => {
     expect(notify).toHaveBeenCalledTimes(2);
   });
 
-  it('does not alert never-connected edges or edges with only inactive gates', async () => {
+  it('does not alert edges with only inactive gates', async () => {
     const gate = service();
     const created = await gate.createGate('adm', entrance);
-    now += 1_000_000;
-    await gate.checkOffline();
     await gate.edgeHeartbeat(hb);
     await gate.deactivateGate('adm', created.id);
     now += 90_001;
     await gate.checkOffline();
     expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('alerts a never-connected edge once, after the timeout from its gate creation (#113 B3)', async () => {
+    store.rows.clear();
+    const gate = service();
+    await gate.createGate('adm', entrance);
+    // The fake stamps createdAt with the real clock; align it with the test clock.
+    for (const row of store.rows.values()) row.createdAt = new Date(BASE);
+    await gate.checkOffline();
+    now += 90_000;
+    await gate.checkOffline();
+    expect(notify).not.toHaveBeenCalled();
+    now += 1;
+    await gate.checkOffline();
+    await gate.checkOffline();
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0]![1]).toContain('never connected');
   });
 
   it('keeps heartbeat state and monitoring when a gate is reactivated after DELETE', async () => {

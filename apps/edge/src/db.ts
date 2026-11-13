@@ -124,6 +124,8 @@ export const openDb = (dataDir: string, options: DbOptions = {}) => {
     'UPDATE scan_event SET outcome = @outcome WHERE event_id = @eventId AND pushed_at IS NULL',
   );
 
+  const deleteJti = db.prepare<[string]>('DELETE FROM jti_seen WHERE jti = ?');
+
   const getEvent = db.prepare<[string], LocalEvent>(`
     SELECT event_id      AS eventId,
            gate_id       AS gateId,
@@ -210,6 +212,16 @@ export const openDb = (dataDir: string, options: DbOptions = {}) => {
     },
   );
 
+  /**
+   * #113 B2: TCS did not open. Mark the event DENIED and release the jti in one
+   * transaction so a rescan of the same valid QR is not REPLAYED.
+   */
+  const denyAfterTcs = db.transaction((eventId: string, jti: string | null): boolean => {
+    const { changes } = setOutcome.run({ eventId, outcome: 'DENIED' });
+    if (jti) deleteJti.run(jti);
+    return changes > 0;
+  });
+
   return {
     // kv
     getKv: (key: string): string | null => getKv.get(key)?.value ?? null,
@@ -222,6 +234,7 @@ export const openDb = (dataDir: string, options: DbOptions = {}) => {
     },
     // scan_event
     commitScan,
+    denyAfterTcs,
     setOutcome: (eventId: string, outcome: 'GRANTED' | 'DENIED'): boolean => {
       const { changes } = setOutcome.run({ eventId, outcome });
       if (changes === 0) {
