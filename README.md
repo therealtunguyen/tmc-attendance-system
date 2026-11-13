@@ -14,7 +14,7 @@ npm install
 cp .env.example .env
 ```
 
-Edit `.env` before the first start:
+Edit `.env` before the first start (change the existing lines rather than appending new ones; with duplicates the first value wins):
 
 - **QR signing key** (ADR-10). Run the `node -e ...` command from the comment in `.env.example`. It prints the private key (base64 PKCS8) first and the public key second. Put the private key in `QR_SIGNING_KEY` and any short name in `QR_SIGNING_KID` (e.g. `key-1`). The public key is not needed: edges get it from the snapshot. Without the key, `/api/qr/token` answers 503.
 - **Edge token** (#69). The server reads comma-separated `edgeId:token` pairs, the edge reads its own token: `EDGE_TOKENS=edge-dev:change-me` on the server and `EDGE_TOKEN=change-me` for the edge. The id must equal `EDGE_ID` (default `edge-dev`). Left empty, edge sync fails closed with 401.
@@ -80,7 +80,7 @@ A new database is empty, and a scan needs a user, an org unit, an edge, a gate a
    npm run user:create -w apps/server -- --username an --password 'Employee-pass-1234' --role EMP --employee-id <employee id>
    ```
 
-7. **Privacy notice** (NFR-20). Every user must acknowledge the current notice before using the API. Publish the first one from a text file (or `PUT /api/privacy-notice` with `{"text":"..."}`):
+7. **Privacy notice** (NFR-20). Do this step last: once a notice exists, every user (the admin too) must acknowledge it before any other API call, so steps 1-6 would return `NOTICE_REQUIRED`. Publish the first one from a text file (or `PUT /api/privacy-notice` with `{"text":"..."}`):
 
    ```sh
    echo 'We process your attendance data under ...' > notice.txt
