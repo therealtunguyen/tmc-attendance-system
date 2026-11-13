@@ -284,6 +284,21 @@ describe('MFA (FR-5.2)', () => {
 });
 
 describe('TOTP replay (FR-5.2)', () => {
+  it('a replayed valid code is 401 and audited but not counted; a wrong code is (#113 D3)', async () => {
+    const code = totp(SECRET, now);
+    const first = (await login('adm')).body.token;
+    const second = (await login('adm')).body.token;
+    expect((await mfa(first, code)).status).toBe(200);
+    const failed = async () => (await store.findUserByUsername('adm'))!.failedLogins;
+    expect(await failed()).toBe(0);
+    const before = actions().length;
+    expect((await mfa(second, code)).status).toBe(401);
+    expect(await failed()).toBe(0);
+    expect(actions().slice(before)).toEqual(['MFA_FAIL']);
+    expect((await mfa(second, '000000')).status).toBe(401);
+    expect(await failed()).toBe(1);
+  });
+
   it('rejects a used code on a second pending session', async () => {
     const code = totp(SECRET, now);
     const first = (await login('adm')).body.token;
@@ -319,13 +334,21 @@ describe('sessions', () => {
     expect((await me(token)).status).toBe(401);
   });
 
-  it('stops working when the user is deactivated or locked', async () => {
+  it('stops working when the user is deactivated', async () => {
     const { token } = (await login('emp')).body;
     const user = (await store.findUserByUsername('emp'))!;
     user.active = false;
     expect((await me(token)).status).toBe(401);
-    user.active = true;
-    user.lockedUntil = new Date(now + 1000);
+  });
+
+  it('keeps a live session through a lockout, which only blocks new logins (#113 D1)', async () => {
+    const { token } = (await login('emp')).body;
+    for (let i = 0; i < 5; i++) await login('emp', 'wrong password 1');
+    expect((await store.findUserByUsername('emp'))!.lockedUntil).not.toBeNull();
+    expect((await me(token)).status).toBe(200);
+    expect((await login('emp')).status).toBe(423);
+    // Deactivating still kills the session while locked.
+    (await store.findUserByUsername('emp'))!.active = false;
     expect((await me(token)).status).toBe(401);
   });
 

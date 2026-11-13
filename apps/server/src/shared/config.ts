@@ -44,6 +44,28 @@ export const positiveInt = (name: string, fallback: number): number => {
 };
 
 /**
+ * TRUST_PROXY for Express `trust proxy`. Unset or blank = false. 'true'/'false' = boolean, digits =
+ * hop count (a numeric string would be read as an IP), anything else ('loopback', a CIDR list) passes
+ * through as a string. A negative number stops the server.
+ */
+export const parseTrustProxy = (value: string | undefined): boolean | number | string => {
+  const raw = (value ?? '').trim();
+  if (raw === '' || raw === 'false') return false;
+  if (raw === 'true') return true;
+  if (/^\d+$/.test(raw)) {
+    const hops = Number(raw);
+    if (!Number.isSafeInteger(hops)) throw new Error(`TRUST_PROXY hop count too large: "${raw}"`);
+    return hops;
+  }
+  if (/^-\d+$/.test(raw)) {
+    throw new Error(
+      `TRUST_PROXY must be true, false, a hop count or an address list, not "${raw}"`,
+    );
+  }
+  return raw;
+};
+
+/**
  * Comma-separated `edgeId:token` pairs from EDGE_TOKENS (#69).
  * Unset or blank = {} (all /api/edge/* requests fail closed with 401).
  * Malformed entries, duplicate edgeIds, or duplicate tokens stop the server on boot.
@@ -74,6 +96,8 @@ export const parseEdgeTokens = (value: string | undefined): Record<string, strin
 };
 
 export const config = {
+  // Express `trust proxy`: set the hop count behind a reverse proxy (#113 D4).
+  trustProxy: parseTrustProxy(process.env.TRUST_PROXY),
   port: Number(process.env.PORT ?? 3000),
   databaseUrl: process.env.DATABASE_URL ?? '',
   tcsMode: mode(process.env.TCS_MODE),
