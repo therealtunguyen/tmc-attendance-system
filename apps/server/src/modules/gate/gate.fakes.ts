@@ -158,7 +158,7 @@ export const registryService = (
     store,
     { validate: outsideCrud },
     { record: outsideCrud, setOutcome: outsideCrud },
-    { open: outsideCrud },
+    () => ({ open: outsideCrud }),
     { get: outsideCrud, orgUnits: outsideCrud },
     notifier,
     audit,

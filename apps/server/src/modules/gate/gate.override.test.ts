@@ -1,3 +1,5 @@
+import { MockTurnstile } from '../../adapters/tcs/mock.js';
+import type { TurnstileClient } from '../../adapters/tcs/turnstile-client.js';
 import type { Transaction } from '../../shared/transaction.js';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -14,6 +16,8 @@ let store: InMemoryGates;
 let audit: RecordingGateAudit;
 let open: ReturnType<typeof vi.fn<() => Promise<'OPENED' | 'ERROR' | 'TIMEOUT'>>>;
 let employeeActive: boolean;
+let clients: Map<string, TurnstileClient>;
+let lookup: ReturnType<typeof vi.fn<(factoryId: string) => TurnstileClient | undefined>>;
 let user: UserRef | undefined;
 let gateId: string;
 let app: ReturnType<typeof createApp>;
@@ -24,6 +28,8 @@ beforeEach(async () => {
   store = new InMemoryGates();
   audit = new RecordingGateAudit();
   open = vi.fn(async () => 'OPENED' as const);
+  clients = new Map([['binh-duong', { open }]]);
+  lookup = vi.fn((factoryId) => clients.get(factoryId));
   employeeActive = true;
   user = { id: 'guard-1', role: 'GRD', scopes: ['binh-duong'] };
   const directory = {
@@ -71,7 +77,7 @@ beforeEach(async () => {
     store,
     { validate: vi.fn() },
     attendance,
-    { open },
+    lookup,
     { get: vi.fn(), orgUnits: vi.fn() },
     { alert: vi.fn() },
     audit,
@@ -115,6 +121,62 @@ describe('Manual override (FR-2.5, UC-4)', () => {
       target: `attendance-event:${body.eventId}`,
       after: { reason: body.reason, gateId, occurredAt: now.toISOString(), mode: 'OPEN' },
     });
+  });
+
+  it('routes two factories to their own TCS clients and registered device IDs', async () => {
+    const bd = new MockTurnstile('open');
+    const la = new MockTurnstile('fail');
+    const bdOpen = vi.spyOn(bd, 'open');
+    const laOpen = vi.spyOn(la, 'open');
+    clients.set('binh-duong', bd);
+    clients.set('long-an', la);
+    user = { id: 'guard-1', role: 'GRD' };
+    const other = await store.create({
+      ...entrance,
+      factoryId: 'long-an',
+      edgeId: 'edge-la',
+      turnstileId: 'la-turnstile',
+    });
+    expect((await submit()).body.outcome).toBe('GRANTED');
+    expect(
+      (
+        await request(app)
+          .post(`/api/gates/${other.id}/override`)
+          .send({ ...body, eventId: 'manual-la' })
+      ).body.outcome,
+    ).toBe('DENIED');
+    expect(bdOpen).toHaveBeenCalledExactlyOnceWith(entrance.turnstileId);
+    expect(laOpen).toHaveBeenCalledExactlyOnceWith('la-turnstile');
+    expect(events.get('manual-la')).toMatchObject({ gateId: other.id, outcome: 'DENIED' });
+    expect(audit.entries).toHaveLength(2);
+  });
+
+  it('returns 503 without attendance, audit or opening when the factory has no TCS', async () => {
+    clients.clear();
+    clients.set('long-an', { open }); // Another factory must never be a fallback.
+    const res = await submit();
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe('No TCS configured for this factory');
+    expect(lookup).toHaveBeenCalledWith('binh-duong');
+    expect(events.size).toBe(0);
+    expect(audit.entries).toHaveLength(0);
+    expect(open).not.toHaveBeenCalled();
+    clients.set('binh-duong', { open });
+    expect((await submit()).status).toBe(201); // No idempotency key was consumed by 503.
+  });
+
+  it('BACKFILL never resolves a TCS, even when no factory is configured', async () => {
+    clients.clear();
+    lookup.mockImplementation(() => {
+      throw new Error('Must not resolve TCS');
+    });
+    expect(
+      (await submit({ ...body, mode: 'BACKFILL', occurredAt: '2026-11-07T08:00:00+07:00' })).status,
+    ).toBe(201);
+    expect(lookup).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
+    expect(events.get(body.eventId)?.outcome).toBe('GRANTED');
+    expect(audit.entries).toHaveLength(1);
   });
 
   it.each(['ERROR', 'TIMEOUT'] as const)(

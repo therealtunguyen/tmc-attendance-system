@@ -1,4 +1,4 @@
-import type { TurnstileClient } from '../../adapters/tcs/turnstile-client.js';
+import type { OpenResult, TurnstileClient } from '../../adapters/tcs/turnstile-client.js';
 import type { EdgeHeartbeat } from '../../shared/contracts/edge.js';
 import { todo } from '../../shared/errors.js';
 import type { ConfigReader } from '../admin/index.js';
@@ -167,7 +167,7 @@ export class GateService implements EdgeSyncStatus, GateLookup {
     private repo: GateStore,
     private qr: QrValidation,
     private recorder: AttendanceRecorder,
-    private turnstile: TurnstileClient,
+    private turnstileForFactory: (factoryId: string) => TurnstileClient | undefined,
     private config: ConfigReader,
     private notifier: Notifier,
     private audit: AuditLog,
@@ -286,6 +286,13 @@ export class GateService implements EdgeSyncStatus, GateLookup {
     if (!occurredAt || !Number.isFinite(occurredAt.getTime()) || occurredAt > now) {
       throw new OverrideError(400, 'A valid past occurredAt is required');
     }
+    // Resolve before recording: a missing route must not leave a PENDING event or audit.
+    let open = async (): Promise<OpenResult> => 'OPENED'; // BACKFILL sends no command.
+    if (req.mode === 'OPEN') {
+      const turnstile = this.turnstileForFactory(gate.factoryId);
+      if (!turnstile) throw new OverrideError(503, 'No TCS configured for this factory');
+      open = () => turnstile.open(gate.turnstileId);
+    }
     const event = {
       eventId: req.eventId,
       employeeId: employee.id,
@@ -308,7 +315,7 @@ export class GateService implements EdgeSyncStatus, GateLookup {
       at: now,
       after: { ...event, occurredAt: occurredAt.toISOString(), mode: req.mode },
     });
-    const result = req.mode === 'BACKFILL' ? 'OPENED' : await this.turnstile.open(gate.turnstileId);
+    const result = await open();
     const outcome = result === 'OPENED' ? 'GRANTED' : 'DENIED';
     await this.recorder.setOutcome(req.eventId, outcome);
     return { eventId: req.eventId, outcome };

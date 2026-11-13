@@ -176,3 +176,7 @@ The server assumes a single instance for now. These in-process caches would go s
 - CI (lint, typecheck, test) must pass. Use **squash merge**.
 - A module imports another module **only through its `index.ts`**, never its internal files. A module never reads another module's tables.
 - The pre-commit hook formats and lints staged files. Don't skip it.
+
+Manual override in HTTP mode requires `TCS_BASE_URLS=factoryId:url,...` on the central
+server; `TCS_BASE_URL` is only the edge's local TCS endpoint. See
+[factory routing and outage fallback](docs/gate-override.md#factory-tcs-routing-107).
