@@ -1,5 +1,5 @@
 import type { Scope } from '../../shared/types.js';
-import type { AuditLog, ScopeResolver, UserRef } from '../iam/index.js';
+import type { AuditLog, Role, ScopeResolver, UserRef } from '../iam/index.js';
 import {
   CONFIG,
   isConfigKey,
@@ -25,6 +25,12 @@ export interface ConfigReader {
   orgUnits(): Promise<OrgUnit[]>;
 }
 
+/** Read-only view of login accounts, wired at the composition root (IamRepo fits). */
+export interface UserDirectory {
+  /** Null when no such user exists. */
+  findUser(id: string): Promise<{ role: Role; active: boolean } | null>;
+}
+
 export class InvalidOrgUnitError extends Error {}
 export class OrgUnitNotFoundError extends Error {
   constructor(id: string) {
@@ -42,6 +48,11 @@ export class UnknownConfigKeyError extends Error {
   }
 }
 export class InvalidConfigError extends Error {}
+export class ConfigNotWiredError extends Error {
+  constructor(key: string) {
+    super(`Config key ${key} is not used by the system yet, so it cannot be changed`);
+  }
+}
 
 /** Storage the service needs. The Prisma repo implements it; tests use an in-memory one. */
 export interface AdminStore {
@@ -64,6 +75,8 @@ export interface ConfigEntry {
   value: string;
   default: string;
   description: string;
+  /** false = nothing reads this key yet; PUT is rejected (409). */
+  wired: boolean;
   /** true = an admin has set it; false = the default applies. */
   set: boolean;
 }
@@ -79,6 +92,8 @@ export class AdminService implements ConfigReader, ScopeResolver {
   constructor(
     private store: AdminStore,
     private audit: AuditLog,
+    /** Needed to validate supervisors; when omitted the IDs are not checked (tests only). */
+    private users?: UserDirectory,
   ) {}
 
   async get(key: string): Promise<string | undefined> {
@@ -98,6 +113,7 @@ export class AdminService implements ConfigReader, ScopeResolver {
       value: stored.get(key) ?? CONFIG[key].default,
       default: CONFIG[key].default,
       description: CONFIG[key].description,
+      wired: CONFIG[key].wired,
       set: stored.has(key),
     }));
   }
@@ -167,13 +183,28 @@ export class AdminService implements ConfigReader, ScopeResolver {
     return unit;
   }
 
-  /** Replaces the supervisors of a team (BR-15). User IDs are not checked against IAM. */
+  /**
+   * Replaces the supervisors of a team (BR-15). Every ID must be an existing, active user with
+   * the SUP role, otherwise InvalidOrgUnitError lists the bad IDs. An empty list clears them.
+   */
   async setSupervisors(actorId: string, teamId: string, userIds: string[]): Promise<OrgUnit> {
     const before = await this.find(teamId);
     if (before.kind !== 'TEAM') {
       throw new InvalidOrgUnitError('Supervisors can only be set on a TEAM');
     }
     const supervisorIds = [...new Set(userIds)];
+    if (this.users) {
+      const bad: string[] = [];
+      for (const id of supervisorIds) {
+        const user = await this.users.findUser(id);
+        if (!user || user.role !== 'SUP' || !user.active) bad.push(id);
+      }
+      if (bad.length > 0) {
+        throw new InvalidOrgUnitError(
+          `Not an existing, active SUP user: ${bad.map((id) => JSON.stringify(id)).join(', ')}`,
+        );
+      }
+    }
     const unit = await this.write(() => this.store.updateOrgUnit(teamId, { supervisorIds }));
     if (!unit) throw new OrgUnitNotFoundError(teamId);
     // TODO(#45): write the change and its audit entry in one transaction
@@ -189,6 +220,7 @@ export class AdminService implements ConfigReader, ScopeResolver {
 
   async setConfig(actorId: string, key: string, raw: string): Promise<ConfigEntry> {
     if (!isConfigKey(key)) throw new UnknownConfigKeyError(key);
+    if (!CONFIG[key].wired) throw new ConfigNotWiredError(key);
     const value = raw.trim();
     if (CONFIG[key].parse(value) === undefined) {
       throw new InvalidConfigError(`${key}: ${CONFIG[key].description}`);
@@ -202,6 +234,7 @@ export class AdminService implements ConfigReader, ScopeResolver {
       value,
       default: CONFIG[key].default,
       description: CONFIG[key].description,
+      wired: true,
       set: true,
     };
   }

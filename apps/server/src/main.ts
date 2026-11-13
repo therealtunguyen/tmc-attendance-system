@@ -50,8 +50,9 @@ const hrs = config.hrsMode === 'http' ? new HrsHttpClient(config.hrsBaseUrl) : n
 const mailer =
   config.mailMode === 'smtp' ? new SmtpMailer(config.smtpUrl, config.mailFrom) : new MockMailer();
 
-const iam = new IamService(new IamRepo(db));
-const admin = new AdminService(new AdminRepo(db), iam);
+const iamRepo = new IamRepo(db);
+const iam = new IamService(iamRepo);
+const admin = new AdminService(new AdminRepo(db), iam, iamRepo);
 const eqr = new EmployeeQrService(
   new EmployeeQrRepo(db),
   iam,
