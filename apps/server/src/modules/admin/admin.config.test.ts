@@ -9,6 +9,11 @@ describe('config catalogue', () => {
       expect(ok(key, CONFIG[key].default)).toBe(true);
   });
 
+  it('only export.monthlyAt is wired (read by reporting.schedule.ts); the rest reject writes', () => {
+    const wired = (Object.keys(CONFIG) as ConfigKey[]).filter((key) => CONFIG[key].wired);
+    expect(wired).toEqual(['export.monthlyAt']);
+  });
+
   it.each([
     ['qr.ttlSeconds', '30', '300'],
     ['gate.antiPassbackSeconds', '0', '3600'],
