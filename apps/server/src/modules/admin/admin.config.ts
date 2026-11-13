@@ -70,7 +70,8 @@ export const CONFIG = {
   }),
   'integration.tcsBaseUrl': def({
     default: '',
-    description: 'TCS base URL (http or https); empty uses the environment value (FR-5.6)',
+    description:
+      'Reserved, unwired TCS base URL; not used by manual override (uses TCS_BASE_URLS per factory)',
     parse: baseUrl,
     wired: false,
   }),

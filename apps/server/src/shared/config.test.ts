@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   parseEdgeTokens,
+  parseTcsBaseUrls,
   parseTrustProxy,
   parseEmailList,
   parseMailMode,
@@ -115,5 +116,35 @@ describe('parseTrustProxy', () => {
 
   it.each(['-1', '99999999999999999999'])('stops on %j', (value) => {
     expect(() => parseTrustProxy(value)).toThrow('TRUST_PROXY');
+  });
+});
+
+describe('parseTcsBaseUrls', () => {
+  it.each([undefined, '', '  , '])('fails closed with no configured factory: %j', (value) => {
+    expect(Object.keys(parseTcsBaseUrls(value))).toEqual([]);
+  });
+  it('splits only the first colon, trims pairs and normalizes trailing slashes', () => {
+    expect(parseTcsBaseUrls(' bd: http://10.1.0.2:4001/api/ , la:https://[::1]:4002/ ,,')).toEqual({
+      bd: 'http://10.1.0.2:4001/api',
+      la: 'https://[::1]:4002',
+    });
+  });
+  it('supports factory IDs that shadow Object prototype keys', () => {
+    expect(parseTcsBaseUrls('__proto__:http://localhost:4001').__proto__).toBe(
+      'http://localhost:4001',
+    );
+  });
+  it.each([
+    'bd',
+    'bd:',
+    ':http://a',
+    'bd:ftp://a',
+    'bd:bad',
+    'bd:http://a?x=1',
+    'bd:http://a#fragment',
+    'bd:http://user:pass@a',
+    'bd:http://a,bd:http://b',
+  ])('rejects invalid/duplicate mapping %s at startup', (value) => {
+    expect(() => parseTcsBaseUrls(value)).toThrow('TCS_BASE_URLS');
   });
 });

@@ -838,7 +838,7 @@ describe('cross-module flow: real routes, in-memory stores, simulated edge', () 
             gates,
             eqr,
             attendance,
-            turnstile,
+            () => turnstile,
             { get: async () => undefined, ...orgUnits },
             new RecordingNotifier(),
             iam,

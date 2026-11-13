@@ -44,8 +44,12 @@ import { createPrisma } from './shared/prisma.js';
 
 const db = createPrisma(config.databaseUrl);
 
-const turnstile =
-  config.tcsMode === 'http' ? new TcsHttpClient(config.tcsBaseUrl) : new MockTurnstile('open');
+const turnstiles = new Map(
+  Object.entries(config.tcsBaseUrls).map(([factoryId, url]) => [factoryId, new TcsHttpClient(url)]),
+);
+const mockTurnstile = new MockTurnstile('open');
+const turnstileForFactory = (factoryId: string) =>
+  config.tcsMode === 'mock' ? mockTurnstile : turnstiles.get(factoryId);
 const hrs = config.hrsMode === 'http' ? new HrsHttpClient(config.hrsBaseUrl) : new MockHrs();
 const mailer =
   config.mailMode === 'smtp' ? new SmtpMailer(config.smtpUrl, config.mailFrom) : new MockMailer();
@@ -70,10 +74,19 @@ const attendance = new AttendanceService(
   new SyncReconciler(attendanceRepo, eqr, notifier),
 );
 const reports = new MonthlyReportService(eqr, attendance, admin);
-const gate = new GateService(new GateRepo(db), eqr, attendance, turnstile, admin, notifier, iam, {
-  heartbeatTimeoutMs: config.heartbeatTimeoutMs,
-  directory: eqr,
-});
+const gate = new GateService(
+  new GateRepo(db),
+  eqr,
+  attendance,
+  turnstileForFactory,
+  admin,
+  notifier,
+  iam,
+  {
+    heartbeatTimeoutMs: config.heartbeatTimeoutMs,
+    directory: eqr,
+  },
+);
 const runs = new ReportingRepo(db);
 const exports = new HrExportService(
   runs,

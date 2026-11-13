@@ -95,13 +95,45 @@ export const parseEdgeTokens = (value: string | undefined): Record<string, strin
   return tokens;
 };
 
+/** Central override endpoints, not the edge's local TCS_BASE_URL. Missing entries fail closed. */
+export const parseTcsBaseUrls = (value: string | undefined): Record<string, string> => {
+  const urls = Object.create(null) as Record<string, string>;
+  for (const [index, raw] of (value ?? '').split(',').entries()) {
+    const item = raw.trim();
+    if (!item) continue;
+    const sep = item.indexOf(':');
+    const factoryId = sep > 0 ? item.slice(0, sep).trim() : '';
+    const baseUrl = sep > 0 ? item.slice(sep + 1).trim() : '';
+    if (!factoryId || !baseUrl) throw new Error(`TCS_BASE_URLS[${index}] must be "factoryId:url"`);
+    if (Object.hasOwn(urls, factoryId))
+      throw new Error(`TCS_BASE_URLS has duplicate factoryId "${factoryId}"`);
+    try {
+      const url = new URL(baseUrl);
+      if (
+        !['http:', 'https:'].includes(url.protocol) ||
+        url.username ||
+        url.password ||
+        url.search ||
+        url.hash
+      )
+        throw new Error();
+    } catch {
+      throw new Error(
+        `TCS_BASE_URLS[${index}] must use an http(s) base URL without credentials, query or fragment`,
+      );
+    }
+    urls[factoryId] = baseUrl.replace(/\/+$/, '');
+  }
+  return urls;
+};
+
 export const config = {
   // Express `trust proxy`: set the hop count behind a reverse proxy (#113 D4).
   trustProxy: parseTrustProxy(process.env.TRUST_PROXY),
   port: Number(process.env.PORT ?? 3000),
   databaseUrl: process.env.DATABASE_URL ?? '',
   tcsMode: mode(process.env.TCS_MODE),
-  tcsBaseUrl: process.env.TCS_BASE_URL ?? '',
+  tcsBaseUrls: parseTcsBaseUrls(process.env.TCS_BASE_URLS),
   hrsMode: mode(process.env.HRS_MODE),
   hrsBaseUrl: process.env.HRS_BASE_URL ?? '',
   mailMode: parseMailMode(process.env.MAIL_MODE),
