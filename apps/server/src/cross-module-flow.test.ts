@@ -4,7 +4,8 @@
 // The edge is simulated (edgeScan): which events an edge stores and pushes is not tested here.
 import { createHash, createPublicKey, generateKeyPairSync, randomUUID } from 'node:crypto';
 import request from 'supertest';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { MockHrs } from './adapters/hrs/mock.js';
 import { MockTurnstile } from './adapters/tcs/mock.js';
 import { createApp } from './app.js';
 import {
@@ -39,6 +40,7 @@ import {
 import {
   AccessLogService,
   CompanyMonthSource,
+  ExportScheduler,
   HrExportService,
   MonthlyReportService,
   reportingRoutes,
@@ -886,5 +888,116 @@ describe('cross-module flow: real routes, in-memory stores, simulated edge', () 
       expect.objectContaining({ employeeId: lan.id, lastOut: null, missingPunch: true }),
     ]);
     expect(iamStore.audit.filter((e) => e.action === 'GATE_OVERRIDE')).toHaveLength(2);
+  });
+
+  it('edge pushes become daily records and one MockHrs batch in Vietnam dates; the schedule never sends twice (#13)', async () => {
+    const lan = await onboard('BD-0011');
+    const minh = await onboard('BD-0012');
+    const scanAt = async (session: string, at: string) => {
+      nowMs = Date.parse(at);
+      const scan = await edgeScan((await issueQr(session)).body.token);
+      expect(scan.reason).toBeUndefined();
+      return scan.event;
+    };
+    const batch = [
+      await scanAt(lan.session, '2026-10-30T00:58:00.000Z'), // 07:58 on 30 Oct
+      await scanAt(lan.session, '2026-10-30T10:03:00.000Z'), // 17:03 on 30 Oct
+      await scanAt(lan.session, '2026-10-30T17:30:00.000Z'), // 00:30 on 31 Oct (still 30 Oct in UTC)
+      await scanAt(lan.session, '2026-10-31T02:00:00.000Z'), // 09:00 on 31 Oct
+      await scanAt(minh.session, '2026-10-31T01:00:00.000Z'), // 08:00 on 31 Oct, no OUT that day
+      await scanAt(minh.session, '2026-10-31T17:30:00.000Z'), // 00:30 on 1 Nov: not October's
+    ];
+    // Offline backlog in one push, then the outbox retries half of it after a lost reply.
+    expect((await push(...batch)).body).toEqual({ accepted: batch.map((e) => e.eventId) });
+    expect((await push(...batch.slice(0, 3))).status).toBe(200);
+    expect(events.rows.size).toBe(6);
+
+    // Day 1 of November, 06:00 in Vietnam (the default export.monthlyAt); the edge synced after October ended.
+    const exportAt = new Date('2026-10-31T23:00:00Z');
+    const hrs = new MockHrs();
+    const send = vi.spyOn(hrs, 'send');
+    const runs = new InMemoryExportRuns();
+    const exportsSvc = new HrExportService(
+      runs,
+      new CompanyMonthSource(eqr, attendance, orgUnits),
+      hrs,
+      new FakeEdgeSyncs([{ edgeId: EDGE, factoryId: FACTORY, lastSyncAt: exportAt }]),
+      new RecordingNotifier(),
+      iam,
+      { now: () => exportAt, sleep: async () => {}, log: () => {} },
+    );
+    const scheduler = new ExportScheduler({ get: async () => undefined }, runs, exportsSvc, {
+      now: () => exportAt,
+    });
+
+    const expected = {
+      month: '2026-10',
+      rows: [
+        {
+          employeeId: lan.id,
+          employeeCode: 'BD-0011',
+          date: '2026-10-30',
+          firstIn: '2026-10-30T00:58:00.000Z',
+          lastOut: '2026-10-30T10:03:00.000Z',
+          hours: 9.08,
+          missingPunch: false,
+        },
+        {
+          employeeId: lan.id,
+          employeeCode: 'BD-0011',
+          date: '2026-10-31',
+          firstIn: '2026-10-30T17:30:00.000Z',
+          lastOut: '2026-10-31T02:00:00.000Z',
+          hours: 8.5,
+          missingPunch: false,
+        },
+        {
+          employeeId: minh.id,
+          employeeCode: 'BD-0012',
+          date: '2026-10-31',
+          firstIn: '2026-10-31T01:00:00.000Z',
+          lastOut: null,
+          hours: 0,
+          missingPunch: true,
+        },
+      ],
+    };
+    await scheduler.tick();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenNthCalledWith(1, expected);
+
+    // Later ticks and a second scheduled run find the month DONE and send nothing.
+    await scheduler.tick();
+    expect(await exportsSvc.runScheduled('2026-10', false)).toBeNull();
+    expect(send).toHaveBeenCalledTimes(1);
+
+    const exportApp = createApp(
+      [
+        reportingRoutes({
+          reports: new MonthlyReportService(eqr, attendance, orgUnits),
+          exports: exportsSvc,
+          now: () => exportAt,
+        }),
+      ],
+      { before: [authenticate(iam), requireNoticeAck(iam)] },
+    );
+    const status = await request(exportApp)
+      .get('/api/exports/2026-10')
+      .set('Authorization', `Bearer ${HR_SESSION}`);
+    expect(status.status).toBe(200);
+    expect(status.body).toMatchObject({ status: 'DONE', trigger: 'SCHEDULE', attempts: 1 });
+    expect(
+      iamStore.audit.filter((e) => e.target === 'export:2026-10').map((e) => e.action),
+    ).toEqual(['EXPORT_RUN', 'EXPORT_DONE']);
+
+    // Only HR's explicit re-run sends again (FR-4.6), and it sends the same batch (HRS accepts a repeat, ADR-5).
+    const rerun = await request(exportApp)
+      .post('/api/exports/2026-10/rerun')
+      .set('Authorization', `Bearer ${HR_SESSION}`)
+      .send({});
+    expect(rerun.status).toBe(202);
+    await exportsSvc.stop(); // waits for the re-run in flight
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenNthCalledWith(2, expected);
   });
 });
