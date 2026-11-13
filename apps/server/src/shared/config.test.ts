@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { parseEdgeTokens, parseEmailList, parseMailMode, positiveInt } from './config.js';
+import {
+  parseEdgeTokens,
+  parseTrustProxy,
+  parseEmailList,
+  parseMailMode,
+  positiveInt,
+} from './config.js';
 
 describe('parseMailMode', () => {
   it.each([
@@ -89,5 +95,25 @@ describe('parseEdgeTokens', () => {
   it('rejects duplicate edgeId or duplicate token', () => {
     expect(() => parseEdgeTokens('edge-bd:a,edge-bd:b')).toThrow(/duplicate edgeId/);
     expect(() => parseEdgeTokens('edge-bd:same,edge-la:same')).toThrow(/duplicate token/);
+  });
+});
+
+describe('parseTrustProxy', () => {
+  it.each([
+    [undefined, false],
+    ['', false],
+    ['  ', false],
+    ['false', false],
+    ['true', true],
+    ['1', 1],
+    [' 2 ', 2],
+    ['loopback', 'loopback'],
+    ['10.0.0.0/8, 192.168.0.1', '10.0.0.0/8, 192.168.0.1'],
+  ])('reads %j as %j', (value, expected) => {
+    expect(parseTrustProxy(value)).toEqual(expected);
+  });
+
+  it.each(['-1', '99999999999999999999'])('stops on %j', (value) => {
+    expect(() => parseTrustProxy(value)).toThrow('TRUST_PROXY');
   });
 });

@@ -306,9 +306,12 @@ export class IamService implements Authorizer, AuditLog, AuditReader, Authentica
       // A corrupt stored secret fails the code instead of a 500.
       step = null;
     }
-    // A replayed code counts as a failure.
-    if (step === null || !(await this.store.useTotpStep(user.id, step))) {
-      await this.store.recordFailedLogin(user.id, new Date(now));
+    // useTotpStep also refuses a code from an earlier step once a later one was used (RFC 6238 anti-replay).
+    const fresh = step !== null && (await this.store.useTotpStep(user.id, step));
+    if (!fresh) {
+      // A replay answers like a wrong code (no oracle) but does not count toward the lockout: it
+      // needs a code that was valid, so there is no brute-force gain (#113 D3).
+      if (step === null) await this.store.recordFailedLogin(user.id, new Date(now));
       await this.audit(user.id, 'MFA_FAIL', target);
       return { ok: false };
     }
@@ -324,7 +327,9 @@ export class IamService implements Authorizer, AuditLog, AuditReader, Authentica
     const session = await this.liveSession(token, now);
     if (!session?.mfaPassed) return null;
     const user = await this.store.findUser(session.userId);
-    if (!user?.active || (user.lockedUntil && user.lockedUntil.getTime() > now)) return null;
+    // Lockout only blocks new logins and MFA (#113 D1): failed guesses from anyone must not kill a
+    // live session. Disabling an account goes through `active`.
+    if (!user?.active) return null;
     return {
       id: user.id,
       role: user.role,

@@ -1,4 +1,5 @@
 import express, { type RequestHandler, type Router } from 'express';
+import { config } from './shared/config.js';
 
 /** Builds the Express app without listening, so tests can use it directly. */
 export const createApp = (
@@ -6,6 +7,8 @@ export const createApp = (
   options: { before?: RequestHandler[]; edge?: RequestHandler } = {},
 ) => {
   const app = express();
+  // Needed for req.ip (rate limits) behind a reverse proxy (#113 D4).
+  app.set('trust proxy', config.trustProxy);
   app.use(express.json());
   app.get('/health', (_req, res) => {
     res.json({ ok: true });

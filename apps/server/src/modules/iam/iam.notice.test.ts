@@ -61,6 +61,17 @@ beforeEach(async () => {
   const normal = Router()
     .get('/qr/token', requirePermission('self:read'), (_req, res) => void res.json({ qr: true }))
     .get('/me/qr', requirePermission('self:read'), (_req, res) => void res.json({ qr: true }))
+    .get('/gates', requirePermission('gate:monitor'), (_req, res) => void res.json({ ok: 'g' }))
+    .get('/gates/:id', requirePermission('gate:monitor'), (_req, res) => void res.json({ ok: 'g' }))
+    .get(
+      '/access-log',
+      requirePermission('gate:monitor'),
+      (_req, res) => void res.json({ ok: 'a' }),
+    )
+    .patch('/gates/:id', requirePermission('gate:monitor'), (_req, res) => void res.json({}))
+    .post('/gates/:id/override', requirePermission('gate:override'), (_req, res) => {
+      res.json({ ok: 'o' });
+    })
     .get('/things', requirePermission('self:read'), (_req, res) => {
       res.json({ ok: true });
     });
@@ -70,6 +81,7 @@ beforeEach(async () => {
   await signIn('emp', 'EMP');
   await signIn('hr', 'HR');
   await signIn('adm', 'ADM');
+  await signIn('grd', 'GRD');
 });
 
 const publish = (who: string, text = 'We process data for access control and attendance only.') =>
@@ -210,6 +222,35 @@ describe('first-login privacy notice (NFR-20)', () => {
     await publish('hr');
     const qr = await request(app).get('/api/me/qr').set(as('emp'));
     expect([qr.status, qr.body]).toEqual([200, { qr: true }]);
+  });
+
+  it('does not block gate monitor routes for a guard with a pending notice (#113 D2)', async () => {
+    await publish('hr');
+    const get = (path: string) => request(app).get(path).set(as('grd'));
+    for (const path of ['/api/gates', '/api/gates/g1', '/api/access-log', '/api/gates/']) {
+      expect([path, (await get(path)).status]).toEqual([path, 200]);
+    }
+    const override = await request(app).post('/api/gates/g1/override').set(as('grd')).send({});
+    expect(override.status).toBe(200);
+    // Other routes and gate admin methods stay gated, even for a guard.
+    for (const path of ['/api/things', '/api/gatesx']) {
+      const res = await get(path);
+      expect([path, res.status, res.body.code]).toEqual([path, 403, 'NOTICE_REQUIRED']);
+    }
+    const patch = await request(app).patch('/api/gates/g1').set(as('grd')).send({});
+    expect([patch.status, patch.body.code]).toEqual([403, 'NOTICE_REQUIRED']);
+  });
+
+  it('still gates gate routes for roles without gate:override (#113 D2)', async () => {
+    await publish('hr');
+    for (const who of ['hr', 'emp', 'adm']) {
+      for (const res of [
+        await request(app).get('/api/gates').set(as(who)),
+        await request(app).post('/api/gates/g1/override').set(as(who)).send({}),
+      ]) {
+        expect([who, res.status, res.body.code]).toEqual([who, 403, 'NOTICE_REQUIRED']);
+      }
+    }
   });
 
   it('does not cache a read that started before a publish', async () => {

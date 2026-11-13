@@ -10,7 +10,7 @@ export interface RateLimitOptions {
 
 /**
  * Fixed-window limiter keyed by req.ip unless `key` says otherwise. Per process: behind a proxy set
- * Express `trust proxy`, otherwise every client shares the proxy's IP; with several instances a shared
+ * TRUST_PROXY (Express `trust proxy`), otherwise every client shares the proxy's IP; with several instances a shared
  * store is needed.
  */
 export const createRateLimiter = ({
