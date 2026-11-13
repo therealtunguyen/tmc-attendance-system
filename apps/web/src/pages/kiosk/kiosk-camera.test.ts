@@ -228,7 +228,7 @@ describe('main kiosk camera', () => {
 
   it.each([
     [20, 20],
-    [700, 350],
+    [500, 180],
   ])('optically decodes a phone QR away from the center at %s,%s', async (left, top) => {
     const decode = (await vi.importActual<typeof import('jsqr')>('jsqr')).default;
     const token =
@@ -236,9 +236,9 @@ describe('main kiosk camera', () => {
       'eyJzdWIiOiJkZW1vLWFjdGl2ZSIsImV4cCI6MTc5NDM5MDQwMCwianRpIjoiZGVtby1zY2FuIn0.' +
       'a'.repeat(86);
     const svg = renderToStaticMarkup(createElement(QRCodeSVG, { value: token, marginSize: 4 }));
-    const scale = 4,
-      width = 1280,
-      height = 720;
+    const scale = 3,
+      width = 800,
+      height = 450;
     const pixels = new Uint8ClampedArray(width * height * 4).fill(255);
     const black = svg.match(/fill="#000000" d="([^"]+)/)![1];
     for (const [, x, y, length] of black.matchAll(/M([0-9]+)[ ,]+([0-9]+) *h([0-9]+)v1H[0-9]+z/g)) {

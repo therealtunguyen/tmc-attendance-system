@@ -103,7 +103,12 @@ const employeeQr = new EmployeeQrService(
 );
 const directory = mkdtempSync(join(tmpdir(), 'tmc-kiosk-demo-'));
 const db = openDb(directory);
-db.setKv('snapshot', JSON.stringify(await employeeQr.snapshot()));
+db.setKv(
+  'snapshot',
+  JSON.stringify(
+    await employeeQr.snapshot([{ id: 'gate-demo', turnstileId: 'demo-turnstile', active: true }]),
+  ),
+);
 db.setKv('snapshot_at', String(Date.now()));
 // No snapshot/outbox/heartbeat loops: demo data never goes to a central server.
 const snapshots = new SnapshotManager(db, new ServerClient('http://127.0.0.1:1'), 'demo-only');
