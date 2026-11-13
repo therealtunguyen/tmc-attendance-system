@@ -92,7 +92,7 @@ const app = createApp(
       mfa: { max: config.authRateLimitPerMin },
     }),
     adminRoutes(admin),
-    employeeQrRoutes(eqr, admin, { qrToken: { max: config.qrTokenRateLimitPerMin } }),
+    employeeQrRoutes(eqr, admin, { qrToken: { max: config.qrTokenRateLimitPerMin } }, gate),
     attendanceRoutes(attendance, gate),
     reportingRoutes({ reports, exports, accessLog: new AccessLogService(attendance, gate, eqr) }),
     gateRoutes(gate),

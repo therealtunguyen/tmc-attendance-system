@@ -57,7 +57,9 @@ describe('Edge HTTP end-to-end (#27-#30)', () => {
     let centralOnline = true;
     const storedOnServer = new Map<string, EdgeEvent>();
     const heartbeats: EdgeHeartbeat[] = [];
-    const snapshot: EdgeSnapshot = makeSnapshot([employee], publicKey);
+    const snapshot: EdgeSnapshot = makeSnapshot([employee], publicKey, 'k1', [
+      { id: 'gate-1', turnstileId: 'TS-1', active: true },
+    ]);
 
     centralHttp = createServer(async (req, res) => {
       if (!centralOnline) {

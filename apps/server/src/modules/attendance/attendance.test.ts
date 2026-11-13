@@ -601,7 +601,7 @@ describe('POST /api/edge/events', () => {
         edgeId: 'e',
         events: [edgeEvent('x-1', { outcome: 'DENIED', denyReason: 'BANNED' as 'EXPIRED' })],
       },
-      'events[0].denyReason must be one of INVALID_SIGNATURE, EXPIRED, UNKNOWN, INACTIVE, REVOKED, REPLAYED or null',
+      'events[0].denyReason must be one of INVALID_SIGNATURE, EXPIRED, UNKNOWN, INACTIVE, REVOKED, REPLAYED, UNKNOWN_GATE, GATE_INACTIVE or null',
     ],
     [
       'a denyReason on a GRANTED event',

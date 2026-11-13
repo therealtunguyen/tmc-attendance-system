@@ -20,8 +20,12 @@ export const HEARTBEAT_CHECK_INTERVAL_MS = 15_000;
  */
 export const MAX_EDGE_BATCH = 200;
 
-/** Why a scan was denied (FR-4.4): a QR check failure, or a jti already used (ADR-10, checked at the edge). */
-export type EdgeDenyReason = QrDenyReason | 'REPLAYED';
+/**
+ * Why a scan was denied (FR-4.4): a QR check failure, a jti already used (ADR-10, checked at the edge),
+ * or a gate check against the snapshot (#113). UNKNOWN_GATE is never pushed: the server would reject
+ * the batch, so the edge only logs it.
+ */
+export type EdgeDenyReason = QrDenyReason | 'REPLAYED' | 'UNKNOWN_GATE' | 'GATE_INACTIVE';
 export const DENY_REASONS: readonly EdgeDenyReason[] = [
   'INVALID_SIGNATURE',
   'EXPIRED',
@@ -29,6 +33,8 @@ export const DENY_REASONS: readonly EdgeDenyReason[] = [
   'INACTIVE',
   'REVOKED',
   'REPLAYED',
+  'UNKNOWN_GATE',
+  'GATE_INACTIVE',
 ];
 
 /** One scan the edge has committed locally. The edge's outbox pushes it until the server confirms. */
@@ -81,6 +87,16 @@ export interface SnapshotEmployee {
   deny: 'REVOKED' | 'INACTIVE' | null;
 }
 
+/** A gate of the requesting edge (#113). Missing from the snapshot = unknown gate. */
+export interface SnapshotGate {
+  /** Gate UUID, what the kiosk sends as `gateId` and what events carry. */
+  id: string;
+  /** The device id TCS expects in `open()`. */
+  turnstileId: string;
+  /** False = deactivated: the edge denies with GATE_INACTIVE. */
+  active: boolean;
+}
+
 /** 200 from GET /api/edge/snapshot?edgeId=... Full snapshot each time; no diffs at this size. */
 export interface EdgeSnapshot {
   /** Server clock. The edge compares it with its own to set `stale`. */
@@ -88,6 +104,11 @@ export interface EdgeSnapshot {
   /** Current and previous signing key (ADR-10 rotation). */
   publicKeys: EdgePublicKey[];
   employees: SnapshotEmployee[];
+  /**
+   * Only the gates of the requesting edge (#113). A snapshot saved by an older server has none; the
+   * edge then skips the gate check instead of denying everything (ADR-9 offline resilience).
+   */
+  gates: SnapshotGate[];
 }
 
 /** POST /api/edge/heartbeat. 204. The server marks the edge offline when these stop (FR-2.6). */

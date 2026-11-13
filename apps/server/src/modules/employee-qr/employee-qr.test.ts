@@ -995,7 +995,13 @@ describe('EmployeeQrService.snapshot (ADR-9)', () => {
         { kid: 'k1', spki: k1.publicKey },
       ],
       employees: [],
+      gates: [],
     });
+  });
+
+  it('carries the gates it is given (#113)', async () => {
+    const gates = [{ id: 'g-1', turnstileId: 'TS-1', active: false }];
+    expect((await svc().snapshot(gates)).gates).toEqual(gates);
   });
 
   it('lists every employee with the reason a gate must deny them', async () => {
@@ -1106,7 +1112,34 @@ describe('GET /api/edge/snapshot', () => {
       generatedAt: NOW.toISOString(),
       publicKeys: [{ kid: 'k1', spki: k1.publicKey }],
       employees: [{ id, firstName: 'Lan', deny: null }],
+      gates: [],
     });
+  });
+
+  it("lists only the authenticated edge's gates, from edge auth and not the query (#113)", async () => {
+    const all = [
+      { edgeId: 'edge-bd', gate: { id: 'g-bd', turnstileId: 'TS-BD', active: true } },
+      { edgeId: 'edge-bd', gate: { id: 'g-bd2', turnstileId: 'TS-BD2', active: false } },
+      { edgeId: 'edge-la', gate: { id: 'g-la', turnstileId: 'TS-LA', active: true } },
+    ];
+    const edgeGates = {
+      gatesForEdge: async (edgeId: string) =>
+        all.filter((g) => g.edgeId === edgeId).map((g) => g.gate),
+    };
+    const gated = createApp([
+      edgeAs('edge-bd'),
+      employeeQrRoutes(
+        new EmployeeQrService(store, audit, keysK1, () => NOW),
+        undefined,
+        {},
+        edgeGates,
+      ),
+    ]);
+    const res = await request(gated).get('/api/edge/snapshot?edgeId=edge-la');
+    expect(res.body.gates).toEqual([
+      { id: 'g-bd', turnstileId: 'TS-BD', active: true },
+      { id: 'g-bd2', turnstileId: 'TS-BD2', active: false },
+    ]);
   });
 
   it('is never cached: a revocation must reach the edge on its next pull', async () => {
