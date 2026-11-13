@@ -6,6 +6,9 @@ const DAY_MS = 24 * HOUR_MS;
 /** Both factories are in Vietnam: Asia/Ho_Chi_Minh is UTC+7 all year (no daylight saving). */
 const VN_OFFSET_MS = 7 * HOUR_MS;
 
+/** #113 C2: scans closer together than this are a double tap, not a punch pair. */
+export const MIN_PUNCH_GAP_MS = 5 * 60_000;
+
 /** Start of the Vietnam local day that contains `at`, as an instant. */
 export const localDayStart = (at: Date): Date =>
   new Date(Math.floor((at.getTime() + VN_OFFSET_MS) / DAY_MS) * DAY_MS - VN_OFFSET_MS);
@@ -67,6 +70,10 @@ const correctedValue = (
  * A scan that arrives late from an edge can put first in after last out on a corrected day. The
  * pair is then not a working time, so the day has 0 hours and is flagged like a missing punch
  * until HR corrects it again.
+ * Assumptions: every shift starts and ends on the same Asia/Ho_Chi_Minh calendar day; a shift
+ * across midnight shows as two missing-punch days that HR corrects (#113 C1).
+ * A single scan cannot be told IN from OUT, so the day stays missing until HR corrects LAST_OUT;
+ * it is not inferred, even when HR corrected FIRST_IN (#113 C3).
  * Sorted by employeeId, then day.
  */
 export const buildDailyRecords = (
@@ -88,7 +95,10 @@ export const buildDailyRecords = (
       const correctedIn = correctedValue(corrections, employeeId, day, 'FIRST_IN');
       const correctedOut = correctedValue(corrections, employeeId, day, 'LAST_OUT');
       const firstIn = correctedIn ?? new Date(Math.min(...times));
-      const lastOut = correctedOut ?? (times.length === 1 ? null : new Date(Math.max(...times)));
+      // #113 C2: gap measured on the raw scans, so a double tap (< MIN_PUNCH_GAP_MS) is no lastOut.
+      const scanSpan = Math.max(...times) - Math.min(...times);
+      const lastOut =
+        correctedOut ?? (scanSpan >= MIN_PUNCH_GAP_MS ? new Date(Math.max(...times)) : null);
       const span = lastOut ? lastOut.getTime() - firstIn.getTime() : 0;
       return {
         employeeId,

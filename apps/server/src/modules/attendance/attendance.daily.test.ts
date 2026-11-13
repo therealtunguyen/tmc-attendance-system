@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildDailyRecords,
   localDayStart,
+  MIN_PUNCH_GAP_MS,
   parseRecordId,
   recordIdOf,
   type DailyInput,
@@ -45,6 +46,30 @@ describe('buildDailyRecords (FR-3.4, FR-3.5)', () => {
     expect(buildDailyRecords([granted('emp-1', '2026-11-07T01:00:00Z')])).toEqual([
       expect.objectContaining({ lastOut: null, hours: 0, missingPunch: true }),
     ]);
+  });
+
+  it('a double tap is a missing punch with no last out and 0 hours (#113 C2)', () => {
+    expect(
+      buildDailyRecords([
+        granted('emp-1', '2026-11-07T01:00:00Z'),
+        granted('emp-1', '2026-11-07T01:00:05Z'),
+      ]),
+    ).toEqual([expect.objectContaining({ lastOut: null, hours: 0, missingPunch: true })]);
+  });
+
+  it('the punch gap is inclusive at exactly MIN_PUNCH_GAP_MS (#113 C2)', () => {
+    const t0 = new Date('2026-11-07T01:00:00Z').getTime();
+    const at = (ms: number) => new Date(t0 + ms).toISOString();
+    const [ok] = buildDailyRecords([
+      granted('emp-1', at(0)),
+      granted('emp-1', at(MIN_PUNCH_GAP_MS)),
+    ]);
+    expect(ok).toMatchObject({ lastOut: new Date(t0 + MIN_PUNCH_GAP_MS), missingPunch: false });
+    const [short] = buildDailyRecords([
+      granted('emp-1', at(0)),
+      granted('emp-1', at(MIN_PUNCH_GAP_MS - 1_000)),
+    ]);
+    expect(short).toMatchObject({ lastOut: null, missingPunch: true, hours: 0 });
   });
 
   it('rounds hours to 2 decimals', () => {
@@ -127,6 +152,14 @@ describe('buildDailyRecords with HR corrections (FR-3.6)', () => {
     expect(record).toMatchObject({ hours: 9, missingPunch: false, corrected: true });
   });
 
+  it('a corrected last out wins over a double tap (#113 C2)', () => {
+    const [record] = buildDailyRecords(
+      [scan, granted('emp-1', '2026-11-07T01:00:05Z')],
+      [correction('LAST_OUT', '2026-11-07T10:00:00Z')],
+    );
+    expect(record).toMatchObject({ hours: 9, missingPunch: false, corrected: true });
+  });
+
   it('a corrected first in leaves a single scan as a missing punch', () => {
     const [record] = buildDailyRecords([scan], [correction('FIRST_IN', '2026-11-07T00:30:00Z')]);
     expect(record).toMatchObject({
@@ -194,11 +227,11 @@ describe('buildDailyRecords with HR corrections (FR-3.6)', () => {
     });
   });
 
-  it('two scans at the same instant are 0 hours, not a missing punch', () => {
+  it('two scans at the same instant are a missing punch, 0 hours (#113 C2)', () => {
     const [record] = buildDailyRecords([
       granted('emp-1', '2026-11-07T01:00:00Z'),
       granted('emp-1', '2026-11-07T01:00:00Z'),
     ]);
-    expect(record).toMatchObject({ hours: 0, missingPunch: false });
+    expect(record).toMatchObject({ lastOut: null, hours: 0, missingPunch: true });
   });
 });

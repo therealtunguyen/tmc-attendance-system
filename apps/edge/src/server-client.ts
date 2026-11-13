@@ -35,7 +35,7 @@ export class ServerClient {
         `${this.baseUrl}/api/edge/snapshot?edgeId=${encodeURIComponent(edgeId)}`,
         { headers: this.headers(), signal: this.signal() },
       );
-      return json<EdgeSnapshot>(res);
+      return await json<EdgeSnapshot>(res);
     } catch (err) {
       return { ok: false, status: 0, error: String(err) };
     }
@@ -49,7 +49,7 @@ export class ServerClient {
         body: JSON.stringify(req),
         signal: this.signal(),
       });
-      return json<PushEventsResponse>(res);
+      return await json<PushEventsResponse>(res);
     } catch (err) {
       return { ok: false, status: 0, error: String(err) };
     }

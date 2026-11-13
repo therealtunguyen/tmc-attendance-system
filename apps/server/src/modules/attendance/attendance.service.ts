@@ -71,6 +71,9 @@ export interface SyncReconciliation {
   reconcile(edgeId: string, stored: StoredEvent[]): Promise<void>;
 }
 
+/** #113 C4: an ingested event dated further ahead than this (edge clock skew) is not accepted. */
+export const MAX_FUTURE_SKEW_MS = 5 * 60_000;
+
 /** FR-4.4: one page of the access log holds at most this many rows; callers page by time. */
 export const ACCESS_LOG_MAX_LIMIT = 500;
 
@@ -283,7 +286,17 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
    * so the jti and stale of a skipped duplicate are not merged into the stored row.
    * Only the events this push added are reconciled (#33): a batch sent again raises no second alert.
    */
-  async ingest({ edgeId, events }: PushEventsRequest): Promise<PushEventsResponse> {
+  async ingest({ edgeId, events: batch }: PushEventsRequest): Promise<PushEventsResponse> {
+    // #113 C4: drop future-dated events per event (not a 400: that would block the outbox, #96).
+    // They are left out of `accepted`, so the edge counts an attempt and eventually parks them.
+    const latest = this.now().getTime() + MAX_FUTURE_SKEW_MS;
+    const events = batch.filter((e) => {
+      if (new Date(e.occurredAt).getTime() <= latest) return true;
+      console.warn(
+        `[ingest] edge=${edgeId} event=${e.eventId} rejected: occurredAt ${e.occurredAt} is in the future`,
+      );
+      return false;
+    });
     const rows: StoredEvent[] = events.map((e) => ({
       eventId: e.eventId,
       employeeId: e.employeeId,

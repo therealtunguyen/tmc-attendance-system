@@ -8,8 +8,8 @@ import type {
 } from '../../../server/src/adapters/tcs/turnstile-client.js';
 import { MAX_PUSH_ATTEMPTS, OUTBOX_BATCH_LIMIT, type Db } from '../db.js';
 import { flushOutbox, outboxSize } from '../outbox.js';
+import { ServerClient } from '../server-client.js';
 import { scan } from '../scan.js';
-import type { ServerClient } from '../server-client.js';
 import {
   createTempDb,
   generatePair,
@@ -342,5 +342,52 @@ describe('outbox — network drop then recovery (#27, #30)', () => {
     } finally {
       errorSpy.mockRestore();
     }
+  });
+});
+
+describe('non-JSON 200 body (#113 B1)', () => {
+  const html = () =>
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response('<html>captive portal</html>', {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+          }),
+      ),
+    );
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('getSnapshot and pushEvents resolve {ok:false} instead of rejecting', async () => {
+    html();
+    const client = new ServerClient('http://server.test', 't');
+    expect((await client.getSnapshot('edge')).ok).toBe(false);
+    expect((await client.pushEvents({ edgeId: 'edge', events: [] })).ok).toBe(false);
+  });
+
+  it('flushOutbox does not reject and keeps the event queued', async () => {
+    html();
+    db.commitScan(
+      {
+        eventId: 'e1',
+        gateId: 'g',
+        employeeId: 'x',
+        method: 'QR',
+        outcome: 'GRANTED',
+        occurredAt: new Date(Date.now() - 10_000).toISOString(),
+        jti: 'j',
+        stale: 0,
+        denyReason: null,
+      },
+      1000,
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await expect(
+      flushOutbox(db, new ServerClient('http://server.test', 't'), 'edge'),
+    ).resolves.toBe(0);
+    warn.mockRestore();
+    expect(outboxSize(db)).toBe(1);
   });
 });

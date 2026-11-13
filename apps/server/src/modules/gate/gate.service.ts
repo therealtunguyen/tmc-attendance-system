@@ -338,13 +338,15 @@ export class GateService implements EdgeSyncStatus, GateLookup {
     for (const edge of await this.repo.offlineEdges(
       new Date(this.now().getTime() - this.timeout),
     )) {
-      const heartbeat = edge.lastHeartbeatAt!.getTime();
+      // #113 B3: dedupe per baseline, so a never-connected edge alerts once, not every check.
+      const heartbeat = edge.since.getTime();
       if (this.alerted.get(edge.id) === heartbeat) continue;
       try {
         const gates = edge.gates.map((gate) => `${gate.name} (${gate.id})`).join(', ');
         await this.notifier.alert(
           'GATE_OFFLINE',
-          `Edge ${edge.id}, factory ${edge.factoryId}: ${gates} offline`,
+          `Edge ${edge.id}, factory ${edge.factoryId}: ${gates} offline` +
+            (edge.lastHeartbeatAt ? '' : ' (never connected)'),
         );
         this.alerted.set(edge.id, heartbeat);
       } catch (error) {

@@ -8,6 +8,8 @@ export interface EdgeState {
 
 export interface OfflineEdge extends EdgeState {
   factoryId: string;
+  /** Baseline for the timeout: last heartbeat, or when the edge's oldest active gate was created. */
+  since: Date;
   gates: { id: string; name: string }[];
 }
 
