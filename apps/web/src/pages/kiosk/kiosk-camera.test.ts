@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { QRCodeSVG } from 'qrcode.react';
 import jsQR from 'jsqr';
 import { KioskCamera } from './kiosk-camera';
+import { RESULT_DISPLAY_MS } from './kiosk-scan';
 
 vi.mock('jsqr', () => ({ default: vi.fn() }));
 afterEach(() => {
@@ -24,7 +25,11 @@ function setup() {
   } as unknown as HTMLVideoElement;
   const context = {
     drawImage: vi.fn(),
-    getImageData: () => ({ data: new Uint8ClampedArray(), width: 1280, height: 720 }),
+    getImageData: vi.fn((_x: number, _y: number, width: number, height: number) => ({
+      data: new Uint8ClampedArray(),
+      width,
+      height,
+    })),
   };
   const getUserMedia = vi.fn(async () => stream);
   vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } });
@@ -60,7 +65,8 @@ describe('main kiosk camera', () => {
     });
     expect(test.changed).toHaveBeenLastCalledWith('ready');
     test.tick(200);
-    expect(test.context.drawImage).toHaveBeenCalledWith(test.video, 0, 0, 1280, 720);
+    expect(test.context.drawImage).toHaveBeenCalledWith(test.video, 0, 0, 800, 450);
+    expect(test.context.getImageData).toHaveBeenCalledWith(0, 0, 800, 450);
     expect(test.accept).toHaveBeenCalledWith('first');
     test.camera.stop();
   });
@@ -95,6 +101,67 @@ describe('main kiosk camera', () => {
     test.tick(1800);
     expect(test.accept).toHaveBeenCalledTimes(2);
     test.camera.stop();
+  });
+
+  it('does not re-submit the same QR after a decode gap during the result window', async () => {
+    const test = setup();
+    await test.camera.start();
+    test.tick(200);
+    test.accept.mockReturnValue(false); // Processing/result screen is busy.
+    vi.mocked(jsQR).mockReturnValue(null);
+    test.tick(400);
+    test.tick(1600);
+    vi.mocked(jsQR).mockReturnValue({ data: 'first' } as ReturnType<typeof jsQR>);
+    test.tick(1800);
+    test.accept.mockReturnValue(true); // Idle again after the result screen.
+    test.tick(RESULT_DISPLAY_MS + 400);
+    expect(test.accept).toHaveBeenCalledTimes(1);
+    // Even a longer removal must not replay the same accepted token.
+    vi.mocked(jsQR).mockReturnValue(null);
+    test.tick(RESULT_DISPLAY_MS + 600);
+    test.tick(RESULT_DISPLAY_MS * 3);
+    vi.mocked(jsQR).mockReturnValue({ data: 'first' } as ReturnType<typeof jsQR>);
+    test.tick(RESULT_DISPLAY_MS * 3 + 200);
+    expect(test.accept).toHaveBeenCalledTimes(1);
+    vi.mocked(jsQR).mockReturnValue({ data: 'next-person' } as ReturnType<typeof jsQR>);
+    test.tick(RESULT_DISPLAY_MS * 3 + 400);
+    expect(test.accept).toHaveBeenCalledTimes(2);
+    expect(test.accept).toHaveBeenLastCalledWith('next-person');
+    test.camera.stop();
+  });
+
+  it.each([
+    [720, 1280, 450, 800],
+    [640, 480, 640, 480],
+  ])(
+    'limits the longest decode dimension without upscaling: %s x %s',
+    async (width, height, decodedWidth, decodedHeight) => {
+      const test = setup();
+      Object.assign(test.video, { videoWidth: width, videoHeight: height });
+      await test.camera.start();
+      test.tick(200);
+      expect(test.context.drawImage).toHaveBeenCalledWith(
+        test.video,
+        0,
+        0,
+        decodedWidth,
+        decodedHeight,
+      );
+      expect(test.context.getImageData).toHaveBeenCalledWith(0, 0, decodedWidth, decodedHeight);
+      test.camera.stop();
+    },
+  );
+
+  it('distinguishes blocked autoplay from denied camera access', async () => {
+    const test = setup();
+    vi.mocked(test.video.play).mockRejectedValue(
+      Object.assign(new Error(), { name: 'NotAllowedError' }),
+    );
+    await test.camera.start();
+    expect(test.changed).toHaveBeenLastCalledWith('playback-blocked');
+    expect(test.changed).not.toHaveBeenCalledWith('denied');
+    expect(test.track.stop).toHaveBeenCalledOnce();
+    expect(test.video.srcObject).toBeNull();
   });
 
   it('does not consume a QR while the kiosk is busy', async () => {

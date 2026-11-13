@@ -1,7 +1,7 @@
 import jsQR from 'jsqr';
 import type { CameraFacing } from './kiosk-settings';
 
-export type CameraState = 'starting' | 'ready' | 'denied' | 'unavailable';
+export type CameraState = 'starting' | 'ready' | 'denied' | 'unavailable' | 'playback-blocked';
 
 /** Decode the entire image, without requiring alignment inside a small target. */
 export class KioskCamera {
@@ -10,6 +10,7 @@ export class KioskCamera {
   private animation = 0;
   private lastFrame = 0;
   private presented = false;
+  private lastAccepted?: string;
   private missingSince?: number;
 
   constructor(
@@ -37,7 +38,19 @@ export class KioskCamera {
       }
       this.stream = stream;
       this.video.srcObject = stream;
-      await this.video.play();
+      // Playback policy failures are not camera permission failures.
+      try {
+        await this.video.play();
+      } catch (error) {
+        this.release();
+        if (!this.stopped)
+          this.changed(
+            error instanceof Error && error.name === 'NotAllowedError'
+              ? 'playback-blocked'
+              : 'unavailable',
+          );
+        return;
+      }
       if (this.stopped) return;
       const canvas = document.createElement('canvas');
       const context = canvas.getContext('2d', { willReadFrequently: true });
@@ -47,10 +60,9 @@ export class KioskCamera {
         if (this.stopped) return;
         if (this.video.readyState >= 2 && this.video.videoWidth && time - this.lastFrame >= 200) {
           this.lastFrame = time;
-          canvas.width = Math.min(1280, this.video.videoWidth);
-          canvas.height = Math.round(
-            (this.video.videoHeight / this.video.videoWidth) * canvas.width,
-          );
+          const scale = Math.min(1, 800 / Math.max(this.video.videoWidth, this.video.videoHeight));
+          canvas.width = Math.round(this.video.videoWidth * scale);
+          canvas.height = Math.round(this.video.videoHeight * scale);
           context.drawImage(this.video, 0, 0, canvas.width, canvas.height);
           const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
           const qr = jsQR(pixels.data, pixels.width, pixels.height, {
@@ -58,7 +70,12 @@ export class KioskCamera {
           });
           if (qr?.data) {
             this.missingSince = undefined;
-            if (!this.presented && this.accept(qr.data)) this.presented = true;
+            // A decode gap (glare/movement) must not submit the same accepted payload again.
+            // Only a different successfully accepted QR replaces this identity.
+            if (!this.presented && qr.data !== this.lastAccepted && this.accept(qr.data)) {
+              this.presented = true;
+              this.lastAccepted = qr.data;
+            }
           } else {
             this.missingSince ??= time;
             if (time - this.missingSince >= 1000) this.presented = false;

@@ -553,9 +553,7 @@ export function KioskPage() {
                 <div>
                   <p className="kiosk-section-label">TMC Attendance</p>
                   <h1>
-                    {settings ? (
-                      label('settings', language)
-                    ) : gateId ? (
+                    {gateId ? (
                       <>
                         {label('gate', language)} {gateId}
                       </>

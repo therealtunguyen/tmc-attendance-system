@@ -1,3 +1,4 @@
+// Development-only demo: temporary data, mock TCS, no production deployment.
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import console from 'node:console';

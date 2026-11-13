@@ -71,7 +71,7 @@ browser integration also exercised the edge, SQLite, TCS mock, central routes an
 Prisma with temporary PGlite. Physical scanner, PostgreSQL deployment and physical
 TCS/network timing still need verification before claiming the full 2 s target.
 
-## Local QR demo
+## Local QR demo (development only)
 
 From the repository root, run `npm ci` once (Node 22+), then:
 
@@ -131,7 +131,7 @@ The main kiosk automatically starts the camera; allow browser camera access.
 Hold the phone QR anywhere in the visible camera image. Camera frames are
 locally decoded with jsQR; only the token is sent to the real edge for validation.
 Each presentation is scanned once, even when the portal refreshes the QR;
-remove the phone for at least a second before scanning again. The camera stays
+remove the phone for at least a second before presenting a different QR. The last accepted payload is ignored until a different QR is accepted; a brief decode gap cannot re-submit it. The camera stays
 on while results display, ready for the next person. Leaving the kiosk or opening
 settings releases the camera. The old /demo/person URL redirects to this page.
 
@@ -205,3 +205,10 @@ curl -i http://kiosk.example.com/api/kiosk/scan \
 Expect HTTP 400 with the edge's `gateId must match` error, not SPA HTML or a
 central-server 404. Use `https://` for an HTTPS deployment. Keep automatic retries
 disabled for scan requests in any additional ingress/load balancer as well.
+
+Camera decoding downsizes the full frame to at most 800 pixels on its longest
+side before processing, including portrait video. No image data leaves the device.
+An autoplay block is reported separately from denied camera permission.
+The demo uses internal modules and mock adapters for local development only;
+never deploy it as the production server. Camera input and the demo support #41
+under #5; the review follow-ups are tracked in #99.

@@ -5,6 +5,7 @@ import type { CameraFacing } from './kiosk-settings';
 const messages = {
   vi: {
     starting: 'Đang mở camera…',
+    'playback-blocked': 'Không phát được hình camera. Nhấn thử lại camera.',
     denied: 'Cho phép camera trong trình duyệt để quét QR.',
     unavailable: 'Không mở được camera. Kiểm tra camera và dùng HTTPS hoặc localhost.',
     retry: 'Thử lại camera',
@@ -13,6 +14,7 @@ const messages = {
   },
   en: {
     starting: 'Starting camera…',
+    'playback-blocked': 'Camera playback was blocked. Tap Retry camera.',
     denied: 'Allow camera access in your browser to scan QR codes.',
     unavailable: 'Camera unavailable. Check your camera and use HTTPS or localhost.',
     retry: 'Retry camera',
