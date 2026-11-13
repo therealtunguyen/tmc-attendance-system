@@ -20,8 +20,8 @@ export const config = {
   serverBaseUrl: process.env.SERVER_BASE_URL ?? 'http://localhost:3000',
   /** Shared secret matching EDGE_ID in the server's EDGE_TOKENS (#69). */
   edgeToken: process.env.EDGE_TOKEN ?? '',
-  /** Kiosk HTTP port. */
-  port: num(process.env.PORT, 3100),
+  /** Kiosk HTTP port. EDGE_PORT only; not PORT, since the shared .env also sets PORT for the server. */
+  port: num(process.env.EDGE_PORT, 3100),
   // TCS
   tcsMode: process.env.TCS_MODE === 'http' ? ('http' as const) : ('mock' as const),
   tcsBaseUrl: process.env.TCS_BASE_URL ?? '',

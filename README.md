@@ -14,7 +14,7 @@ npm install
 cp .env.example .env
 npm run db:up                                   # Postgres only
 (cd apps/server && npx prisma migrate dev)      # create tables
-npm run dev                                     # server :3000, web :5173
+npm run dev                                     # server :3000, web :5173, edge :3100
 ```
 
 Check: <http://localhost:3000/health> returns `{ "ok": true }`, and <http://localhost:5173> shows the kiosk, portal and staff pages.
