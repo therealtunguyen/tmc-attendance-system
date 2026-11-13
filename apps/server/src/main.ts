@@ -47,6 +47,11 @@ const db = createPrisma(config.databaseUrl);
 const turnstiles = new Map(
   Object.entries(config.tcsBaseUrls).map(([factoryId, url]) => [factoryId, new TcsHttpClient(url)]),
 );
+if (config.tcsMode === 'http' && turnstiles.size === 0) {
+  console.warn(
+    'TCS_MODE=http but TCS_BASE_URLS is empty: all OPEN overrides will return 503; BACKFILL remains available.',
+  );
+}
 const mockTurnstile = new MockTurnstile('open');
 const turnstileForFactory = (factoryId: string) =>
   config.tcsMode === 'mock' ? mockTurnstile : turnstiles.get(factoryId);
