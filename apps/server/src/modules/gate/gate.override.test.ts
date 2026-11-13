@@ -1,3 +1,4 @@
+import type { Transaction } from '../../shared/transaction.js';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../../app.js';
@@ -29,6 +30,7 @@ beforeEach(async () => {
     find: async (id: string) =>
       id === 'emp-1' ? { id, firstName: 'An', lastName: 'Nguyen', active: employeeActive } : null,
     list: async () => [],
+    scopesOf: async () => null,
   };
   const attendance = new AttendanceService(
     {
@@ -37,9 +39,22 @@ beforeEach(async () => {
         events.set(event.eventId, { ...event });
         return true;
       },
-      insertMany: async () => {},
+      insertMany: async () => [],
+      eventsWithJti: async () => [],
       grantedEvents: async () => [],
       grantedEventsOf: async () => [],
+      corrections: async () => [],
+      correctionsOf: async () => [],
+      withRecordLock: async (_employeeId, _day, work) =>
+        work(
+          {
+            grantedEvents: async () => [],
+            corrections: async () => [],
+            insertCorrection: async () => {},
+          },
+          {} as Transaction,
+        ),
+      insertCorrection: async () => {},
       accessLog: async () => [],
       decide: async (id, outcome) => {
         const event = events.get(id);
@@ -50,6 +65,7 @@ beforeEach(async () => {
       outcomeOf: async (id) => events.get(id)?.outcome ?? null,
     },
     directory,
+    audit,
   );
   const gate = new GateService(
     store,

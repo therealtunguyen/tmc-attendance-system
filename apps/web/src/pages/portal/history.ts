@@ -15,6 +15,8 @@ export interface DayRecord {
   lastOut: string | null;
   hours: number;
   missingPunch: boolean;
+  /** HR changed a value of this day (FR-3.6). */
+  corrected?: boolean;
 }
 
 export type HistoryDenyReason = 'NO_EMPLOYEE' | 'NOTICE_REQUIRED' | 'OTHER';

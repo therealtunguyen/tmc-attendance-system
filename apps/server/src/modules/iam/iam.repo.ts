@@ -1,4 +1,5 @@
 import type { PrismaClient } from '../../shared/prisma.js';
+import { prismaOf, type Transaction } from '../../shared/transaction.js';
 import { Prisma } from '../../generated/prisma/client.js';
 import { LOCKOUT_MS, MAX_FAILED_LOGINS } from './iam.auth.js';
 import { chainHash, GENESIS_HASH } from './iam.audit-chain.js';
@@ -63,28 +64,35 @@ const toUser = (row: {
 export class IamRepo implements AuditStore, UserStore, NoticeStore {
   constructor(private db: PrismaClient) {}
 
-  async append(entry: AuditEntry): Promise<void> {
-    await this.db.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${AUDIT_LOCK_KEY})`;
-      const last = await tx.auditEntry.findFirst({
-        orderBy: { seq: 'desc' },
-        select: { hash: true },
-      });
-      const prevHash = last?.hash ?? GENESIS_HASH;
-      // The time comes from the store, so callers cannot backdate.
-      const at = new Date();
-      await tx.auditEntry.create({
-        data: {
-          actorId: entry.actorId,
-          action: entry.action,
-          target: entry.target,
-          at,
-          before: json(entry.before),
-          after: json(entry.after),
-          prevHash,
-          hash: chainHash(prevHash, { ...entry, at }),
-        },
-      });
+  /**
+   * In the caller's transaction when `outer` is given: the chain lock is then held until that
+   * transaction ends, so a caller must keep it short and take its own locks first.
+   */
+  async append(entry: AuditEntry, outer?: Transaction): Promise<void> {
+    if (outer) return this.appendIn(prismaOf(outer), entry);
+    await this.db.$transaction((tx) => this.appendIn(tx, entry));
+  }
+
+  private async appendIn(tx: Prisma.TransactionClient, entry: AuditEntry): Promise<void> {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${AUDIT_LOCK_KEY})`;
+    const last = await tx.auditEntry.findFirst({
+      orderBy: { seq: 'desc' },
+      select: { hash: true },
+    });
+    const prevHash = last?.hash ?? GENESIS_HASH;
+    // The time comes from the store, so callers cannot backdate.
+    const at = new Date();
+    await tx.auditEntry.create({
+      data: {
+        actorId: entry.actorId,
+        action: entry.action,
+        target: entry.target,
+        at,
+        before: json(entry.before),
+        after: json(entry.after),
+        prevHash,
+        hash: chainHash(prevHash, { ...entry, at }),
+      },
     });
   }
 

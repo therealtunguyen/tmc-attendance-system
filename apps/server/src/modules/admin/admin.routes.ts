@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { inScope, isRestricted, requirePermission, type UserRef } from '../iam/index.js';
 import {
+  ConfigNotWiredError,
   DuplicateOrgUnitError,
   InvalidConfigError,
   InvalidOrgUnitError,
@@ -30,6 +31,9 @@ const fail = (res: Response, e: unknown) => {
     return void res.status(404).json({ error: e.message });
   }
   if (e instanceof DuplicateOrgUnitError) return void res.status(409).json({ error: e.message });
+  if (e instanceof ConfigNotWiredError) {
+    return void res.status(409).json({ error: e.message, code: 'CONFIG_NOT_WIRED' });
+  }
   throw e;
 };
 

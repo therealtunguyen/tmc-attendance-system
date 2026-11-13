@@ -1,6 +1,6 @@
 // Tests for the outbox (#27, #30).
 // Verifies: network drop/recovery, in-flight PENDING guard, crash recovery, overlap guard, reject limit.
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MockTurnstile } from '../../../server/src/adapters/tcs/mock.js';
 import type {
   OpenResult,
@@ -8,8 +8,8 @@ import type {
 } from '../../../server/src/adapters/tcs/turnstile-client.js';
 import { MAX_PUSH_ATTEMPTS, OUTBOX_BATCH_LIMIT, type Db } from '../db.js';
 import { flushOutbox, outboxSize } from '../outbox.js';
+import { ServerClient } from '../server-client.js';
 import { scan } from '../scan.js';
-import type { ServerClient } from '../server-client.js';
 import {
   createTempDb,
   generatePair,
@@ -289,5 +289,105 @@ describe('outbox — network drop then recovery (#27, #30)', () => {
     expect(batchSizes).toEqual([OUTBOX_BATCH_LIMIT, 25]);
     expect(pushedIds.size).toBe(total);
     expect(outboxSize(db)).toBe(0);
+  });
+
+  it('does not overwrite an already-pushed PENDING row when setOutcome runs late and logs an error', async () => {
+    const snapshots = makeLoadedSnapshots(db, makeSnapshot([employee], publicKey));
+    const token = issueToken(employee.id, privateKey);
+
+    let resolveOpen!: (res: OpenResult) => void;
+    let markOpenCalled!: () => void;
+    const openCalled = new Promise<void>((r) => {
+      markOpenCalled = r;
+    });
+    const turnstile: TurnstileClient = {
+      open: () => {
+        markOpenCalled();
+        return new Promise<OpenResult>((r) => {
+          resolveOpen = r;
+        });
+      },
+    };
+
+    const serverEvents: { eventId: string; outcome: string }[] = [];
+    const client = makeMockClient(async (req) => {
+      for (const e of req.events) serverEvents.push({ eventId: e.eventId, outcome: e.outcome });
+      return { ok: true, data: { accepted: req.events.map((e) => e.eventId) } };
+    });
+
+    // Simulate a scan older than pendingGraceS (10s) still waiting on TCS.
+    const oldClock = () => new Date(Date.now() - 10_000);
+    const scanPromise = scan({ gateId: 'g', token }, db, snapshots, turnstile, oldClock);
+    await openCalled;
+
+    // Outbox flushes the aged PENDING row while TCS is still in flight.
+    expect(await flushOutbox(db, client, 'edge-1')).toBe(1);
+    expect(serverEvents).toHaveLength(1);
+    expect(serverEvents[0]?.outcome).toBe('PENDING');
+
+    // Now TCS finally returns OPENED; setOutcome sees pushed_at IS NOT NULL and logs an error.
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      resolveOpen('OPENED');
+      const result = await scanPromise;
+      expect(result.outcome).toBe('GRANTED');
+
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy.mock.calls[0]?.[0]).toContain('updated 0 rows');
+
+      const stored = db.getEvent(result.eventId);
+      expect(stored?.outcome).toBe('PENDING');
+      expect(stored?.pushedAt).not.toBeNull();
+      expect(outboxSize(db)).toBe(0);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+});
+
+describe('non-JSON 200 body (#113 B1)', () => {
+  const html = () =>
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response('<html>captive portal</html>', {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+          }),
+      ),
+    );
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('getSnapshot and pushEvents resolve {ok:false} instead of rejecting', async () => {
+    html();
+    const client = new ServerClient('http://server.test', 't');
+    expect((await client.getSnapshot('edge')).ok).toBe(false);
+    expect((await client.pushEvents({ edgeId: 'edge', events: [] })).ok).toBe(false);
+  });
+
+  it('flushOutbox does not reject and keeps the event queued', async () => {
+    html();
+    db.commitScan(
+      {
+        eventId: 'e1',
+        gateId: 'g',
+        employeeId: 'x',
+        method: 'QR',
+        outcome: 'GRANTED',
+        occurredAt: new Date(Date.now() - 10_000).toISOString(),
+        jti: 'j',
+        stale: 0,
+        denyReason: null,
+      },
+      1000,
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await expect(
+      flushOutbox(db, new ServerClient('http://server.test', 't'), 'edge'),
+    ).resolves.toBe(0);
+    warn.mockRestore();
+    expect(outboxSize(db)).toBe(1);
   });
 });

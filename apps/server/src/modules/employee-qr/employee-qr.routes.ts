@@ -13,6 +13,7 @@ import {
   DuplicateEmployeeCodeError,
   QrNotConfiguredError,
   QrNotIssuableError,
+  type EdgeGates,
   type EmployeeChanges,
   type EmployeeQrService,
   type NewEmployee,
@@ -100,6 +101,7 @@ export const employeeQrRoutes = (
   eqr: EmployeeQrService,
   teams?: TeamDirectory,
   limits: { qrToken?: RateLimitOptions | false } = {},
+  edgeGates?: EdgeGates,
 ) => {
   // One instance, so both token routes draw on the same per-user count. Per user, not per IP: a factory shares one IP.
   const qrLimit: RequestHandler =
@@ -251,11 +253,16 @@ export const employeeQrRoutes = (
           res.status(409).json({ error: e.message, reason: e.reason });
         }
       })
-      // Edge agent (ADR-9). Response: EdgeSnapshot.
-      // An edge has no user session, so no requirePermission. TODO(#44): authenticate the edge agent.
+      // Edge agent (ADR-9). Response: EdgeSnapshot. Authenticated by authenticateEdge (#69), mounted on /api/edge.
       .get('/edge/snapshot', async (_req, res) => {
+        const edgeId = res.locals.edgeId as string | undefined;
+        if (!edgeId) {
+          return void res.status(401).json({ error: 'Edge authentication required' });
+        }
         try {
-          res.set('Cache-Control', 'no-store').json(await eqr.snapshot());
+          // Only this edge's gates (#113); the id comes from edge auth, never from the query.
+          const gates = (await edgeGates?.gatesForEdge(edgeId)) ?? [];
+          res.set('Cache-Control', 'no-store').json(await eqr.snapshot(gates));
         } catch (e) {
           if (!(e instanceof QrNotConfiguredError)) throw e;
           res.status(503).json({ error: 'QR signing not configured' });

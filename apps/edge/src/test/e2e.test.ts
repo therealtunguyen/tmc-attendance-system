@@ -57,12 +57,19 @@ describe('Edge HTTP end-to-end (#27-#30)', () => {
     let centralOnline = true;
     const storedOnServer = new Map<string, EdgeEvent>();
     const heartbeats: EdgeHeartbeat[] = [];
-    const snapshot: EdgeSnapshot = makeSnapshot([employee], publicKey);
+    const snapshot: EdgeSnapshot = makeSnapshot([employee], publicKey, 'k1', [
+      { id: 'gate-1', turnstileId: 'TS-1', active: true },
+    ]);
 
     centralHttp = createServer(async (req, res) => {
       if (!centralOnline) {
         res.statusCode = 503;
         res.end('Service Unavailable');
+        return;
+      }
+      if (req.headers.authorization !== 'Bearer edge-secret') {
+        res.statusCode = 401;
+        res.end('Unauthorized');
         return;
       }
       const chunks: Buffer[] = [];
@@ -97,7 +104,7 @@ describe('Edge HTTP end-to-end (#27-#30)', () => {
     });
 
     const centralUrl = await listen(centralHttp);
-    const client = new ServerClient(centralUrl);
+    const client = new ServerClient(centralUrl, 'edge-secret');
     const snapshots = new SnapshotManager(db, client, 'edge-bd');
     await snapshots.pull();
 

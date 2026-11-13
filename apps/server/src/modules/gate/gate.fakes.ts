@@ -111,9 +111,11 @@ export class InMemoryGates implements GateStore {
       const gates = [...this.rows.values()].filter(
         (gate) => gate.edgeId === edge.id && gate.active,
       );
-      return edge.lastHeartbeatAt && edge.lastHeartbeatAt < cutoff && gates.length
-        ? [{ ...edge, gates }]
-        : [];
+      // #113 B3: never-connected edges use the oldest active gate's createdAt as baseline.
+      const since =
+        edge.lastHeartbeatAt ??
+        new Date(Math.min(...gates.map((gate) => gate.createdAt.getTime())));
+      return gates.length && since < cutoff ? [{ ...edge, since, gates }] : [];
     });
   }
 

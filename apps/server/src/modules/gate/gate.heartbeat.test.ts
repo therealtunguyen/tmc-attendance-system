@@ -1,3 +1,4 @@
+import { Router } from 'express';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../../app.js';
@@ -70,16 +71,31 @@ describe('Gate heartbeat (FR-2.6)', () => {
     expect(notify).toHaveBeenCalledTimes(2);
   });
 
-  it('does not alert never-connected edges or edges with only inactive gates', async () => {
+  it('does not alert edges with only inactive gates', async () => {
     const gate = service();
     const created = await gate.createGate('adm', entrance);
-    now += 1_000_000;
-    await gate.checkOffline();
     await gate.edgeHeartbeat(hb);
     await gate.deactivateGate('adm', created.id);
     now += 90_001;
     await gate.checkOffline();
     expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('alerts a never-connected edge once, after the timeout from its gate creation (#113 B3)', async () => {
+    store.rows.clear();
+    const gate = service();
+    await gate.createGate('adm', entrance);
+    // The fake stamps createdAt with the real clock; align it with the test clock.
+    for (const row of store.rows.values()) row.createdAt = new Date(BASE);
+    await gate.checkOffline();
+    now += 90_000;
+    await gate.checkOffline();
+    expect(notify).not.toHaveBeenCalled();
+    now += 1;
+    await gate.checkOffline();
+    await gate.checkOffline();
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0]![1]).toContain('never connected');
   });
 
   it('keeps heartbeat state and monitoring when a gate is reactivated after DELETE', async () => {
@@ -198,16 +214,31 @@ describe('Gate heartbeat (FR-2.6)', () => {
     expect(notify).toHaveBeenCalledTimes(2);
   });
 
-  it('validates heartbeat requests and returns 404 for unknown edges', async () => {
-    const app = createApp([gateRoutes(service())]);
-    expect((await request(app).post('/api/edge/heartbeat').send(hb)).status).toBe(204);
+  it('validates heartbeat requests, uses edgeId from credential, and returns 404 for unknown edges', async () => {
+    const edgeAs = (edgeId?: string) =>
+      Router().use((_req, res, next) => {
+        if (edgeId) res.locals.edgeId = edgeId;
+        next();
+      });
+    const appFor = (edgeId?: string) => createApp([edgeAs(edgeId), gateRoutes(service())]);
+
+    expect((await request(appFor(undefined)).post('/api/edge/heartbeat').send(hb)).status).toBe(
+      401,
+    );
+    expect((await request(appFor('edge-bd')).post('/api/edge/heartbeat').send(hb)).status).toBe(
+      204,
+    );
+    // Spoofed body.edgeId is ignored when authenticated as edge-bd.
     expect(
       (
-        await request(app)
+        await request(appFor('edge-bd'))
           .post('/api/edge/heartbeat')
           .send({ ...hb, edgeId: 'missing' })
       ).status,
-    ).toBe(404);
+    ).toBe(204);
+    expect((await request(appFor('missing')).post('/api/edge/heartbeat').send(hb)).status).toBe(
+      404,
+    );
     for (const body of [
       [],
       {},
@@ -215,7 +246,9 @@ describe('Gate heartbeat (FR-2.6)', () => {
       { ...hb, outboxSize: -1 },
       { ...hb, snapshotAt: undefined },
     ]) {
-      expect((await request(app).post('/api/edge/heartbeat').send(body)).status).toBe(400);
+      expect((await request(appFor('edge-bd')).post('/api/edge/heartbeat').send(body)).status).toBe(
+        400,
+      );
     }
   });
 

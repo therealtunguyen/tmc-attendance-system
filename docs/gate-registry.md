@@ -65,7 +65,7 @@ Ví dụ đầu vào tạo cổng:
 | Gate phải dùng nhà máy của một Edge đã được đăng ký.                                           | Service kiểm tra `Edge.factoryId`; FK ghép tiếp tục bảo vệ lúc ghi. Đối chiếu đơn vị loại `FACTORY` qua module admin chưa được tích hợp ở Gate. Không gọi stub hoặc bỏ qua lỗi của admin. |
 | Một thiết bị chỉ có một bản ghi Gate, kể cả bản ghi ngừng sử dụng.                             | Unique index trên `Gate.turnstileId`. Dựa trên adapter hiện có dùng một `TCS_BASE_URL`; nếu sau này có nhiều TCS namespace hoặc thiết bị hai chiều dùng chung ID, cần đổi thiết kế này.   |
 | Xóa cổng nghĩa là đặt `active = false`; lặp lại vẫn thành công.                                | Service/API; schema cung cấp cờ trạng thái, không tự chặn câu SQL DELETE trực tiếp. Không xóa sự kiện chấm công.                                                                          |
-| Cổng ngừng sử dụng không được dùng cho lượt quét mới.                                          | Luồng scan/edge sau này phải kiểm tra `active`.                                                                                                                                           |
+| Cổng ngừng sử dụng không được dùng cho lượt quét mới.                                          | Edge kiểm tra `active` trong danh sách `gates` của snapshot (xem "Snapshot của edge"); server chặn override thủ công (`409`).                                                             |
 | ID và nhà máy của một Gate không thay đổi qua CRUD.                                            | Service/API; tránh đổi ý nghĩa lịch sử chấm công. Chuyển nhà máy thì ngừng sử dụng cổng cũ và đăng ký cổng/thiết bị phù hợp.                                                              |
 | Có thể đổi `edgeId` sang edge cùng nhà máy; cấu hình mới chỉ ảnh hưởng lượt quét tương lai.    | Service/API và FK ghép. Với một edge/nhà máy hiện tại, thay máy vật lý có thể giữ nguyên ID logic của edge.                                                                               |
 | ADM quản trị bằng quyền `gate:manage`; tài khoản có scope chỉ quản lý nhà máy trong scope.     | Service/API dùng public interface của IAM. Ghi audit khi thay đổi thành công.                                                                                                             |
@@ -126,6 +126,26 @@ nhưng dữ liệu Gate có thể đã đổi; chưa có rollback chung hoặc k
 qua retry. Snapshot before cũng chưa được khóa cùng mutation khi có PATCH
 đồng thời. Cần transaction boundary dùng chung qua public interface các module
 để bảo đảm tính nguyên tử, không đọc/ghi trực tiếp bảng IAM từ module gate.
+
+## Snapshot của edge (#113)
+
+`GET /api/edge/snapshot` có thêm `gates: [{ id, turnstileId, active }]`: chỉ các
+cổng của edge đang xác thực (lấy từ edge token, không từ query), gồm cả cổng
+`active = false`. Trường này là bổ sung, không phá tương thích.
+
+Trước khi xác thực token hay ghi `jti`, edge tra `gateId` của lượt quét trong
+danh sách này, nên cổng sai không làm mất QR:
+
+| Trường hợp                      | Kết quả                                                                                                                                                          |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gateId` không có trong `gates` | `DENIED` với `UNKNOWN_GATE`. Chỉ ghi log, không lưu vào outbox (server từ chối cả lô nếu có `gateId` không thuộc edge). Không đốt `jti`.                         |
+| Cổng có `active = false`        | `DENIED` với `GATE_INACTIVE`, không gọi TCS. Nếu token xác thực được thì lưu sự kiện `DENIED` (không ghi `jti`) để hiện trong access log; ngược lại chỉ ghi log. |
+| Cổng hợp lệ                     | Gọi TCS `open(turnstileId)`, không dùng UUID của cổng.                                                                                                           |
+| Snapshot cũ không có `gates`    | Bỏ qua kiểm tra cổng, gọi `open(gateId)` như trước và cảnh báo một lần; không từ chối toàn bộ để edge vẫn chạy offline (ADR-9).                                  |
+
+`GATE_INACTIVE` được server nhận và lưu (ingest chỉ kiểm tra cổng thuộc edge,
+không kiểm tra `active`). `UNKNOWN_GATE` có trong `EdgeDenyReason` nhưng edge
+không đẩy lên. `denyReason` là cột `TEXT`, nên không cần migration.
 
 ## Thử API bằng Postman hoặc curl
 

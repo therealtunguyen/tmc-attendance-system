@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { parseEmailList, parseMailMode, positiveInt } from './config.js';
+import {
+  parseEdgeTokens,
+  parseTrustProxy,
+  parseEmailList,
+  parseMailMode,
+  positiveInt,
+} from './config.js';
 
 describe('parseMailMode', () => {
   it.each([
@@ -60,5 +66,54 @@ describe('positiveInt', () => {
   it('throws for a digit string beyond the safe integer range', () => {
     vi.stubEnv('LIMIT_TEST', '9'.repeat(400));
     expect(() => positiveInt('LIMIT_TEST', 10)).toThrow(/LIMIT_TEST/);
+  });
+});
+
+describe('parseEdgeTokens', () => {
+  it.each([undefined, '', '  '])('reads %j as empty map (fail closed)', (value) => {
+    expect(parseEdgeTokens(value)).toEqual({});
+  });
+
+  it('parses comma-separated edgeId:token pairs (allowing colons/equals in base64/hex tokens)', () => {
+    expect(parseEdgeTokens(' edge-bd : tok== , edge-la:abc:def ')).toEqual({
+      'edge-bd': 'tok==',
+      'edge-la': 'abc:def',
+    });
+  });
+
+  it.each(['no-colon', ':secret', 'edge-bd:', 'edge-bd:  '])(
+    'rejects malformed entry %j without leaking its secret value',
+    (value) => {
+      expect(() => parseEdgeTokens(value)).toThrow(/EDGE_TOKENS\[0\] must be "edgeId:token"/);
+      expect(() => parseEdgeTokens(`edge-ok:tok,${value}`)).toThrow(
+        /EDGE_TOKENS\[1\] must be "edgeId:token"/,
+      );
+      expect(() => parseEdgeTokens(value)).not.toThrow(/secret|no-colon/);
+    },
+  );
+
+  it('rejects duplicate edgeId or duplicate token', () => {
+    expect(() => parseEdgeTokens('edge-bd:a,edge-bd:b')).toThrow(/duplicate edgeId/);
+    expect(() => parseEdgeTokens('edge-bd:same,edge-la:same')).toThrow(/duplicate token/);
+  });
+});
+
+describe('parseTrustProxy', () => {
+  it.each([
+    [undefined, false],
+    ['', false],
+    ['  ', false],
+    ['false', false],
+    ['true', true],
+    ['1', 1],
+    [' 2 ', 2],
+    ['loopback', 'loopback'],
+    ['10.0.0.0/8, 192.168.0.1', '10.0.0.0/8, 192.168.0.1'],
+  ])('reads %j as %j', (value, expected) => {
+    expect(parseTrustProxy(value)).toEqual(expected);
+  });
+
+  it.each(['-1', '99999999999999999999'])('stops on %j', (value) => {
+    expect(() => parseTrustProxy(value)).toThrow('TRUST_PROXY');
   });
 });

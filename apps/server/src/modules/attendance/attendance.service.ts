@@ -4,9 +4,20 @@ import {
   type PushEventsRequest,
   type PushEventsResponse,
 } from '../../shared/contracts/edge.js';
+import type { Transaction } from '../../shared/transaction.js';
 import type { DateRange, Scope } from '../../shared/types.js';
-import type { EmployeeDirectory } from '../employee-qr/index.js';
-import { buildDailyRecords, localDayStart, nextDay, type DailyInput } from './attendance.daily.js';
+import type { EmployeeDirectory, EmployeeScopes } from '../employee-qr/index.js';
+import type { AuditLog } from '../iam/index.js';
+import {
+  buildDailyRecords,
+  localDayStart,
+  nextDay,
+  parseRecordId,
+  recordIdOf,
+  type DailyInput,
+} from './attendance.daily.js';
+
+const MAX_REASON_LENGTH = 500;
 
 export type ScanOutcome = 'GRANTED' | 'DENIED';
 
@@ -45,8 +56,29 @@ export interface StoredEvent extends Omit<
 
 export type AccessOutcome = StoredEvent['outcome']; // 'GRANTED' | 'DENIED' | 'PENDING'
 
+/** One stored use of a QR token: what reconciliation needs to compare edges (ADR-10). */
+export type JtiSighting = Pick<
+  StoredEvent,
+  'eventId' | 'employeeId' | 'gateId' | 'edgeId' | 'outcome' | 'occurredAt' | 'jti'
+>;
+
+/** Checks what an edge decided on its own against what the server knows (ADR-9, ADR-10). */
+export interface SyncReconciliation {
+  /**
+   * `stored` are the events one push has just added. Never rejects: the events are already
+   * stored, so a failed check must not make the edge send them again.
+   */
+  reconcile(edgeId: string, stored: StoredEvent[]): Promise<void>;
+}
+
+/** #113 C4: an ingested event dated further ahead than this (edge clock skew) is not accepted. */
+export const MAX_FUTURE_SKEW_MS = 5 * 60_000;
+
 /** FR-4.4: one page of the access log holds at most this many rows; callers page by time. */
 export const ACCESS_LOG_MAX_LIMIT = 500;
+
+/** HR opens at most this many days of one employee's records at a time: a quarter. */
+export const MAX_RECORDS_RANGE_DAYS = 92;
 
 /** What the security access log asks for (FR-4.4). Filters, order and limit run in the database. */
 export interface AccessLogQuery {
@@ -66,7 +98,42 @@ export interface DailyRecord {
   lastOut: Date | null;
   hours: number;
   missingPunch: boolean;
+  /** Present and true when HR changed a value of this day (FR-3.6). */
+  corrected?: boolean;
 }
+
+export type CorrectionField = 'FIRST_IN' | 'LAST_OUT';
+
+/** One HR change to a daily record (FR-3.6). Only added, never changed or deleted. */
+export interface Correction {
+  employeeId: string;
+  /** The Vietnam local day start of the record. */
+  day: Date;
+  field: CorrectionField;
+  /** The value just before this correction; null when the day had no last out. */
+  originalValue: Date | null;
+  correctedValue: Date;
+  reason: string;
+  /** The HR user. */
+  correctedBy: string;
+  createdAt: Date;
+}
+
+export interface CorrectionRequest {
+  field: CorrectionField;
+  value: Date;
+  reason: string;
+}
+
+/** The daily record does not exist: a bad ID, or a day with no granted scan (UC-8 precondition). */
+export class RecordNotFoundError extends Error {
+  constructor(readonly recordId: string) {
+    super(`No daily record ${recordId}`);
+  }
+}
+
+/** The correction breaks a rule, so nothing was stored. The message says which, for HR. */
+export class InvalidCorrectionError extends Error {}
 
 /** setOutcome() for an eventId that was never recorded. */
 export class UnknownEventError extends Error {
@@ -89,12 +156,34 @@ export class OutcomeConflictError extends Error {
 export interface AttendanceStore {
   /** Inserts unless the eventId exists; true if inserted. Must be atomic (two racing inserts -> one true). */
   insert(event: StoredEvent): Promise<boolean>;
-  /** Inserts every event whose eventId is new, in one atomic write; existing ones are skipped. */
-  insertMany(events: StoredEvent[]): Promise<void>;
+  /**
+   * Inserts every event whose eventId is new, in one atomic write; existing ones are skipped.
+   * Returns the eventIds this call stored.
+   */
+  insertMany(events: StoredEvent[]): Promise<string[]>;
+  /** Every stored event that carries one of these token IDs, oldest first. */
+  eventsWithJti(jtis: string[]): Promise<JtiSighting[]>;
   /** GRANTED events with an employee, occurredAt in [from, to); only these employees if given. */
   grantedEvents(from: Date, to: Date, employeeIds?: string[]): Promise<DailyInput[]>;
   /** Every GRANTED event of one employee, whatever the date. */
   grantedEventsOf(employeeId: string): Promise<DailyInput[]>;
+  /** Corrections of the days in [from, to), oldest first; only these employees if given. */
+  corrections(from: Date, to: Date, employeeIds?: string[]): Promise<Correction[]>;
+  /** Every correction of one employee, oldest first. */
+  correctionsOf(employeeId: string): Promise<Correction[]>;
+  /**
+   * Runs `work` in one transaction that holds the lock of one daily record: two calls for the
+   * same employee and day never overlap, so each one validates against what the other stored.
+   * Other records do not wait. `work` gets a store and a transaction bound to that one
+   * connection and must use only them, so a correction never needs a second connection. If
+   * `work` throws, everything it wrote is rolled back.
+   */
+  withRecordLock<T>(
+    employeeId: string,
+    day: Date,
+    work: (store: LockedRecordStore, tx: Transaction) => Promise<T>,
+  ): Promise<T>;
+  insertCorrection(correction: Correction): Promise<void>;
   /** Sets the outcome only while it is PENDING or already equal; true if the row now has it. */
   decide(eventId: string, outcome: ScanOutcome): Promise<boolean>;
   /** Null when there is no such event. */
@@ -102,6 +191,12 @@ export interface AttendanceStore {
   /** Every scan matching the query, denied ones included, newest first by occurredAt then eventId ascending; rows as stored. */
   accessLog(query: AccessLogQuery): Promise<StoredEvent[]>;
 }
+
+/** What a correction reads and writes while it holds the lock of its record. */
+export type LockedRecordStore = Pick<
+  AttendanceStore,
+  'grantedEvents' | 'corrections' | 'insertCorrection'
+>;
 
 export interface AttendanceRecorder {
   /**
@@ -135,7 +230,10 @@ export interface AttendanceQuery {
 export class AttendanceService implements AttendanceRecorder, EdgeIngest, AttendanceQuery {
   constructor(
     private repo: AttendanceStore,
-    private directory: EmployeeDirectory,
+    private directory: EmployeeDirectory & EmployeeScopes,
+    private audit: AuditLog,
+    private now: () => Date = () => new Date(),
+    private reconciliation: SyncReconciliation = { reconcile: async () => {} },
   ) {}
 
   /**
@@ -184,25 +282,37 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
 
   /**
    * The edge decided these scans locally (ADR-9), so each is stored as sent: outcome, jti and
-   * stale included. A known eventId is skipped, never updated (contract: shared/contracts/edge.ts).
-   * TODO(#33): a skipped duplicate drops the edge's jti and stale, so a row first written PENDING by
-   * record() never gets them; reconciliation must decide whether to merge them in.
+   * stale included. A known eventId is skipped, never updated (contract: shared/contracts/edge.ts),
+   * so the jti and stale of a skipped duplicate are not merged into the stored row.
+   * Only the events this push added are reconciled (#33): a batch sent again raises no second alert.
    */
-  async ingest({ edgeId, events }: PushEventsRequest): Promise<PushEventsResponse> {
-    await this.repo.insertMany(
-      events.map((e) => ({
-        eventId: e.eventId,
-        employeeId: e.employeeId,
-        gateId: e.gateId,
-        method: e.method,
-        occurredAt: new Date(e.occurredAt),
-        outcome: e.outcome,
-        denyReason: e.denyReason ?? null,
-        edgeId,
-        jti: e.jti,
-        stale: e.stale,
-      })),
-    );
+  async ingest({ edgeId, events: batch }: PushEventsRequest): Promise<PushEventsResponse> {
+    // #113 C4: drop future-dated events per event (not a 400: that would block the outbox, #96).
+    // They are left out of `accepted`, so the edge counts an attempt and eventually parks them.
+    const latest = this.now().getTime() + MAX_FUTURE_SKEW_MS;
+    const events = batch.filter((e) => {
+      if (new Date(e.occurredAt).getTime() <= latest) return true;
+      console.warn(
+        `[ingest] edge=${edgeId} event=${e.eventId} rejected: occurredAt ${e.occurredAt} is in the future`,
+      );
+      return false;
+    });
+    const rows: StoredEvent[] = events.map((e) => ({
+      eventId: e.eventId,
+      employeeId: e.employeeId,
+      gateId: e.gateId,
+      method: e.method,
+      occurredAt: new Date(e.occurredAt),
+      outcome: e.outcome,
+      denyReason: e.denyReason ?? null,
+      edgeId,
+      jti: e.jti,
+      stale: e.stale,
+    }));
+    const added = new Set(await this.repo.insertMany(rows));
+    // delete() is true once per eventId, so a duplicate inside the batch counts once: the first, as stored.
+    const stored = rows.filter((row) => added.delete(row.eventId));
+    if (stored.length > 0) await this.reconciliation.reconcile(edgeId, stored);
     // New and duplicate alike: the server now holds every one, so the edge drops them all.
     return { accepted: [...new Set(events.map((e) => e.eventId))] };
   }
@@ -217,12 +327,134 @@ export class AttendanceService implements AttendanceRecorder, EdgeIngest, Attend
     if (employeeIds.length === 0) return [];
     const from = localDayStart(range.from);
     const to = nextDay(localDayStart(range.to));
-    return buildDailyRecords(await this.repo.grantedEvents(from, to, employeeIds));
+    return this.build(from, to, employeeIds);
   }
 
   /** One employee's daily records, newest day first (FR-1.6, UC-3). */
   async history(employeeId: string): Promise<DailyRecord[]> {
-    return buildDailyRecords(await this.repo.grantedEventsOf(employeeId)).reverse();
+    const [events, corrections] = await Promise.all([
+      this.repo.grantedEventsOf(employeeId),
+      this.repo.correctionsOf(employeeId),
+    ]);
+    return buildDailyRecords(events, corrections).reverse();
+  }
+
+  /** What HR opens to correct a day (UC-8 step 1), each record with its ID. Local days, both included. */
+  async employeeRecords(
+    employeeId: string,
+    range: DateRange,
+  ): Promise<(DailyRecord & { recordId: string })[]> {
+    const from = localDayStart(range.from);
+    const to = nextDay(localDayStart(range.to));
+    const records = await this.build(from, to, [employeeId]);
+    return records.map((record) => ({ ...record, recordId: recordIdOf(record) }));
+  }
+
+  /** Every correction of one daily record, oldest first: the original values stay visible. */
+  async recordCorrections(recordId: string): Promise<Correction[]> {
+    const key = parseRecordId(recordId);
+    if (!key) throw new RecordNotFoundError(recordId);
+    return this.repo.corrections(key.day, nextDay(key.day), [key.employeeId]);
+  }
+
+  /**
+   * HR changes one value of a daily record, with a reason (FR-3.6, UC-8). The scans are not touched:
+   * the correction is stored beside them, with the value it replaced. Returns the recomputed record.
+   * Read, validate, store and audit all run in one transaction that holds the lock of that one
+   * record (ADR-2), on one connection. So two corrections of the same day cannot both pass against
+   * the old state, and the correction and its audit entry commit together or not at all. The audit
+   * entry is still written by IAM, which only borrows the transaction.
+   */
+  async correct(
+    actorId: string,
+    recordId: string,
+    request: CorrectionRequest,
+  ): Promise<DailyRecord> {
+    const key = parseRecordId(recordId);
+    if (!key) throw new RecordNotFoundError(recordId);
+    const reason = request.reason.trim();
+    if (!reason) throw new InvalidCorrectionError('reason is required');
+    if (reason.length > MAX_REASON_LENGTH) {
+      throw new InvalidCorrectionError(`reason must be at most ${MAX_REASON_LENGTH} characters`);
+    }
+    return this.repo.withRecordLock(key.employeeId, key.day, (store, tx) =>
+      this.correctLocked(store, tx, actorId, recordId, key, { ...request, reason }),
+    );
+  }
+
+  /** The body of correct(): runs in the transaction that holds the lock, the reason trimmed. */
+  private async correctLocked(
+    store: LockedRecordStore,
+    tx: Transaction,
+    actorId: string,
+    recordId: string,
+    { employeeId, day }: Pick<DailyRecord, 'employeeId' | 'day'>,
+    { field, value, reason: trimmed }: CorrectionRequest,
+  ): Promise<DailyRecord> {
+    const to = nextDay(day);
+    // One after the other: both run on the one connection of the transaction.
+    const events = await store.grantedEvents(day, to, [employeeId]);
+    const corrections = await store.corrections(day, to, [employeeId]);
+    const [before] = buildDailyRecords(events, corrections);
+    if (!before) throw new RecordNotFoundError(recordId);
+    if (localDayStart(value).getTime() !== day.getTime()) {
+      throw new InvalidCorrectionError('value must be on the day of the record');
+    }
+    const now = this.now();
+    // A time that has not happened yet would add hours to an open shift (reports, HRS export).
+    if (value.getTime() > now.getTime()) {
+      throw new InvalidCorrectionError('value must not be in the future');
+    }
+    const firstIn = field === 'FIRST_IN' ? value : before.firstIn;
+    const lastOut = field === 'LAST_OUT' ? value : before.lastOut;
+    if (firstIn && lastOut && firstIn.getTime() >= lastOut.getTime()) {
+      throw new InvalidCorrectionError('first in must be before last out');
+    }
+
+    const correction: Correction = {
+      employeeId,
+      day,
+      field,
+      originalValue: field === 'FIRST_IN' ? before.firstIn : before.lastOut,
+      correctedValue: value,
+      reason: trimmed,
+      correctedBy: actorId,
+      createdAt: now,
+    };
+    const [after] = buildDailyRecords(events, [...corrections, correction]);
+    await store.insertCorrection(correction);
+    // A failure here rolls the correction back with the transaction.
+    await this.audit.append(
+      {
+        actorId,
+        action: 'ATTENDANCE_CORRECT',
+        target: `attendance:${recordId}`,
+        at: correction.createdAt,
+        before,
+        after: { ...after, field, reason: trimmed },
+      },
+      tx,
+    );
+    return after as DailyRecord;
+  }
+
+  /**
+   * Whether the employee belongs to one of these factories or teams (BR-15). One lookup of the
+   * employee's own factory and team, not a listing of every scope.
+   */
+  async inScopes(employeeId: string, scopes: Scope[]): Promise<boolean> {
+    if (scopes.length === 0) return false;
+    const own = await this.directory.scopesOf(employeeId);
+    return own !== null && own.some((scope) => scopes.includes(scope));
+  }
+
+  /** The one path to a daily record, so reports, exports and the portal all see corrections. */
+  private async build(from: Date, to: Date, employeeIds: string[]): Promise<DailyRecord[]> {
+    const [events, corrections] = await Promise.all([
+      this.repo.grantedEvents(from, to, employeeIds),
+      this.repo.corrections(from, to, employeeIds),
+    ]);
+    return buildDailyRecords(events, corrections);
   }
 
   async accessLog(query: AccessLogQuery): Promise<StoredEvent[]> {

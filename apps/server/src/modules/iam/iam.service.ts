@@ -1,3 +1,4 @@
+import type { Transaction } from '../../shared/transaction.js';
 import { createHash } from 'node:crypto';
 import type { Scope } from '../../shared/types.js';
 import {
@@ -159,7 +160,11 @@ export interface Authorizer {
 }
 
 export interface AuditLog {
-  append(entry: AuditEntry): Promise<void>;
+  /**
+   * With `tx`, the entry is written in that transaction and commits or rolls back with the
+   * caller's own change (ADR-2). Without it, the entry is committed on its own.
+   */
+  append(entry: AuditEntry, tx?: Transaction): Promise<void>;
   search(filter: AuditFilter): Promise<AuditEntry[]>;
 }
 
@@ -171,8 +176,8 @@ export interface AuditReader {
 
 /** Append-only, hash-chained storage (FR-4.9). There is no update or delete. */
 export interface AuditStore {
-  /** Links the entry to the end of the chain atomically. */
-  append(entry: AuditEntry): Promise<void>;
+  /** Links the entry to the end of the chain atomically; inside `tx` when one is given. */
+  append(entry: AuditEntry, tx?: Transaction): Promise<void>;
   /** Newest first. */
   search(filter: AuditFilter): Promise<ChainedEntry[]>;
   /** Every entry, ordered by seq ascending. */
@@ -208,8 +213,8 @@ export class IamService implements Authorizer, AuditLog, AuditReader, Authentica
     return check(user, permission, scope);
   }
 
-  append(entry: AuditEntry): Promise<void> {
-    return this.store.append(entry);
+  append(entry: AuditEntry, tx?: Transaction): Promise<void> {
+    return this.store.append(entry, tx);
   }
 
   search(filter: AuditFilter = {}): Promise<ChainedEntry[]> {
@@ -301,9 +306,12 @@ export class IamService implements Authorizer, AuditLog, AuditReader, Authentica
       // A corrupt stored secret fails the code instead of a 500.
       step = null;
     }
-    // A replayed code counts as a failure.
-    if (step === null || !(await this.store.useTotpStep(user.id, step))) {
-      await this.store.recordFailedLogin(user.id, new Date(now));
+    // useTotpStep also refuses a code from an earlier step once a later one was used (RFC 6238 anti-replay).
+    const fresh = step !== null && (await this.store.useTotpStep(user.id, step));
+    if (!fresh) {
+      // A replay answers like a wrong code (no oracle) but does not count toward the lockout: it
+      // needs a code that was valid, so there is no brute-force gain (#113 D3).
+      if (step === null) await this.store.recordFailedLogin(user.id, new Date(now));
       await this.audit(user.id, 'MFA_FAIL', target);
       return { ok: false };
     }
@@ -319,7 +327,9 @@ export class IamService implements Authorizer, AuditLog, AuditReader, Authentica
     const session = await this.liveSession(token, now);
     if (!session?.mfaPassed) return null;
     const user = await this.store.findUser(session.userId);
-    if (!user?.active || (user.lockedUntil && user.lockedUntil.getTime() > now)) return null;
+    // Lockout only blocks new logins and MFA (#113 D1): failed guesses from anyone must not kill a
+    // live session. Disabling an account goes through `active`.
+    if (!user?.active) return null;
     return {
       id: user.id,
       role: user.role,

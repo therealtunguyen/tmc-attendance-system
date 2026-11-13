@@ -1,6 +1,11 @@
 import type { Mailer } from '../../adapters/mail/mailer.js';
 
-export type AlertKind = 'EXPORT_FAILED' | 'GATE_OFFLINE';
+export type AlertKind =
+  | 'EXPORT_FAILED'
+  | 'GATE_OFFLINE'
+  // Sync reconciliation in Attendance (#33): what an edge decided on its own, checked at sync.
+  | 'STALE_ENTRY_REVOKED'
+  | 'QR_USED_AT_TWO_EDGES';
 
 export interface Notifier {
   /** Rejects when the alert could not be handed over, so the caller can retry (Gate's offline check does). */
@@ -12,10 +17,15 @@ export interface AlertRecipients {
   adm: string[];
 }
 
-/** Who hears about what (report 5.7.2): a failed export goes to HR and ADM, an offline gate to ADM (FR-2.6). */
+/**
+ * Who hears about what (report 5.7.2): a failed export goes to HR and ADM, an offline gate to ADM
+ * (FR-2.6). The two sync findings are security matters, so they go to ADM only.
+ */
 export const ALERT_AUDIENCE: Record<AlertKind, readonly (keyof AlertRecipients)[]> = {
   EXPORT_FAILED: ['hr', 'adm'],
   GATE_OFFLINE: ['adm'],
+  STALE_ENTRY_REVOKED: ['adm'],
+  QR_USED_AT_TWO_EDGES: ['adm'],
 };
 
 /** Alerts by email through the Mailer port (FR-4.6, FR-2.6). */

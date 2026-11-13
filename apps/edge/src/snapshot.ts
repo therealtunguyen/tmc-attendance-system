@@ -19,6 +19,9 @@ export interface LiveSnapshot {
   publicKeys: QrPublicKeys;
 }
 
+/** First retry delay while no usable snapshot exists; doubles up to the pull interval (#109). */
+export const SNAPSHOT_RETRY_INITIAL_MS = 2_000;
+
 const KV_SNAPSHOT = 'snapshot';
 const KV_SNAPSHOT_AT = 'snapshot_at';
 
@@ -81,12 +84,12 @@ export class SnapshotManager {
     return Date.now() - this.live.fetchedAt > SNAPSHOT_STALE_AFTER_MS;
   }
 
-  /** Fetches a fresh snapshot from the server. Called by the pull loop and can be called manually. */
-  async pull(): Promise<void> {
+  /** Fetches a fresh snapshot from the server. Returns true on success. Called by the pull loop and can be called manually. */
+  async pull(): Promise<boolean> {
     const result = await this.client.getSnapshot(this.edgeId);
     if (!result.ok) {
       console.warn(`[snapshot] pull failed: ${result.status} ${result.error}`);
-      return;
+      return false;
     }
     const snapshot = result.data;
     const fetchedAt = Date.now();
@@ -96,24 +99,53 @@ export class SnapshotManager {
     console.log(
       `[snapshot] updated at ${snapshot.generatedAt} (${snapshot.employees.length} employees)`,
     );
+    return true;
   }
 
-  /** Starts the background pull loop with an in-flight guard. Returns a cleanup function. */
-  startLoop(intervalMs = SNAPSHOT_PULL_INTERVAL_MS): () => void {
+  /**
+   * Starts the background pull loop (self-scheduling timeout chain, so pulls never overlap).
+   * Normal cadence is intervalMs. While there is no usable snapshot (absent or stale) and a pull
+   * fails, retries back off 2 s, 4 s, 8 s, ... capped at intervalMs (#109). Returns a cleanup function.
+   */
+  startLoop(
+    intervalMs = SNAPSHOT_PULL_INTERVAL_MS,
+    initialRetryMs = SNAPSHOT_RETRY_INITIAL_MS,
+  ): () => void {
+    let stopped = false;
     let running = false;
+    let retryMs = initialRetryMs;
+    let timer: NodeJS.Timeout | undefined;
+
     const tick = async () => {
-      if (running) return;
+      if (running || stopped) return;
       running = true;
+      let ok = false;
       try {
-        await this.pull();
+        ok = await this.pull();
+      } catch (err) {
+        console.warn(`[snapshot] pull error: ${String(err)}`);
       } finally {
         running = false;
       }
+      if (stopped) return;
+
+      let delay = intervalMs;
+      if (ok || !this.isStale()) {
+        retryMs = initialRetryMs;
+      } else {
+        delay = Math.min(retryMs, intervalMs);
+        retryMs = Math.min(retryMs * 2, intervalMs);
+        console.warn(`[snapshot] no usable snapshot, retry in ${delay / 1000} s`);
+      }
+      timer = setTimeout(() => void tick(), delay);
     };
-    // Pull immediately on startup, then on the interval.
+
+    // Pull immediately on startup.
     void tick();
-    const id = setInterval(() => void tick(), intervalMs);
-    return () => clearInterval(id);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
   }
 
   /** Convenience: find an employee in the current snapshot. */

@@ -3,6 +3,8 @@ interface ConfigDef<T> {
   default: string;
   description: string;
   parse(raw: string): T | undefined;
+  /** true = some module reads this key; false = stored values would have no effect, so writes are rejected. */
+  wired: boolean;
 }
 
 const def = <T>(d: ConfigDef<T>) => d;
@@ -25,49 +27,58 @@ const baseUrl = (raw: string) => {
 };
 
 /**
- * The system parameters. Keys are stored and validated; consumers (gate, QR, attendance, reporting,
- * adapters) read them via ConfigReader.config() once those modules are wired. Nothing reads them yet.
+ * The system parameters (FR-5.4). Only keys marked `wired` are read by a module (today
+ * export.monthlyAt, by the export scheduler); PUT /config/<key> rejects the others with 409 so an
+ * admin is never told a change was saved when nothing reads it. Flip `wired` when a consumer is added.
  */
 export const CONFIG = {
   'qr.ttlSeconds': def({
     default: '60',
     description: 'QR token validity in seconds, 30 to 300 (ADR-10)',
     parse: integer(30, 300),
+    wired: false,
   }),
   'gate.antiPassbackSeconds': def({
     default: '60',
     description: 'Anti-passback window in seconds, 0 to 3600 (FR-2.5)',
     parse: integer(0, 3600),
+    wired: false,
   }),
   'attendance.lateGraceMinutes': def({
     default: '5',
     description: 'Late-arrival grace period in minutes, 0 to 120',
     parse: integer(0, 120),
+    wired: false,
   }),
   'export.monthlyAt': def({
     default: '06:00',
     description: 'Time of day (HH:MM, 00:00 to 11:59) the monthly HRS export runs (FR-4.3)',
     parse: morningTime,
+    wired: true,
   }),
   'retention.attendanceYears': def({
     default: '5',
     description: 'Years attendance is retained, 5 to 20 (NFR)',
     parse: integer(5, 20),
+    wired: false,
   }),
   'retention.auditMonthsOnline': def({
     default: '12',
     description: 'Months the audit log stays online, 12 to 120 (NFR)',
     parse: integer(12, 120),
+    wired: false,
   }),
   'integration.tcsBaseUrl': def({
     default: '',
     description: 'TCS base URL (http or https); empty uses the environment value (FR-5.6)',
     parse: baseUrl,
+    wired: false,
   }),
   'integration.hrsBaseUrl': def({
     default: '',
     description: 'HRS base URL (http or https); empty uses the environment value (FR-5.6)',
     parse: baseUrl,
+    wired: false,
   }),
 } as const;
 

@@ -71,4 +71,26 @@ describe('TCS timeout → deny (#30, ADR-3)', () => {
     expect(db.unpushedEvents()).toHaveLength(1);
     expect(db.unpushedEvents()[0]?.outcome).toBe('DENIED');
   });
+
+  it('a TCS failure releases the jti: the same QR can be rescanned (#113 B2)', async () => {
+    const snapshots = makeLoadedSnapshots(db, makeSnapshot([employee], publicKey));
+    const token = issueToken(employee.id, privateKey);
+
+    const first = await scan({ gateId: 'g', token }, db, snapshots, new MockTurnstile('fail'));
+    expect(first.outcome).toBe('DENIED');
+    const second = await scan({ gateId: 'g', token }, db, snapshots, new MockTurnstile('open'));
+    expect(second.outcome).toBe('GRANTED');
+    // A token that did open is still burned.
+    const third = await scan({ gateId: 'g', token }, db, snapshots, new MockTurnstile('open'));
+    expect(third).toMatchObject({ outcome: 'DENIED', reason: 'REPLAYED' });
+  });
+
+  it('a TCS timeout also releases the jti (#113 B2)', async () => {
+    const snapshots = makeLoadedSnapshots(db, makeSnapshot([employee], publicKey));
+    const token = issueToken(employee.id, privateKey);
+
+    await scan({ gateId: 'g', token }, db, snapshots, new MockTurnstile('slow', 10));
+    const again = await scan({ gateId: 'g', token }, db, snapshots, new MockTurnstile('open'));
+    expect(again.outcome).toBe('GRANTED');
+  });
 });

@@ -3,15 +3,18 @@ import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../app.js';
 import type { AuditEntry, AuditLog, Role, UserRef } from '../iam/index.js';
+import { CONFIG } from './admin.config.js';
 import { InMemoryAdminStore } from './admin.fakes.js';
 import { adminRoutes } from './admin.routes.js';
 import {
   AdminService,
+  ConfigNotWiredError,
   DuplicateOrgUnitError,
   InvalidConfigError,
   InvalidOrgUnitError,
   OrgUnitNotFoundError,
   UnknownConfigKeyError,
+  type UserDirectory,
 } from './admin.service.js';
 
 class RecordingAudit implements AuditLog {
@@ -26,6 +29,16 @@ class RecordingAudit implements AuditLog {
   }
 }
 
+const accounts: Record<string, { role: Role; active: boolean }> = {
+  u1: { role: 'SUP', active: true },
+  u2: { role: 'SUP', active: true },
+  'sup-1': { role: 'SUP', active: true },
+  emp1: { role: 'EMP', active: true },
+  hr1: { role: 'HR', active: true },
+  gone: { role: 'SUP', active: false },
+};
+const users: UserDirectory = { findUser: async (id) => accounts[id] ?? null };
+
 let store: InMemoryAdminStore;
 let audit: RecordingAudit;
 let admin: AdminService;
@@ -33,7 +46,7 @@ let admin: AdminService;
 beforeEach(() => {
   store = new InMemoryAdminStore();
   audit = new RecordingAudit();
-  admin = new AdminService(store, audit);
+  admin = new AdminService(store, audit, users);
 });
 
 const seed = async () => {
@@ -144,6 +157,21 @@ describe('AdminService: org units', () => {
     );
   });
 
+  it('rejects supervisors that are unknown, not SUP or inactive, and writes nothing', async () => {
+    await seed();
+    await admin.setSupervisors('hr-1', 'bd-line-1', ['u1']);
+    audit.entries = [];
+    await expect(
+      admin.setSupervisors('hr-1', 'bd-line-1', ['u2', 'nope', 'emp1', 'hr1', 'gone']),
+    ).rejects.toThrow('"nope", "emp1", "hr1", "gone"');
+    expect(audit.entries).toEqual([]);
+    expect((await admin.orgUnits()).find((u) => u.id === 'bd-line-1')?.supervisorIds).toEqual([
+      'u1',
+    ]);
+    await admin.setSupervisors('hr-1', 'bd-line-1', []);
+    expect((await admin.orgUnits()).find((u) => u.id === 'bd-line-1')?.supervisorIds).toEqual([]);
+  });
+
   it('caches the tree and invalidates it on writes', async () => {
     await seed();
     store.listCalls = 0;
@@ -166,29 +194,26 @@ describe('AdminService: org units', () => {
 
 describe('AdminService: config', () => {
   it('returns defaults, then the stored value, typed and as a string', async () => {
-    expect(await admin.get('qr.ttlSeconds')).toBe('60');
-    expect(await admin.config('qr.ttlSeconds')).toBe(60);
+    expect(await admin.get('export.monthlyAt')).toBe('06:00');
+    expect(await admin.config('export.monthlyAt')).toBe('06:00');
     expect(await admin.get('nope')).toBeUndefined();
-    await admin.setConfig('adm-1', 'qr.ttlSeconds', ' 90 ');
-    expect(await admin.get('qr.ttlSeconds')).toBe('90');
-    expect(await admin.config('qr.ttlSeconds')).toBe(90);
-    expect(store.config.get('qr.ttlSeconds')).toEqual({ value: '90', updatedBy: 'adm-1' });
+    await admin.setConfig('adm-1', 'export.monthlyAt', ' 09:30 ');
+    expect(await admin.get('export.monthlyAt')).toBe('09:30');
+    expect(await admin.config('export.monthlyAt')).toBe('09:30');
+    expect(store.config.get('export.monthlyAt')).toEqual({ value: '09:30', updatedBy: 'adm-1' });
   });
 
   it('audits CONFIG_CHANGE with before (the default at first) and after', async () => {
-    await admin.setConfig('adm-1', 'qr.ttlSeconds', '90');
-    await admin.setConfig('adm-1', 'qr.ttlSeconds', '120');
+    await admin.setConfig('adm-1', 'export.monthlyAt', '09:30');
+    await admin.setConfig('adm-1', 'export.monthlyAt', '10:00');
     expect(audit.entries.map((e) => [e.action, e.target, e.before, e.after])).toEqual([
-      ['CONFIG_CHANGE', 'config:qr.ttlSeconds', { value: '60' }, { value: '90' }],
-      ['CONFIG_CHANGE', 'config:qr.ttlSeconds', { value: '90' }, { value: '120' }],
+      ['CONFIG_CHANGE', 'config:export.monthlyAt', { value: '06:00' }, { value: '09:30' }],
+      ['CONFIG_CHANGE', 'config:export.monthlyAt', { value: '09:30' }, { value: '10:00' }],
     ]);
   });
 
   it('rejects unknown keys and invalid values without auditing or storing', async () => {
     await expect(admin.setConfig('a', 'nope', '1')).rejects.toBeInstanceOf(UnknownConfigKeyError);
-    await expect(admin.setConfig('a', 'qr.ttlSeconds', '5')).rejects.toBeInstanceOf(
-      InvalidConfigError,
-    );
     await expect(admin.setConfig('a', 'export.monthlyAt', '12:00')).rejects.toBeInstanceOf(
       InvalidConfigError,
     );
@@ -196,17 +221,28 @@ describe('AdminService: config', () => {
     expect(store.config.size).toBe(0);
   });
 
+  it('rejects keys nothing reads with ConfigNotWiredError, before storing or auditing', async () => {
+    for (const key of Object.keys(CONFIG).filter((k) => k !== 'export.monthlyAt')) {
+      // Even a valid value, and even an invalid one: wiring is checked first.
+      await expect(admin.setConfig('a', key, '90')).rejects.toBeInstanceOf(ConfigNotWiredError);
+    }
+    expect(audit.entries).toEqual([]);
+    expect(store.config.size).toBe(0);
+  });
+
   it('allConfig lists every key with default and whether it is set', async () => {
-    await admin.setConfig('a', 'qr.ttlSeconds', '90');
+    await admin.setConfig('a', 'export.monthlyAt', '09:30');
     const all = await admin.allConfig();
     expect(all).toHaveLength(8);
-    expect(all.find((e) => e.key === 'qr.ttlSeconds')).toMatchObject({
-      value: '90',
-      default: '60',
+    expect(all.find((e) => e.key === 'export.monthlyAt')).toMatchObject({
+      value: '09:30',
+      default: '06:00',
+      wired: true,
       set: true,
     });
-    expect(all.find((e) => e.key === 'export.monthlyAt')).toMatchObject({
-      value: '06:00',
+    expect(all.find((e) => e.key === 'qr.ttlSeconds')).toMatchObject({
+      value: '60',
+      wired: false,
       set: false,
     });
   });
@@ -312,6 +348,24 @@ describe('admin routes', () => {
     expect(sup.body).toMatchObject({ supervisorIds: ['u1'] });
   });
 
+  it('PUT supervisors: 400 naming unknown, EMP-role and inactive ids; 200 for SUP ids and []', async () => {
+    await seed();
+    const put = (userIds: string[]) =>
+      request(as('ADM')).put('/api/org-units/bd-line-1/supervisors').send({ userIds });
+    const unknown = await put(['nope']);
+    expect(unknown.status).toBe(400);
+    expect(unknown.body.error).toContain('"nope"');
+    const emp = await put(['u1', 'emp1']);
+    expect(emp.status).toBe(400);
+    expect(emp.body.error).toContain('"emp1"');
+    expect(emp.body.error).not.toContain('"u1"');
+    expect((await put(['gone'])).status).toBe(400);
+    expect(audit.entries.filter((e) => e.action === 'TEAM_SUPERVISORS_SET')).toEqual([]);
+    expect((await put(['u1', 'u2'])).body).toMatchObject({ supervisorIds: ['u1', 'u2'] });
+    expect((await put([])).status).toBe(200);
+    expect(audit.entries.filter((e) => e.action === 'TEAM_SUPERVISORS_SET')).toHaveLength(2);
+  });
+
   it('a factory-scoped HR manages units inside its factory but not outside (403)', async () => {
     await seed();
     const hr = () => as('HR', ['bd'], 'hr-bd');
@@ -350,13 +404,14 @@ describe('admin routes', () => {
     expect(list.body.map((u: { id: string }) => u.id)).toEqual(['bd-line-1']);
   });
 
-  it('GET /config lists every key; PUT validates (400), rejects unknown keys (404), and audits', async () => {
+  it('GET /config lists every key; PUT validates (400), rejects unknown (404) and unwired (409) keys, and audits', async () => {
     const list = await request(as('ADM')).get('/api/config');
     expect(list.body).toHaveLength(8);
     expect(list.body[0]).toMatchObject({
       key: 'qr.ttlSeconds',
       value: '60',
       default: '60',
+      wired: false,
       set: false,
     });
     expect(list.body[0].description).toEqual(expect.any(String));
@@ -364,13 +419,17 @@ describe('admin routes', () => {
       request(as('ADM'))
         .put(`/api/config/${key}`)
         .send(body as object);
-    expect((await put('qr.ttlSeconds', { value: '90' })).body).toMatchObject({
-      value: '90',
+    expect((await put('export.monthlyAt', { value: '09:30' })).body).toMatchObject({
+      value: '09:30',
+      wired: true,
       set: true,
     });
-    expect((await put('qr.ttlSeconds', { value: '5' })).status).toBe(400);
-    expect((await put('qr.ttlSeconds', { value: 90 })).status).toBe(400);
+    expect((await put('export.monthlyAt', { value: 930 })).status).toBe(400);
     expect((await put('export.monthlyAt', { value: '12:00' })).status).toBe(400);
+    const unwired = await put('qr.ttlSeconds', { value: '90' });
+    expect(unwired.status).toBe(409);
+    expect(unwired.body).toMatchObject({ code: 'CONFIG_NOT_WIRED' });
+    expect((await put('qr.ttlSeconds', { value: '5' })).status).toBe(409);
     expect((await put('nope', { value: '1' })).status).toBe(404);
     expect(audit.entries).toHaveLength(1);
     expect(audit.entries[0]).toMatchObject({ actorId: 'ADM-1', action: 'CONFIG_CHANGE' });

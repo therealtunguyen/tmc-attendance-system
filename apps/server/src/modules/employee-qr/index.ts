@@ -10,12 +10,15 @@ export {
 } from './employee-qr.service.js';
 export type {
   DenyReason,
+  EdgeGates,
   EdgeSnapshotSource,
   Employee,
   EmployeeAdmin,
+  EmployeeAdmission,
   EmployeeChanges,
   EmployeeDirectory,
   EmployeeRoster,
+  EmployeeScopes,
   EmployeeStore,
   EmployeeSummary,
   LiveQr,

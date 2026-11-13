@@ -1,6 +1,6 @@
 import { Router, type Request, type RequestHandler } from 'express';
 import { createRateLimiter, type RateLimitOptions } from './iam.ratelimit.js';
-import { requirePermission } from './iam.rbac.js';
+import { hasPermission, requirePermission } from './iam.rbac.js';
 import {
   NoticeError,
   type AuditFilter,
@@ -34,6 +34,8 @@ const bearer = (req: Request): string | undefined => {
 export const authenticate =
   (auth: Authenticator, resolver?: ScopeResolver): RequestHandler =>
   async (req, res, next) => {
+    // /api/edge/* uses shared-secret edge credentials (#69), never user sessions.
+    if (req.path === '/edge' || req.path.startsWith('/edge/')) return void next();
     const token = bearer(req);
     if (token) {
       const user = await auth.authenticate(token);
@@ -52,11 +54,27 @@ const NOTICE_EXEMPT = new Set([
   '/privacy-notice/ack',
   // Gate access and attendance are needed to perform the labour contract (Decree 13/2023 Art. 17):
   // the QR token and the live QR page the email link opens.
-  // When gate monitor/override/emergency routes land, exempt them by permission rather than by
-  // path, so that an unacknowledged notice never blocks an emergency action.
   '/qr/token',
   '/me/qr',
 ]);
+
+/**
+ * Gate operations a guard must reach without waiting on the notice (#113 D2). Add the emergency
+ * route here when it lands. Admin actions (POST/PATCH/DELETE /gates) are deliberately absent.
+ */
+const GATE_OPS: readonly (readonly [string, RegExp])[] = [
+  ['GET', /^\/gates(\/[^/]+)?$/],
+  ['GET', /^\/access-log$/],
+  ['POST', /^\/gates\/[^/]+\/override$/],
+];
+
+/**
+ * The exemption needs the permission (gate:override, so HR/EMP/ADM stay gated) and a method+path
+ * match, so a guard is still gated on /me/* and every other route.
+ */
+const exemptByPermission = (user: UserRef, method: string, path: string) =>
+  hasPermission(user.role, 'gate:override') &&
+  GATE_OPS.some(([m, re]) => m === method && re.test(path));
 
 /**
  * Blocks a signed-in user until they acknowledge the current privacy notice (NFR-20). Mount after
@@ -67,7 +85,9 @@ export const requireNoticeAck =
   (notices: Pick<NoticeApi, 'noticePending'>): RequestHandler =>
   async (req, res, next) => {
     const user = res.locals.user as UserRef | undefined;
-    if (!user || NOTICE_EXEMPT.has(req.path.replace(/(?<=.)\/$/, ''))) return void next();
+    if (!user) return void next();
+    const path = req.path.replace(/(?<=.)\/$/, '');
+    if (NOTICE_EXEMPT.has(path) || exemptByPermission(user, req.method, path)) return void next();
     const version = await notices.noticePending(user.id);
     if (version === null) return void next();
     res

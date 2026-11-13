@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { EdgeSnapshot, SnapshotEmployee } from '../../shared/contracts/edge.js';
+import type { EdgeSnapshot, SnapshotEmployee, SnapshotGate } from '../../shared/contracts/edge.js';
 import { QR_TOKEN_TTL_S, signQrToken } from '../../shared/contracts/qr-token.js';
 import {
   checkQrToken,
@@ -117,8 +117,13 @@ export interface QrIssuer {
 }
 
 export interface EdgeSnapshotSource {
-  /** Public keys and employee deny states for GET /api/edge/snapshot (ADR-9). */
-  snapshot(): Promise<EdgeSnapshot>;
+  /** Public keys, employee deny states and the edge's gates for GET /api/edge/snapshot (ADR-9, #113). */
+  snapshot(gates?: SnapshotGate[]): Promise<EdgeSnapshot>;
+}
+
+/** The gates of one edge, for the snapshot (#113). Implemented by the gate module, wired in main.ts. */
+export interface EdgeGates {
+  gatesForEdge(edgeId: string): Promise<SnapshotGate[]>;
 }
 
 export interface QrValidation {
@@ -141,6 +146,18 @@ export interface EmployeeRoster {
   roster(scope?: Scope): Promise<RosterEntry[]>;
 }
 
+/** Where one employee belongs, for scope checks (BR-15): no personal data (NFR-4). */
+export interface EmployeeScopes {
+  /** The employee's factory, then their team if they have one; null when there is no such employee. */
+  scopesOf(id: string): Promise<Scope[] | null>;
+}
+
+/** Whether a gate would turn one employee away now (FR-1.4, FR-1.5): no personal data (NFR-4). */
+export interface EmployeeAdmission {
+  /** Null = admit, like the edge snapshot. UNKNOWN when there is no such employee. */
+  denyOf(id: string): Promise<'UNKNOWN' | 'INACTIVE' | 'REVOKED' | null>;
+}
+
 /** Employees, QR issue/revoke/reissue, validation (FR-1.1 to FR-1.5). */
 export class EmployeeQrService
   implements
@@ -150,6 +167,8 @@ export class EmployeeQrService
     EdgeSnapshotSource,
     EmployeeDirectory,
     EmployeeRoster,
+    EmployeeScopes,
+    EmployeeAdmission,
     EmployeeAdmin
 {
   private keyring?: QrKeyring;
@@ -301,10 +320,10 @@ export class EmployeeQrService
    * The whole company, not one factory, and denied employees too: missing means UNKNOWN to the edge.
    * generatedAt is taken before the read, so the edge can only think its deny states are older than they are.
    */
-  async snapshot(): Promise<EdgeSnapshot> {
+  async snapshot(gates: SnapshotGate[] = []): Promise<EdgeSnapshot> {
     const generatedAt = this.now().toISOString();
     const publicKeys = this.ring.edgePublicKeys();
-    return { generatedAt, publicKeys, employees: (await this.repo.list()).map(admission) };
+    return { generatedAt, publicKeys, employees: (await this.repo.list()).map(admission), gates };
   }
 
   async find(id: string): Promise<EmployeeSummary | null> {
@@ -318,6 +337,17 @@ export class EmployeeQrService
 
   async roster(scope?: Scope): Promise<RosterEntry[]> {
     return (await this.repo.list(scope)).map(rosterEntry);
+  }
+
+  async scopesOf(id: string): Promise<Scope[] | null> {
+    const employee = await this.repo.find(id);
+    if (!employee) return null;
+    return employee.teamId ? [employee.factoryId, employee.teamId] : [employee.factoryId];
+  }
+
+  async denyOf(id: string): Promise<'UNKNOWN' | 'INACTIVE' | 'REVOKED' | null> {
+    const employee = await this.repo.find(id);
+    return employee ? admission(employee).deny : 'UNKNOWN';
   }
 
   private record(actorId: string, action: string, employeeId: string) {

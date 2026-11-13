@@ -20,6 +20,17 @@ describe('MailNotifier', () => {
     expect(mailer.sent[0]!.to).toBe('adm@x.vn');
   });
 
+  it.each(['STALE_ENTRY_REVOKED', 'QR_USED_AT_TWO_EDGES'] as const)(
+    'sends the sync finding %s to ADM only, never HR (#33)',
+    async (kind) => {
+      const mailer = new MockMailer();
+      await new MailNotifier(mailer, recipients).alert(kind, 'finding');
+      expect(mailer.sent).toHaveLength(1);
+      expect(mailer.sent[0]!.to).toBe('adm@x.vn');
+      expect(mailer.sent[0]!.subject).toBe(`[TMC Attendance] ${kind}`);
+    },
+  );
+
   it('removes duplicate addresses, ignoring case', async () => {
     const mailer = new MockMailer();
     const notifier = new MailNotifier(mailer, {

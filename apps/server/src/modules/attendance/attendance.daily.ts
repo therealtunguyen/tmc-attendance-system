@@ -1,10 +1,13 @@
 // Daily record builder (report v1: FR-3.4, FR-3.5, Listing 8.5). Pure: no I/O, so it is tested alone.
-import type { DailyRecord, StoredEvent } from './attendance.service.js';
+import type { Correction, DailyRecord, StoredEvent } from './attendance.service.js';
 
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
 /** Both factories are in Vietnam: Asia/Ho_Chi_Minh is UTC+7 all year (no daylight saving). */
 const VN_OFFSET_MS = 7 * HOUR_MS;
+
+/** #113 C2: scans closer together than this are a double tap, not a punch pair. */
+export const MIN_PUNCH_GAP_MS = 5 * 60_000;
 
 /** Start of the Vietnam local day that contains `at`, as an instant. */
 export const localDayStart = (at: Date): Date =>
@@ -15,14 +18,68 @@ export const nextDay = (day: Date): Date => new Date(day.getTime() + DAY_MS);
 
 export type DailyInput = Pick<StoredEvent, 'employeeId' | 'occurredAt' | 'outcome'>;
 
+/** The Vietnam calendar date of a local day start, as YYYY-MM-DD. */
+const dateOf = (day: Date): string =>
+  new Date(day.getTime() + VN_OFFSET_MS).toISOString().slice(0, 10);
+
+/**
+ * A daily record has no row of its own (it is computed on read), so its ID is the employee and the
+ * day: <employeeId>_<YYYY-MM-DD>.
+ */
+export const recordIdOf = (record: Pick<DailyRecord, 'employeeId' | 'day'>): string =>
+  `${record.employeeId}_${dateOf(record.day)}`;
+
+/** Null when the ID is malformed or names a date that does not exist. */
+export const parseRecordId = (id: string): Pick<DailyRecord, 'employeeId' | 'day'> | null => {
+  const match = /^(.+)_(\d{4}-\d{2}-\d{2})$/.exec(id);
+  if (!match) return null;
+  const [, employeeId, date] = match as unknown as [string, string, string];
+  const day = new Date(`${date}T00:00:00+07:00`);
+  return !Number.isNaN(day.getTime()) && dateOf(day) === date ? { employeeId, day } : null;
+};
+
+type DailyCorrection = Pick<
+  Correction,
+  'employeeId' | 'day' | 'field' | 'correctedValue' | 'createdAt'
+>;
+
+/** The value in force for one field of one day: the newest correction, the later one on a tie. */
+const correctedValue = (
+  corrections: DailyCorrection[],
+  employeeId: string,
+  day: Date,
+  field: Correction['field'],
+): Date | null => {
+  let newest: DailyCorrection | null = null;
+  for (const c of corrections) {
+    if (c.employeeId !== employeeId || c.day.getTime() !== day.getTime() || c.field !== field) {
+      continue;
+    }
+    if (!newest || c.createdAt.getTime() >= newest.createdAt.getTime()) newest = c;
+  }
+  return newest?.correctedValue ?? null;
+};
+
 /**
  * One record per employee per local day with at least one granted scan. Only GRANTED events
  * are attendance transactions (glossary; FR-3.3); PENDING and DENIED are ignored.
  * firstIn / lastOut are the earliest / latest granted scan of the day, hours is the time between
  * them. A day with a single granted scan has no lastOut and is flagged as a missing punch.
+ * An HR correction replaces the value it names, and hours and the flag follow it (FR-3.6, UC-8);
+ * the scans themselves are never changed.
+ * A scan that arrives late from an edge can put first in after last out on a corrected day. The
+ * pair is then not a working time, so the day has 0 hours and is flagged like a missing punch
+ * until HR corrects it again.
+ * Assumptions: every shift starts and ends on the same Asia/Ho_Chi_Minh calendar day; a shift
+ * across midnight shows as two missing-punch days that HR corrects (#113 C1).
+ * A single scan cannot be told IN from OUT, so the day stays missing until HR corrects LAST_OUT;
+ * it is not inferred, even when HR corrected FIRST_IN (#113 C3).
  * Sorted by employeeId, then day.
  */
-export const buildDailyRecords = (events: DailyInput[]): DailyRecord[] => {
+export const buildDailyRecords = (
+  events: DailyInput[],
+  corrections: DailyCorrection[] = [],
+): DailyRecord[] => {
   const days = new Map<string, { employeeId: string; day: Date; times: number[] }>();
   for (const e of events) {
     if (e.outcome !== 'GRANTED' || e.employeeId === null) continue;
@@ -35,16 +92,23 @@ export const buildDailyRecords = (events: DailyInput[]): DailyRecord[] => {
 
   return [...days.values()]
     .map(({ employeeId, day, times }): DailyRecord => {
-      const first = Math.min(...times);
-      const last = Math.max(...times);
-      const missingPunch = times.length === 1;
+      const correctedIn = correctedValue(corrections, employeeId, day, 'FIRST_IN');
+      const correctedOut = correctedValue(corrections, employeeId, day, 'LAST_OUT');
+      const firstIn = correctedIn ?? new Date(Math.min(...times));
+      // #113 C2: gap measured on the raw scans, so a double tap (< MIN_PUNCH_GAP_MS) is no lastOut.
+      const scanSpan = Math.max(...times) - Math.min(...times);
+      const lastOut =
+        correctedOut ?? (scanSpan >= MIN_PUNCH_GAP_MS ? new Date(Math.max(...times)) : null);
+      const span = lastOut ? lastOut.getTime() - firstIn.getTime() : 0;
       return {
         employeeId,
         day,
-        firstIn: new Date(first),
-        lastOut: missingPunch ? null : new Date(last),
-        hours: missingPunch ? 0 : Math.round(((last - first) / HOUR_MS) * 100) / 100,
-        missingPunch,
+        firstIn,
+        lastOut,
+        // Never negative: a late edge push can move a scan past a corrected value.
+        hours: Math.round((Math.max(span, 0) / HOUR_MS) * 100) / 100,
+        missingPunch: lastOut === null || span < 0,
+        ...(correctedIn || correctedOut ? { corrected: true } : {}),
       };
     })
     .sort((a, b) =>

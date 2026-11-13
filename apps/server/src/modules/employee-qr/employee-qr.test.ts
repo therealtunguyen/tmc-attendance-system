@@ -995,7 +995,13 @@ describe('EmployeeQrService.snapshot (ADR-9)', () => {
         { kid: 'k1', spki: k1.publicKey },
       ],
       employees: [],
+      gates: [],
     });
+  });
+
+  it('carries the gates it is given (#113)', async () => {
+    const gates = [{ id: 'g-1', turnstileId: 'TS-1', active: false }];
+    expect((await svc().snapshot(gates)).gates).toEqual(gates);
   });
 
   it('lists every employee with the reason a gate must deny them', async () => {
@@ -1083,10 +1089,22 @@ describe('EmployeeQrService.snapshot (ADR-9)', () => {
 });
 
 describe('GET /api/edge/snapshot', () => {
-  const app = (keys = keysK1) =>
-    createApp([employeeQrRoutes(new EmployeeQrService(store, audit, keys, () => NOW))]);
+  const edgeAs = (edgeId: string | null) =>
+    Router().use((_req, res, next) => {
+      if (edgeId) res.locals.edgeId = edgeId;
+      next();
+    });
+  const app = (keys = keysK1, edgeId: string | null = 'edge-bd') =>
+    createApp([
+      edgeAs(edgeId),
+      employeeQrRoutes(new EmployeeQrService(store, audit, keys, () => NOW)),
+    ]);
 
-  it('needs no user session: the edge has none', async () => {
+  it('rejects requests without an authenticated edge credential (401)', async () => {
+    expect((await request(app(keysK1, null)).get('/api/edge/snapshot')).status).toBe(401);
+  });
+
+  it('returns the snapshot for an authenticated edge without a user session', async () => {
     const { id } = await eqr.createEmployee('hr-1', lan);
     const res = await request(app()).get('/api/edge/snapshot?edgeId=edge-bd');
     expect(res.status).toBe(200);
@@ -1094,7 +1112,34 @@ describe('GET /api/edge/snapshot', () => {
       generatedAt: NOW.toISOString(),
       publicKeys: [{ kid: 'k1', spki: k1.publicKey }],
       employees: [{ id, firstName: 'Lan', deny: null }],
+      gates: [],
     });
+  });
+
+  it("lists only the authenticated edge's gates, from edge auth and not the query (#113)", async () => {
+    const all = [
+      { edgeId: 'edge-bd', gate: { id: 'g-bd', turnstileId: 'TS-BD', active: true } },
+      { edgeId: 'edge-bd', gate: { id: 'g-bd2', turnstileId: 'TS-BD2', active: false } },
+      { edgeId: 'edge-la', gate: { id: 'g-la', turnstileId: 'TS-LA', active: true } },
+    ];
+    const edgeGates = {
+      gatesForEdge: async (edgeId: string) =>
+        all.filter((g) => g.edgeId === edgeId).map((g) => g.gate),
+    };
+    const gated = createApp([
+      edgeAs('edge-bd'),
+      employeeQrRoutes(
+        new EmployeeQrService(store, audit, keysK1, () => NOW),
+        undefined,
+        {},
+        edgeGates,
+      ),
+    ]);
+    const res = await request(gated).get('/api/edge/snapshot?edgeId=edge-la');
+    expect(res.body.gates).toEqual([
+      { id: 'g-bd', turnstileId: 'TS-BD', active: true },
+      { id: 'g-bd2', turnstileId: 'TS-BD2', active: false },
+    ]);
   });
 
   it('is never cached: a revocation must reach the edge on its next pull', async () => {
@@ -1726,5 +1771,46 @@ describe('roster (EmployeeRoster)', () => {
       [binhId, false],
     ]);
     expect(Object.keys(entries[1]!).sort()).toEqual(ROSTER_FIELDS);
+  });
+});
+
+describe('denyOf (EmployeeAdmission)', () => {
+  it('is null for an active employee whose QR is valid', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    expect(await eqr.denyOf(id)).toBeNull();
+  });
+
+  it('is REVOKED after a revoke and null again after a reissue', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    await eqr.revokeQr('hr-1', id);
+    expect(await eqr.denyOf(id)).toBe('REVOKED');
+    await eqr.reissueQr('hr-1', id);
+    expect(await eqr.denyOf(id)).toBeNull();
+  });
+
+  it('is INACTIVE for a deactivated employee', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    await eqr.deactivateEmployee('hr-1', id);
+    expect(await eqr.denyOf(id)).toBe('INACTIVE');
+  });
+
+  it('is UNKNOWN for an employee that does not exist', async () => {
+    expect(await eqr.denyOf('nope')).toBe('UNKNOWN');
+  });
+});
+
+describe('scopesOf (EmployeeScopes)', () => {
+  it('gives the factory, then the team', async () => {
+    const { id } = await eqr.createEmployee('hr-1', lan);
+    expect(await eqr.scopesOf(id)).toEqual([lan.factoryId, lan.teamId]);
+  });
+
+  it('gives only the factory when the employee has no team', async () => {
+    const { id } = await eqr.createEmployee('hr-1', { ...lan, teamId: null });
+    expect(await eqr.scopesOf(id)).toEqual([lan.factoryId]);
+  });
+
+  it('is null for an employee that does not exist', async () => {
+    expect(await eqr.scopesOf('nope')).toBeNull();
   });
 });

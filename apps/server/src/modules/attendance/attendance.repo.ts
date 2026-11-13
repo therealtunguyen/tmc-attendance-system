@@ -1,14 +1,39 @@
+import { createHash } from 'node:crypto';
 import type { EdgeDenyReason } from '../../shared/contracts/edge.js';
 import type { PrismaClient } from '../../shared/prisma.js';
+import { asTransaction, type Transaction } from '../../shared/transaction.js';
 import type { DailyInput } from './attendance.daily.js';
 import type {
   AccessLogQuery,
   AttendanceStore,
+  Correction,
+  JtiSighting,
+  LockedRecordStore,
   ScanOutcome,
   StoredEvent,
 } from './attendance.service.js';
 
-/** Owns: AttendanceEvent, DailyRecord, Correction. */
+/**
+ * Oldest first. createdAt comes from the service clock and can tie, so seq (assigned by the
+ * database on insert) decides: the order is always the order the corrections were stored in.
+ */
+const CORRECTION_ORDER = [{ createdAt: 'asc' as const }, { seq: 'asc' as const }];
+const CORRECTION_OMIT = { id: true, seq: true } as const;
+
+/** The longest one correction may hold its record: the reads, one insert and one audit append. */
+const RECORD_LOCK_TIMEOUT_MS = 10_000;
+
+/**
+ * The advisory lock key of one daily record. Two records with the same hash only wait for each
+ * other; they never fail.
+ */
+export const recordLockKey = (employeeId: string, day: Date): bigint =>
+  createHash('sha256')
+    .update(`attendance-record:${employeeId}:${day.toISOString()}`)
+    .digest()
+    .readBigInt64BE(0);
+
+/** Owns: AttendanceEvent, Correction. Daily records are computed on read, so they have no table. */
 export class AttendanceRepo implements AttendanceStore {
   constructor(private db: PrismaClient) {}
 
@@ -21,10 +46,33 @@ export class AttendanceRepo implements AttendanceStore {
     return count === 1;
   }
 
-  async insertMany(events: StoredEvent[]): Promise<void> {
-    if (events.length === 0) return;
-    // One INSERT ... ON CONFLICT DO NOTHING: all new rows land together, duplicates are skipped.
-    await this.db.attendanceEvent.createMany({ data: events, skipDuplicates: true });
+  async insertMany(events: StoredEvent[]): Promise<string[]> {
+    if (events.length === 0) return [];
+    // One INSERT ... ON CONFLICT DO NOTHING RETURNING: all new rows land together, duplicates are
+    // skipped, and only the rows this statement inserted come back.
+    const added = await this.db.attendanceEvent.createManyAndReturn({
+      data: events,
+      skipDuplicates: true,
+      select: { eventId: true },
+    });
+    return added.map((row) => row.eventId);
+  }
+
+  async eventsWithJti(jtis: string[]): Promise<JtiSighting[]> {
+    if (jtis.length === 0) return [];
+    return this.db.attendanceEvent.findMany({
+      where: { jti: { in: jtis } },
+      orderBy: [{ occurredAt: 'asc' }, { eventId: 'asc' }],
+      select: {
+        eventId: true,
+        employeeId: true,
+        gateId: true,
+        edgeId: true,
+        outcome: true,
+        occurredAt: true,
+        jti: true,
+      },
+    });
   }
 
   grantedEvents(from: Date, to: Date, employeeIds?: string[]): Promise<DailyInput[]> {
@@ -43,6 +91,47 @@ export class AttendanceRepo implements AttendanceStore {
       where: { outcome: 'GRANTED', employeeId },
       select: { employeeId: true, occurredAt: true, outcome: true },
     });
+  }
+
+  corrections(from: Date, to: Date, employeeIds?: string[]): Promise<Correction[]> {
+    return this.db.correction.findMany({
+      where: {
+        day: { gte: from, lt: to },
+        ...(employeeIds ? { employeeId: { in: employeeIds } } : {}),
+      },
+      orderBy: CORRECTION_ORDER,
+      omit: CORRECTION_OMIT,
+    });
+  }
+
+  correctionsOf(employeeId: string): Promise<Correction[]> {
+    return this.db.correction.findMany({
+      where: { employeeId },
+      orderBy: CORRECTION_ORDER,
+      omit: CORRECTION_OMIT,
+    });
+  }
+
+  withRecordLock<T>(
+    employeeId: string,
+    day: Date,
+    work: (store: LockedRecordStore, tx: Transaction) => Promise<T>,
+  ): Promise<T> {
+    return this.db.$transaction(
+      async (tx) => {
+        // Held until this transaction ends. Everything `work` does runs on this same connection,
+        // so a correction never waits for a second one from the pool.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(${recordLockKey(employeeId, day)})`;
+        // The same queries as this repo, sent through the transaction. Only the read and write
+        // methods are used on it, never $transaction.
+        return work(new AttendanceRepo(tx as unknown as PrismaClient), asTransaction(tx));
+      },
+      { maxWait: RECORD_LOCK_TIMEOUT_MS, timeout: RECORD_LOCK_TIMEOUT_MS },
+    );
+  }
+
+  async insertCorrection(correction: Correction): Promise<void> {
+    await this.db.correction.create({ data: correction, select: { id: true } });
   }
 
   async decide(eventId: string, outcome: ScanOutcome): Promise<boolean> {

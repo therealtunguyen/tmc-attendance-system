@@ -4,13 +4,15 @@
 // The edge is simulated (edgeScan): which events an edge stores and pushes is not tested here.
 import { createHash, createPublicKey, generateKeyPairSync, randomUUID } from 'node:crypto';
 import request from 'supertest';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { MockHrs } from './adapters/hrs/mock.js';
 import { MockTurnstile } from './adapters/tcs/mock.js';
 import { createApp } from './app.js';
 import {
   type AccessLogQuery,
   AttendanceService,
   attendanceRoutes,
+  SyncReconciler,
   type AttendanceStore,
   type StoredEvent,
 } from './modules/attendance/index.js';
@@ -24,6 +26,7 @@ import {
 } from './modules/employee-qr/index.js';
 import {
   authenticate,
+  authenticateEdge,
   hashPassword,
   IamService,
   iamRoutes,
@@ -37,6 +40,7 @@ import {
 import {
   AccessLogService,
   CompanyMonthSource,
+  ExportScheduler,
   HrExportService,
   MonthlyReportService,
   reportingRoutes,
@@ -95,9 +99,20 @@ class InMemoryEmployees implements Pick<
 /** Same contract as AttendanceRepo for what ingest and dailyRecords call: a known eventId is skipped. */
 class InMemoryEvents implements Pick<
   AttendanceStore,
-  'insert' | 'insertMany' | 'grantedEvents' | 'accessLog' | 'decide' | 'outcomeOf'
+  | 'insert'
+  | 'insertMany'
+  | 'eventsWithJti'
+  | 'grantedEvents'
+  | 'corrections'
+  | 'accessLog'
+  | 'decide'
+  | 'outcomeOf'
 > {
   rows = new Map<string, StoredEvent>();
+
+  async corrections() {
+    return [];
+  }
 
   async insert(event: StoredEvent) {
     if (this.rows.has(event.eventId)) return false;
@@ -106,7 +121,15 @@ class InMemoryEvents implements Pick<
   }
 
   async insertMany(events: StoredEvent[]) {
-    for (const event of events) await this.insert(event);
+    const added: string[] = [];
+    for (const event of events) if (await this.insert(event)) added.push(event.eventId);
+    return added;
+  }
+
+  async eventsWithJti(jtis: string[]) {
+    return [...this.rows.values()]
+      .filter((e) => e.jti !== null && jtis.includes(e.jti))
+      .sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime());
   }
 
   /** Like the repo: only a PENDING row (or one already at this outcome) takes the outcome. */
@@ -218,8 +241,12 @@ let iamStore: ReturnType<typeof inMemoryIam>;
 let iam: IamService;
 let eqr: EmployeeQrService;
 let attendance: AttendanceService;
+/** What sync reconciliation raised (#33). */
+let syncAlerts: RecordingNotifier;
 let app: ReturnType<typeof createApp>;
 const HR_SESSION = 'hr-session-token';
+const EDGE_TOKEN = 'edge-bd-secret-token';
+const LA_EDGE_TOKEN = 'edge-la-secret-token';
 
 beforeEach(() => {
   nowMs = Date.parse(IN_AT);
@@ -234,14 +261,25 @@ beforeEach(() => {
     qrKeys,
     () => new Date(nowMs),
   );
-  attendance = new AttendanceService(events as unknown as AttendanceStore, eqr);
+  syncAlerts = new RecordingNotifier();
+  // Wired like main.ts: the reconciler reads the event store and EQR, and alerts through the Notifier.
+  attendance = new AttendanceService(
+    events as unknown as AttendanceStore,
+    eqr,
+    iam,
+    () => new Date(),
+    new SyncReconciler(events, eqr, syncAlerts),
+  );
   app = createApp(
     [
       iamRoutes(iam, { login: false, mfa: false }),
       employeeQrRoutes(eqr),
       attendanceRoutes(attendance),
     ],
-    { before: [authenticate(iam), requireNoticeAck(iam)] },
+    {
+      before: [authenticate(iam), requireNoticeAck(iam)],
+      edge: authenticateEdge({ [EDGE]: EDGE_TOKEN, 'edge-la': LA_EDGE_TOKEN }),
+    },
   );
 });
 
@@ -293,7 +331,9 @@ const issueQr = (session: string) =>
  * own input for the push; nothing here asserts what a real edge would store, or whether it opens TCS.
  */
 const edgeScan = async (token: string): Promise<{ event: EdgeEvent; reason?: string }> => {
-  const snapshot = (await request(app).get('/api/edge/snapshot')).body as EdgeSnapshot;
+  const snapshot = (
+    await request(app).get('/api/edge/snapshot').set('Authorization', `Bearer ${EDGE_TOKEN}`)
+  ).body as EdgeSnapshot;
   const result = await checkQrToken(token, {
     publicKeys: Object.fromEntries(
       snapshot.publicKeys.map(({ kid, spki }) => [
@@ -320,7 +360,10 @@ const edgeScan = async (token: string): Promise<{ event: EdgeEvent; reason?: str
 };
 
 const push = (...batch: EdgeEvent[]) =>
-  request(app).post('/api/edge/events').send({ edgeId: EDGE, events: batch });
+  request(app)
+    .post('/api/edge/events')
+    .set('Authorization', `Bearer ${EDGE_TOKEN}`)
+    .send({ edgeId: EDGE, events: batch });
 
 describe('cross-module flow: real routes, in-memory stores, simulated edge', () => {
   it('a portal token passes the snapshot check, and its pushed event shows up in the daily record', async () => {
@@ -421,7 +464,10 @@ describe('cross-module flow: real routes, in-memory stores, simulated edge', () 
   });
 
   it('the user-session check does not block /api/edge/*, and user routes still need a session', async () => {
-    expect((await request(app).get('/api/edge/snapshot')).status).toBe(200);
+    expect(
+      (await request(app).get('/api/edge/snapshot').set('Authorization', `Bearer ${EDGE_TOKEN}`))
+        .status,
+    ).toBe(200);
     expect((await push()).status).toBe(200);
     expect((await request(app).get('/api/employees')).status).toBe(401);
     expect((await request(app).post('/api/qr/token').send()).status).toBe(401);
@@ -437,8 +483,126 @@ describe('cross-module flow: real routes, in-memory stores, simulated edge', () 
   it.todo('edge outbox: a network drop then recovery loses and duplicates nothing (#27, #30)');
   it.todo('edge agent: mock TCS timeout or error means DENIED, no attendance (#24, #30)');
   it.todo('POST /api/edge/heartbeat marks the edge online; silence raises GATE_OFFLINE (#28, #39)');
-  it.todo('/api/edge/* rejects a request without a valid edge credential (#69)');
-  it.todo('sync flags a stale event for a revoked person, and one jti at two edges (#33)');
+  it('/api/edge/* rejects a request without a valid edge credential (#69)', async () => {
+    await seedHrSession();
+    expect((await request(app).get('/api/edge/snapshot')).status).toBe(401);
+    expect(
+      (await request(app).get('/api/edge/snapshot').set('Authorization', 'Bearer wrong')).status,
+    ).toBe(401);
+    expect(
+      (await request(app).get('/api/edge/snapshot').set('Authorization', `Bearer ${HR_SESSION}`))
+        .status,
+    ).toBe(401);
+    expect((await request(app).post('/api/edge/events').send({ events: [] })).status).toBe(401);
+    expect((await request(app).post('/api/edge/heartbeat').send({})).status).toBe(401);
+
+    // Spoofed body.edgeId is ignored; server stores the edgeId from the matched token.
+    const lan = await onboard('BD-0008');
+    const qr = await issueQr(lan.session);
+    const scanned = await edgeScan(qr.body.token);
+    const spoofed = await request(app)
+      .post('/api/edge/events')
+      .set('Authorization', `Bearer ${EDGE_TOKEN}`)
+      .send({ edgeId: 'spoofed-edge', events: [scanned.event] });
+    expect(spoofed.status).toBe(200);
+    expect(events.rows.get(scanned.event.eventId)?.edgeId).toBe(EDGE);
+  });
+  it('sync flags a stale entry of a revoked employee to the Notifier, once (#33)', async () => {
+    const lan = await onboard('BD-0007');
+    const qr = await issueQr(lan.session);
+    // The edge's snapshot still admits Lan: this is what it would decide while cut off.
+    const scan = await edgeScan(qr.body.token);
+    expect(scan.reason).toBeUndefined();
+
+    const revoked = await request(app)
+      .post(`/api/employees/${lan.id}/qr/revoke`)
+      .set('Authorization', `Bearer ${HR_SESSION}`)
+      .send();
+    expect(revoked.status).toBe(200);
+
+    // shortcut: a real edge sets `stale` itself once its snapshot is over 5 min old (#26).
+    const stale = { ...scan.event, stale: true };
+    expect((await push(stale)).body).toEqual({ accepted: [stale.eventId] });
+
+    expect(syncAlerts.alerts.map((a) => a.kind)).toEqual(['STALE_ENTRY_REVOKED']);
+    const message = syncAlerts.alerts[0]!.message;
+    expect(message).toContain(`Edge ${EDGE} synced 1 entry `);
+    expect(message).toContain(
+      `- employee ${lan.id} (REVOKED now) entered at gate ${GATE} at ${IN_AT} (event ${stale.eventId})`,
+    );
+    // No name or email in the alert (NFR-4).
+    expect(message).not.toContain('Lan');
+    expect(message).not.toContain('@tmc.vn');
+
+    // The event stays as the edge sent it: the person did go in, so the day still counts.
+    expect(events.rows.get(stale.eventId)).toMatchObject({ outcome: 'GRANTED', stale: true });
+    expect(await attendance.dailyRecords(TODAY, FACTORY)).toHaveLength(1);
+
+    // The outbox sends the same batch again after a lost reply: no second alert.
+    expect((await push(stale)).status).toBe(200);
+    expect(syncAlerts.alerts).toHaveLength(1);
+  });
+
+  it('sync says nothing about a stale entry of an employee who is still admitted (#33)', async () => {
+    const lan = await onboard('BD-0008');
+    const scan = await edgeScan((await issueQr(lan.session)).body.token);
+    expect((await push({ ...scan.event, stale: true })).status).toBe(200);
+    expect(syncAlerts.alerts).toEqual([]);
+  });
+
+  it('sync flags one token used at two edges, and not a token seen twice at one edge (#33)', async () => {
+    const lan = await onboard('BD-0009');
+    const qr = await issueQr(lan.session);
+    // Two edges check the same token inside its window. Each only knows the tokens it has seen itself.
+    const here = await edgeScan(qr.body.token);
+    const there = await edgeScan(qr.body.token);
+    expect(there.event.jti).toBe(here.event.jti);
+
+    // Same edge, same token again: that edge's own replay check covers it (#25).
+    const replay = { ...(await edgeScan(qr.body.token)).event, outcome: 'DENIED' as const };
+    expect((await push(here.event, replay)).status).toBe(200);
+    expect(syncAlerts.alerts).toEqual([]);
+
+    const other = await request(app)
+      .post('/api/edge/events')
+      .set('Authorization', `Bearer ${LA_EDGE_TOKEN}`)
+      .send({ events: [{ ...there.event, gateId: 'la-gate-1' }] });
+    expect(other.status).toBe(200);
+
+    expect(syncAlerts.alerts.map((a) => a.kind)).toEqual(['QR_USED_AT_TWO_EDGES']);
+    const message = syncAlerts.alerts[0]!.message;
+    expect(message).toContain('Edge edge-la synced 1 QR token ');
+    expect(message).toContain(`- token ${here.event.jti}: `);
+    expect(message).toContain(`edge ${EDGE}, gate ${GATE}, ${IN_AT}, GRANTED, employee ${lan.id}`);
+    expect(message).toContain(
+      `edge edge-la, gate la-gate-1, ${IN_AT}, GRANTED, employee ${lan.id}`,
+    );
+  });
+
+  it('a sync alert that cannot be sent does not fail the push (#33)', async () => {
+    const lan = await onboard('BD-0010');
+    const scan = await edgeScan((await issueQr(lan.session)).body.token);
+    await request(app)
+      .post(`/api/employees/${lan.id}/qr/revoke`)
+      .set('Authorization', `Bearer ${HR_SESSION}`)
+      .send();
+    syncAlerts.fail = true;
+    const errors: unknown[][] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => void errors.push(args);
+    try {
+      const pushed = await push({ ...scan.event, stale: true });
+      expect(pushed.status).toBe(200);
+      expect(pushed.body).toEqual({ accepted: [scan.event.eventId] });
+    } finally {
+      console.error = original;
+    }
+    expect(events.rows.has(scan.event.eventId)).toBe(true);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]![0]).toBe(
+      `Sync reconciliation: the STALE_ENTRY_REVOKED check of a push from edge ${EDGE} failed`,
+    );
+  });
   it.todo('edge outbox: does not push a PENDING event while its TCS call is still running (#27)');
   // The month of the events above (2026-11, Vietnam time) and a minimal org tree: this file has no admin module.
   const MONTH = '2026-11';
@@ -479,7 +643,10 @@ describe('cross-module flow: real routes, in-memory stores, simulated edge', () 
     );
     const reportApp = createApp(
       [reportingRoutes({ reports, exports: exportsSvc, now: () => new Date(nowMs) })],
-      { before: [authenticate(iam), requireNoticeAck(iam)] },
+      {
+        before: [authenticate(iam), requireNoticeAck(iam)],
+        edge: authenticateEdge({ [EDGE]: EDGE_TOKEN }),
+      },
     );
 
     expect((await request(reportApp).get(`/api/reports/monthly?month=${MONTH}`)).status).toBe(401);
@@ -608,7 +775,10 @@ describe('cross-module flow: real routes, in-memory stores, simulated edge', () 
           accessLog: new AccessLogService(attendance, gateLookup, eqr),
         }),
       ],
-      { before: [authenticate(iam), requireNoticeAck(iam)] },
+      {
+        before: [authenticate(iam), requireNoticeAck(iam)],
+        edge: authenticateEdge({ [EDGE]: EDGE_TOKEN }),
+      },
     );
     const qs = `from=${encodeURIComponent('2026-11-07T00:00:00Z')}&to=${encodeURIComponent('2026-11-07T01:00:00Z')}`;
 
@@ -676,7 +846,10 @@ describe('cross-module flow: real routes, in-memory stores, simulated edge', () 
           ),
         ),
       ],
-      { before: [authenticate(iam), requireNoticeAck(iam)] },
+      {
+        before: [authenticate(iam), requireNoticeAck(iam)],
+        edge: authenticateEdge({ [EDGE]: EDGE_TOKEN }),
+      },
     );
     const guard = user({ username: 'guard', passwordHash: 'unused', role: 'GRD' });
     Object.assign(guard, { scoped: true, scopes: [FACTORY] });
@@ -715,5 +888,116 @@ describe('cross-module flow: real routes, in-memory stores, simulated edge', () 
       expect.objectContaining({ employeeId: lan.id, lastOut: null, missingPunch: true }),
     ]);
     expect(iamStore.audit.filter((e) => e.action === 'GATE_OVERRIDE')).toHaveLength(2);
+  });
+
+  it('edge pushes become daily records and one MockHrs batch in Vietnam dates; the schedule never sends twice (#13)', async () => {
+    const lan = await onboard('BD-0011');
+    const minh = await onboard('BD-0012');
+    const scanAt = async (session: string, at: string) => {
+      nowMs = Date.parse(at);
+      const scan = await edgeScan((await issueQr(session)).body.token);
+      expect(scan.reason).toBeUndefined();
+      return scan.event;
+    };
+    const batch = [
+      await scanAt(lan.session, '2026-10-30T00:58:00.000Z'), // 07:58 on 30 Oct
+      await scanAt(lan.session, '2026-10-30T10:03:00.000Z'), // 17:03 on 30 Oct
+      await scanAt(lan.session, '2026-10-30T17:30:00.000Z'), // 00:30 on 31 Oct (still 30 Oct in UTC)
+      await scanAt(lan.session, '2026-10-31T02:00:00.000Z'), // 09:00 on 31 Oct
+      await scanAt(minh.session, '2026-10-31T01:00:00.000Z'), // 08:00 on 31 Oct, no OUT that day
+      await scanAt(minh.session, '2026-10-31T17:30:00.000Z'), // 00:30 on 1 Nov: not October's
+    ];
+    // Offline backlog in one push, then the outbox retries half of it after a lost reply.
+    expect((await push(...batch)).body).toEqual({ accepted: batch.map((e) => e.eventId) });
+    expect((await push(...batch.slice(0, 3))).status).toBe(200);
+    expect(events.rows.size).toBe(6);
+
+    // Day 1 of November, 06:00 in Vietnam (the default export.monthlyAt); the edge synced after October ended.
+    const exportAt = new Date('2026-10-31T23:00:00Z');
+    const hrs = new MockHrs();
+    const send = vi.spyOn(hrs, 'send');
+    const runs = new InMemoryExportRuns();
+    const exportsSvc = new HrExportService(
+      runs,
+      new CompanyMonthSource(eqr, attendance, orgUnits),
+      hrs,
+      new FakeEdgeSyncs([{ edgeId: EDGE, factoryId: FACTORY, lastSyncAt: exportAt }]),
+      new RecordingNotifier(),
+      iam,
+      { now: () => exportAt, sleep: async () => {}, log: () => {} },
+    );
+    const scheduler = new ExportScheduler({ get: async () => undefined }, runs, exportsSvc, {
+      now: () => exportAt,
+    });
+
+    const expected = {
+      month: '2026-10',
+      rows: [
+        {
+          employeeId: lan.id,
+          employeeCode: 'BD-0011',
+          date: '2026-10-30',
+          firstIn: '2026-10-30T00:58:00.000Z',
+          lastOut: '2026-10-30T10:03:00.000Z',
+          hours: 9.08,
+          missingPunch: false,
+        },
+        {
+          employeeId: lan.id,
+          employeeCode: 'BD-0011',
+          date: '2026-10-31',
+          firstIn: '2026-10-30T17:30:00.000Z',
+          lastOut: '2026-10-31T02:00:00.000Z',
+          hours: 8.5,
+          missingPunch: false,
+        },
+        {
+          employeeId: minh.id,
+          employeeCode: 'BD-0012',
+          date: '2026-10-31',
+          firstIn: '2026-10-31T01:00:00.000Z',
+          lastOut: null,
+          hours: 0,
+          missingPunch: true,
+        },
+      ],
+    };
+    await scheduler.tick();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenNthCalledWith(1, expected);
+
+    // Later ticks and a second scheduled run find the month DONE and send nothing.
+    await scheduler.tick();
+    expect(await exportsSvc.runScheduled('2026-10', false)).toBeNull();
+    expect(send).toHaveBeenCalledTimes(1);
+
+    const exportApp = createApp(
+      [
+        reportingRoutes({
+          reports: new MonthlyReportService(eqr, attendance, orgUnits),
+          exports: exportsSvc,
+          now: () => exportAt,
+        }),
+      ],
+      { before: [authenticate(iam), requireNoticeAck(iam)] },
+    );
+    const status = await request(exportApp)
+      .get('/api/exports/2026-10')
+      .set('Authorization', `Bearer ${HR_SESSION}`);
+    expect(status.status).toBe(200);
+    expect(status.body).toMatchObject({ status: 'DONE', trigger: 'SCHEDULE', attempts: 1 });
+    expect(
+      iamStore.audit.filter((e) => e.target === 'export:2026-10').map((e) => e.action),
+    ).toEqual(['EXPORT_RUN', 'EXPORT_DONE']);
+
+    // Only HR's explicit re-run sends again (FR-4.6), and it sends the same batch (HRS accepts a repeat, ADR-5).
+    const rerun = await request(exportApp)
+      .post('/api/exports/2026-10/rerun')
+      .set('Authorization', `Bearer ${HR_SESSION}`)
+      .send({});
+    expect(rerun.status).toBe(202);
+    await exportsSvc.stop(); // waits for the re-run in flight
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenNthCalledWith(2, expected);
   });
 });

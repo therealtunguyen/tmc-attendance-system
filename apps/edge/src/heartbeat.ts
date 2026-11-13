@@ -41,6 +41,9 @@ export const startHeartbeatLoop = (
     running = true;
     try {
       await sendHeartbeat(client, snapshots, db, edgeId);
+    } catch (err) {
+      // #113 B1: a throw here must not become an unhandled rejection.
+      console.warn(`[heartbeat] tick failed: ${String(err)}`);
     } finally {
       running = false;
     }

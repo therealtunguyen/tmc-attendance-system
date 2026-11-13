@@ -7,7 +7,12 @@ import { TcsHttpClient } from './adapters/tcs/http.js';
 import { MockTurnstile } from './adapters/tcs/mock.js';
 import { createApp } from './app.js';
 import { AdminRepo, AdminService, adminRoutes } from './modules/admin/index.js';
-import { AttendanceRepo, AttendanceService, attendanceRoutes } from './modules/attendance/index.js';
+import {
+  AttendanceRepo,
+  AttendanceService,
+  attendanceRoutes,
+  SyncReconciler,
+} from './modules/attendance/index.js';
 import {
   EmployeeQrRepo,
   EmployeeQrService,
@@ -17,6 +22,7 @@ import {
 import { GateRepo, GateService, gateRoutes, startGateMonitor } from './modules/gate/index.js';
 import {
   authenticate,
+  authenticateEdge,
   IamRepo,
   IamService,
   iamRoutes,
@@ -44,8 +50,9 @@ const hrs = config.hrsMode === 'http' ? new HrsHttpClient(config.hrsBaseUrl) : n
 const mailer =
   config.mailMode === 'smtp' ? new SmtpMailer(config.smtpUrl, config.mailFrom) : new MockMailer();
 
-const iam = new IamService(new IamRepo(db));
-const admin = new AdminService(new AdminRepo(db), iam);
+const iamRepo = new IamRepo(db);
+const iam = new IamService(iamRepo);
+const admin = new AdminService(new AdminRepo(db), iam, iamRepo);
 const eqr = new EmployeeQrService(
   new EmployeeQrRepo(db),
   iam,
@@ -53,9 +60,16 @@ const eqr = new EmployeeQrService(
   () => new Date(),
   new QrLinkMail(mailer, config.portalUrl),
 );
-const attendance = new AttendanceService(new AttendanceRepo(db), eqr);
-const reports = new MonthlyReportService(eqr, attendance, admin);
 const notifier = new MailNotifier(mailer, config.alertEmails);
+const attendanceRepo = new AttendanceRepo(db);
+const attendance = new AttendanceService(
+  attendanceRepo,
+  eqr,
+  iam,
+  () => new Date(),
+  new SyncReconciler(attendanceRepo, eqr, notifier),
+);
+const reports = new MonthlyReportService(eqr, attendance, admin);
 const gate = new GateService(new GateRepo(db), eqr, attendance, turnstile, admin, notifier, iam, {
   heartbeatTimeoutMs: config.heartbeatTimeoutMs,
   directory: eqr,
@@ -78,13 +92,20 @@ const app = createApp(
       mfa: { max: config.authRateLimitPerMin },
     }),
     adminRoutes(admin),
-    employeeQrRoutes(eqr, admin, { qrToken: { max: config.qrTokenRateLimitPerMin } }),
-    attendanceRoutes(attendance),
+    employeeQrRoutes(eqr, admin, { qrToken: { max: config.qrTokenRateLimitPerMin } }, gate),
+    attendanceRoutes(attendance, gate),
     reportingRoutes({ reports, exports, accessLog: new AccessLogService(attendance, gate, eqr) }),
     gateRoutes(gate),
   ],
-  { before: [authenticate(iam, admin), requireNoticeAck(iam)] },
+  {
+    before: [authenticate(iam, admin), requireNoticeAck(iam)],
+    edge: authenticateEdge(config.edgeTokens),
+  },
 );
+
+if (Object.keys(config.edgeTokens).length === 0) {
+  console.warn('[edge-auth] EDGE_TOKENS is empty; all /api/edge/* requests will return 401');
+}
 
 const server = app.listen(config.port, () => {
   console.log(
