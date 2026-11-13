@@ -12,6 +12,7 @@ import type {
   GateRef,
   Notifier,
 } from '../reporting/index.js';
+import type { SnapshotGate } from '../../shared/contracts/edge.js';
 import { HEARTBEAT_TIMEOUT_MS } from '../../shared/contracts/edge.js';
 import {
   connectionStatus,
@@ -187,6 +188,15 @@ export class GateService implements EdgeSyncStatus, GateLookup {
 
   async listGates(filters: GateFilters = {}, factoryIds?: string[]): Promise<GateView[]> {
     return this.withStatus(await this.repo.list(filters, factoryIds));
+  }
+
+  /** Id, turnstile and active flag of every gate of one edge, for its snapshot (#113). Inactive ones too. */
+  async gatesForEdge(edgeId: string): Promise<SnapshotGate[]> {
+    return (await this.repo.list({ edgeId })).map(({ id, turnstileId, active }) => ({
+      id,
+      turnstileId,
+      active,
+    }));
   }
 
   async getGate(id: string): Promise<GateView | null> {

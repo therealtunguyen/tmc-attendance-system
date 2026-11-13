@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { EdgeSnapshot, SnapshotEmployee } from '../../shared/contracts/edge.js';
+import type { EdgeSnapshot, SnapshotEmployee, SnapshotGate } from '../../shared/contracts/edge.js';
 import { QR_TOKEN_TTL_S, signQrToken } from '../../shared/contracts/qr-token.js';
 import {
   checkQrToken,
@@ -117,8 +117,13 @@ export interface QrIssuer {
 }
 
 export interface EdgeSnapshotSource {
-  /** Public keys and employee deny states for GET /api/edge/snapshot (ADR-9). */
-  snapshot(): Promise<EdgeSnapshot>;
+  /** Public keys, employee deny states and the edge's gates for GET /api/edge/snapshot (ADR-9, #113). */
+  snapshot(gates?: SnapshotGate[]): Promise<EdgeSnapshot>;
+}
+
+/** The gates of one edge, for the snapshot (#113). Implemented by the gate module, wired in main.ts. */
+export interface EdgeGates {
+  gatesForEdge(edgeId: string): Promise<SnapshotGate[]>;
 }
 
 export interface QrValidation {
@@ -315,10 +320,10 @@ export class EmployeeQrService
    * The whole company, not one factory, and denied employees too: missing means UNKNOWN to the edge.
    * generatedAt is taken before the read, so the edge can only think its deny states are older than they are.
    */
-  async snapshot(): Promise<EdgeSnapshot> {
+  async snapshot(gates: SnapshotGate[] = []): Promise<EdgeSnapshot> {
     const generatedAt = this.now().toISOString();
     const publicKeys = this.ring.edgePublicKeys();
-    return { generatedAt, publicKeys, employees: (await this.repo.list()).map(admission) };
+    return { generatedAt, publicKeys, employees: (await this.repo.list()).map(admission), gates };
   }
 
   async find(id: string): Promise<EmployeeSummary | null> {

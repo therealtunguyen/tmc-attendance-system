@@ -144,6 +144,24 @@ describe('GateService registry (FR-2.1)', () => {
   });
 });
 
+describe('GateService.gatesForEdge (edge snapshot, #113)', () => {
+  it("returns id, turnstileId and active of that edge's gates only, inactive ones too", async () => {
+    const a = await gate.createGate('adm', entrance);
+    const b = await gate.createGate('adm', { ...entrance, turnstileId: 't-bd-02', name: 'Back' });
+    await gate.createGate('adm', otherFactory);
+    await gate.deactivateGate('adm', b.id);
+    const rows = await gate.gatesForEdge(entrance.edgeId);
+    expect(rows).toHaveLength(2);
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        { id: a.id, turnstileId: entrance.turnstileId, active: true },
+        { id: b.id, turnstileId: 't-bd-02', active: false },
+      ]),
+    );
+    expect(Object.keys(rows[0]!).sort()).toEqual(['active', 'id', 'turnstileId']);
+  });
+});
+
 describe('GateService.gates (GateLookup, FR-4.4)', () => {
   const seed = async () => {
     const a = await gate.createGate('adm', entrance);

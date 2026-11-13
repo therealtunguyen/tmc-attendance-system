@@ -7,7 +7,11 @@ import { openDb, type Db } from '../db.js';
 import { SnapshotManager } from '../snapshot.js';
 import type { ServerClient } from '../server-client.js';
 import { signQrToken, QR_TOKEN_TTL_S } from '../../../server/src/shared/contracts/qr-token.js';
-import type { EdgeSnapshot, SnapshotEmployee } from '../../../server/src/shared/contracts/edge.js';
+import type {
+  EdgeSnapshot,
+  SnapshotEmployee,
+  SnapshotGate,
+} from '../../../server/src/shared/contracts/edge.js';
 
 /** Generate a fresh Ed25519 pair for tests. */
 export const generatePair = () => {
@@ -19,16 +23,22 @@ export const generatePair = () => {
 export const toSpki = (key: KeyObject): string =>
   key.export({ type: 'spki', format: 'der' }).toString('base64');
 
-/** Build a minimal EdgeSnapshot with one employee and one key pair. */
+/**
+ * Build a minimal EdgeSnapshot with employees and one key pair. `gates` undefined builds a legacy
+ * snapshot without the field (older server, #113), so the edge skips the gate check.
+ */
 export const makeSnapshot = (
   employees: SnapshotEmployee[],
   publicKey: KeyObject,
   kid = 'k1',
-): EdgeSnapshot => ({
-  generatedAt: new Date().toISOString(),
-  publicKeys: [{ kid, spki: toSpki(publicKey) }],
-  employees,
-});
+  gates?: SnapshotGate[],
+): EdgeSnapshot =>
+  ({
+    generatedAt: new Date().toISOString(),
+    publicKeys: [{ kid, spki: toSpki(publicKey) }],
+    employees,
+    ...(gates !== undefined ? { gates } : {}),
+  }) as EdgeSnapshot;
 
 /** Issue a valid token for a given employee. */
 export const issueToken = (

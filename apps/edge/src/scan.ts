@@ -5,7 +5,8 @@ import { checkQrToken } from '../../server/src/shared/contracts/qr-validation.js
 import { QR_TOKEN_TTL_S, QR_EXP_TOLERANCE_S } from '../../server/src/shared/contracts/qr-token.js';
 import type { TurnstileClient } from '../../server/src/adapters/tcs/turnstile-client.js';
 import type { Db } from './db.js';
-import type { SnapshotManager } from './snapshot.js';
+import type { EdgeSnapshot } from '../../server/src/shared/contracts/edge.js';
+import type { LiveSnapshot, SnapshotManager } from './snapshot.js';
 
 /** #25: jti stays in jti_seen for the token TTL plus tolerance plus a small buffer. */
 const JTI_TTL_MS = (QR_TOKEN_TTL_S + QR_EXP_TOLERANCE_S + 30) * 1000;
@@ -26,14 +27,64 @@ export type DenyReason =
   | 'REVOKED'
   | 'REPLAYED'
   | 'NO_SNAPSHOT'
+  | 'UNKNOWN_GATE'
+  | 'GATE_INACTIVE'
   | 'TCS_UNAVAILABLE';
 
 export type ScanResult =
   | { outcome: 'GRANTED'; firstName: string; eventId: string }
   | { outcome: 'DENIED'; reason: DenyReason; firstName?: string; eventId: string };
 
+/** One warning per process for a snapshot without `gates` (older server or persisted copy, #113). */
+let warnedNoGates = false;
+
+/**
+ * Deactivated gate (#113): always DENIED, TCS never called. The server accepts events for an inactive
+ * gate of this edge, so a verified token is stored as DENIED/GATE_INACTIVE for the access log. The jti
+ * is not committed (a QR denied here still works at an active gate); an unverified token is logged only.
+ */
+const inactiveGate = async (
+  input: ScanInput,
+  db: Db,
+  snapshots: SnapshotManager,
+  live: LiveSnapshot,
+  ctx: { eventId: string; occurredAt: string; stale: 0 | 1; nowS: number },
+): Promise<ScanResult> => {
+  const { eventId, occurredAt, stale, nowS } = ctx;
+  const denied: ScanResult = { outcome: 'DENIED', reason: 'GATE_INACTIVE', eventId };
+  const check = await checkQrToken(input.token, {
+    publicKeys: live.publicKeys,
+    findEmployee: (id) => snapshots.findEmployee(id),
+    nowS,
+  });
+  const employeeId = check.ok ? check.employeeId : (check.employeeId ?? null);
+  if (!employeeId) {
+    console.warn(
+      `[scan] gate=${input.gateId} denied: GATE_INACTIVE (token not verified, not stored)`,
+    );
+    return denied;
+  }
+  db.commitScan(
+    {
+      eventId,
+      gateId: input.gateId,
+      employeeId,
+      method: 'QR',
+      outcome: 'DENIED',
+      occurredAt,
+      jti: null,
+      stale,
+      denyReason: 'GATE_INACTIVE',
+    },
+    JTI_TTL_MS,
+  );
+  const firstName = snapshots.findEmployee(employeeId)?.firstName;
+  return { ...denied, ...(firstName !== undefined ? { firstName } : {}) };
+};
+
 /**
  * Runs the edge scan flow (#24):
+ * 0. Check the gate against the snapshot's gate list (#113)
  * 1. Validate token against snapshot employees (reuses checkQrToken from shared contracts)
  * 2. Verified, unexpired denials (REVOKED/INACTIVE/UNKNOWN) are committed straight as DENIED
  *    with employeeId + jti and skip TCS; unverified/expired/no-snapshot scans are logged only.
@@ -65,6 +116,29 @@ export const scan = async (
   }
 
   const nowS = Math.floor(now().getTime() / 1000);
+
+  // #113: check the gate before the token is verified or the jti committed, so a wrong gate never burns a QR.
+  // A snapshot without `gates` (older server) skips the check and keeps the old behaviour (ADR-9).
+  const gates = (live.snapshot as Partial<EdgeSnapshot>).gates;
+  let turnstileId = input.gateId;
+  if (gates === undefined) {
+    if (!warnedNoGates) {
+      warnedNoGates = true;
+      console.warn('[scan] snapshot has no gates: gate check skipped, using gateId as turnstileId');
+    }
+  } else {
+    const gate = gates.find((g) => g.id === input.gateId);
+    if (!gate) {
+      // Not stored: the server rejects an event for a gate that is not this edge's and would block the whole batch.
+      console.warn(`[scan] gate=${input.gateId} denied: UNKNOWN_GATE`);
+      return { outcome: 'DENIED', reason: 'UNKNOWN_GATE', eventId };
+    }
+    if (!gate.active) {
+      return inactiveGate(input, db, snapshots, live, { eventId, occurredAt, stale, nowS });
+    }
+    turnstileId = gate.turnstileId;
+  }
+
   const checkResult = await checkQrToken(input.token, {
     publicKeys: live.publicKeys,
     findEmployee: (id) => snapshots.findEmployee(id),
@@ -133,7 +207,7 @@ export const scan = async (
   }
 
   // 4: Call TCS (ADR-3: 1 s timeout, no retry). Fail closed on anything but OPENED.
-  const tcsResult = await turnstile.open(input.gateId);
+  const tcsResult = await turnstile.open(turnstileId);
   const outcome: ScanOutcome = tcsResult === 'OPENED' ? 'GRANTED' : 'DENIED';
 
   // 5: Persist final outcome.
