@@ -252,6 +252,8 @@ export const openDb = (dataDir: string, options: DbOptions = {}) => {
         pendingModifier,
         batchLimit: OUTBOX_BATCH_LIMIT,
       }),
+    // Includes parked rows on purpose (#96): a parked row is an unsynced punch, so the server
+    // sees outboxSize > 0 and does not mark the edge synced.
     outboxCount: (): number => countOutbox.get()?.count ?? 0,
     markPushed: (eventId: string): void => {
       markPushed.run({ pushedAt: new Date().toISOString(), eventId });

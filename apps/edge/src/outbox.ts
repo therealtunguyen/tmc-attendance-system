@@ -2,10 +2,13 @@
 // No events are lost: they stay in SQLite until the server echoes their eventId back.
 // No duplicates: the server inserts by eventId (FR-3.2 idempotency), so retries are safe.
 import type { EdgeEvent, PushEventsRequest } from '../../server/src/shared/contracts/edge.js';
-import { MAX_PUSH_ATTEMPTS, OUTBOX_BATCH_LIMIT, type Db, type LocalEvent } from './db.js';
+import { OUTBOX_BATCH_LIMIT, type Db, type LocalEvent } from './db.js';
 import type { ServerClient } from './server-client.js';
 
 const inFlight = new WeakSet<Db>();
+
+// 4xx that say "not this event's fault" (auth, timeout, rate limit): never count an attempt.
+const TRANSIENT_4XX = new Set([401, 403, 408, 429]);
 
 const toEdgeEvent = (e: LocalEvent): EdgeEvent => ({
   eventId: e.eventId,
@@ -31,7 +34,15 @@ export const flushOutbox = async (
 ): Promise<number> => {
   if (inFlight.has(db)) return 0;
   inFlight.add(db);
-  const maxAttempts = db.maxPushAttempts ?? MAX_PUSH_ATTEMPTS;
+  const maxAttempts = db.maxPushAttempts;
+  const recordReject = (eventId: string, reason: string) => {
+    const attempts = db.recordRejected(eventId);
+    const suffix =
+      attempts >= maxAttempts
+        ? ` (reached max ${maxAttempts} attempts; parking)`
+        : ` (attempt ${attempts}/${maxAttempts})`;
+    console.warn(`[outbox] event ${eventId} ${reason}${suffix}`);
+  };
   try {
     let totalConfirmed = 0;
     while (true) {
@@ -46,16 +57,25 @@ export const flushOutbox = async (
       const result = await client.pushEvents(req);
       if (!result.ok) {
         console.warn(`[outbox] push failed (${result.status}): ${result.error}`);
-        // Count attempts on 4xx client errors (e.g. 400 Bad Request due to a poison row)
-        // so the invalid event eventually parks and stops blocking the outbox (#96).
+        // On a 4xx, push the events one at a time to isolate the poison row (#96). An attempt
+        // counts only when a single-event push gets a non-transient 4xx; 5xx/network never count.
         if (result.status >= 400 && result.status < 500) {
           for (const event of pending) {
-            const attempts = db.recordRejected(event.eventId);
-            const suffix =
-              attempts >= maxAttempts
-                ? ` (reached max ${maxAttempts} attempts; parking)`
-                : ` (attempt ${attempts}/${maxAttempts})`;
-            console.warn(`[outbox] event ${event.eventId} rejected with ${result.status}${suffix}`);
+            const r =
+              pending.length === 1
+                ? result
+                : await client.pushEvents({ edgeId, events: [toEdgeEvent(event)] });
+            if (r.ok) {
+              if (r.data.accepted.includes(event.eventId)) {
+                db.markPushed(event.eventId);
+                totalConfirmed++;
+              } else recordReject(event.eventId, 'omitted from accepted');
+            } else if (r.status >= 400 && r.status < 500 && !TRANSIENT_4XX.has(r.status)) {
+              recordReject(event.eventId, `rejected with ${r.status}`);
+            } else {
+              console.warn(`[outbox] transient push failure (${r.status}); no attempt counted`);
+              break;
+            }
           }
         }
         break;
@@ -68,12 +88,7 @@ export const flushOutbox = async (
           db.markPushed(event.eventId);
           confirmed++;
         } else {
-          const attempts = db.recordRejected(event.eventId);
-          const suffix =
-            attempts >= maxAttempts
-              ? ` (reached max ${maxAttempts} attempts; parking)`
-              : ` (attempt ${attempts}/${maxAttempts})`;
-          console.warn(`[outbox] event ${event.eventId} omitted from accepted${suffix}`);
+          recordReject(event.eventId, 'omitted from accepted');
         }
       }
       totalConfirmed += confirmed;
