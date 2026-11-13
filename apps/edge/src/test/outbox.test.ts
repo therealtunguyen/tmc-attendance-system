@@ -7,7 +7,7 @@ import type {
   TurnstileClient,
 } from '../../../server/src/adapters/tcs/turnstile-client.js';
 import { MAX_PUSH_ATTEMPTS, OUTBOX_BATCH_LIMIT, type Db } from '../db.js';
-import { flushOutbox, outboxSize } from '../outbox.js';
+import { flushOutbox, outboxSize, startOutboxLoop } from '../outbox.js';
 import { ServerClient } from '../server-client.js';
 import { scan } from '../scan.js';
 import {
@@ -196,11 +196,11 @@ describe('outbox — network drop then recovery (#27, #30)', () => {
       await flushOutbox(db, rejectStuckClient, 'edge-1');
     }
 
-    // Stuck row is parked and no longer blocks the outbox.
+    // Stuck row is parked and no longer blocks the outbox, but outboxSize still reports it (#96).
     expect(db.unpushedEvents()).toHaveLength(0);
-    expect(outboxSize(db)).toBe(0);
+    expect(outboxSize(db)).toBe(1);
 
-    // Newer scan still flushes cleanly.
+    // Newer scan still flushes cleanly; parked row remains counted.
     await scan(
       { gateId: 'g', token: issueToken(employee.id, privateKey) },
       db,
@@ -208,6 +208,7 @@ describe('outbox — network drop then recovery (#27, #30)', () => {
       new MockTurnstile('open'),
     );
     expect(await flushOutbox(db, rejectStuckClient, 'edge-1')).toBe(1);
+    expect(outboxSize(db)).toBe(1);
   });
 
   it('no duplicate events when outbox retries after a partial success', async () => {
@@ -250,6 +251,320 @@ describe('outbox — network drop then recovery (#27, #30)', () => {
     }
     expect(db.unpushedEvents()).toHaveLength(1);
     expect(db.unpushedEvents()[0]?.pushAttempts).toBe(0);
+  });
+
+  it('counts an attempt on 4xx responses so a poison row parks after MAX_PUSH_ATTEMPTS (#96)', async () => {
+    const snapshots = makeLoadedSnapshots(db, makeSnapshot([employee], publicKey));
+    await scan(
+      { gateId: 'bad-gate', token: issueToken(employee.id, privateKey) },
+      db,
+      snapshots,
+      new MockTurnstile('open'),
+    );
+    const badId = db.unpushedEvents()[0]!.eventId;
+
+    // Server returns 400 Bad Request for the poison batch.
+    const badBatchClient = makeMockClient(async () => ({
+      ok: false,
+      status: 400,
+      error: 'Invalid gateId in batch',
+    }));
+
+    for (let i = 0; i < MAX_PUSH_ATTEMPTS; i++) {
+      expect(await flushOutbox(db, badBatchClient, 'edge-1')).toBe(0);
+    }
+
+    // Poison row is parked at MAX_PUSH_ATTEMPTS and no longer selected by unpushedEvents.
+    expect(db.unpushedEvents()).toHaveLength(0);
+    expect(outboxSize(db)).toBe(1); // Still reported in outboxSize (#96).
+
+    // Subsequent valid scan can now be flushed.
+    await scan(
+      { gateId: 'g', token: issueToken(employee.id, privateKey) },
+      db,
+      snapshots,
+      new MockTurnstile('open'),
+    );
+    const okClient = makeMockClient(async (req) => ({
+      ok: true,
+      data: { accepted: req.events.map((e) => e.eventId) },
+    }));
+
+    expect(await flushOutbox(db, okClient, 'edge-1')).toBe(1);
+    expect(db.getEvent(badId)?.pushAttempts).toBe(MAX_PUSH_ATTEMPTS);
+  });
+
+  it('uses db.maxPushAttempts option in log messages instead of hardcoded constant (#96)', async () => {
+    const custom = createTempDb({ maxPushAttempts: 2 });
+    try {
+      expect(custom.db.maxPushAttempts).toBe(2);
+      const snapshots = makeLoadedSnapshots(custom.db, makeSnapshot([employee], publicKey));
+      await scan(
+        { gateId: 'g', token: issueToken(employee.id, privateKey) },
+        custom.db,
+        snapshots,
+        new MockTurnstile('open'),
+      );
+
+      const client = makeMockClient(async () => ({
+        ok: false,
+        status: 400,
+        error: 'Bad Request',
+      }));
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await flushOutbox(custom.db, client, 'edge-1');
+        expect(warnSpy.mock.calls.some((c) => String(c[0]).includes('(attempt 1/2)'))).toBe(true);
+
+        await flushOutbox(custom.db, client, 'edge-1');
+        expect(
+          warnSpy.mock.calls.some((c) =>
+            String(c[0]).includes('(reached max 2 attempts; parking)'),
+          ),
+        ).toBe(true);
+
+        expect(custom.db.unpushedEvents()).toHaveLength(0);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    } finally {
+      custom.cleanup();
+    }
+  });
+
+  it('backs off flush retries on repeated failures and resets upon success (#96)', async () => {
+    vi.useFakeTimers();
+    try {
+      const snapshots = makeLoadedSnapshots(db, makeSnapshot([employee], publicKey));
+      await scan(
+        { gateId: 'g', token: issueToken(employee.id, privateKey) },
+        db,
+        snapshots,
+        new MockTurnstile('open'),
+      );
+
+      let pushCalls = 0;
+      let shouldFail = true;
+      const client = makeMockClient(async (req) => {
+        pushCalls++;
+        if (shouldFail) {
+          return { ok: false, status: 503, error: 'Server unavailable' };
+        }
+        return { ok: true, data: { accepted: req.events.map((e) => e.eventId) } };
+      });
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      // startOutboxLoop runs immediate flush (pushCalls = 1).
+      const stop = startOutboxLoop(db, client, 'edge-1', 5_000, 30_000);
+      expect(pushCalls).toBe(1);
+
+      // Failure 1: next delay is 5s.
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(pushCalls).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(pushCalls).toBe(2);
+
+      // Failure 2: delay doubles to 10s.
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(pushCalls).toBe(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(pushCalls).toBe(3);
+
+      // Failure 3: delay doubles to 20s.
+      await vi.advanceTimersByTimeAsync(19_999);
+      expect(pushCalls).toBe(3);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(pushCalls).toBe(4);
+
+      // Failure 4: delay capped at maxBackoffMs (30s).
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(pushCalls).toBe(4);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(pushCalls).toBe(5);
+
+      // Server recovers!
+      shouldFail = false;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(pushCalls).toBe(6);
+      expect(db.unpushedEvents()).toHaveLength(0);
+
+      // Queue another scan so the next tick has an event to push.
+      await scan(
+        { gateId: 'g', token: issueToken(employee.id, privateKey) },
+        db,
+        snapshots,
+        new MockTurnstile('open'),
+      );
+
+      // Next interval resets back to base 5s.
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(pushCalls).toBe(6);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(pushCalls).toBe(7);
+
+      stop();
+      warnSpy.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('counts an attempt on 4xx responses so a poison row parks after MAX_PUSH_ATTEMPTS (#96)', async () => {
+    const snapshots = makeLoadedSnapshots(db, makeSnapshot([employee], publicKey));
+    await scan(
+      { gateId: 'bad-gate', token: issueToken(employee.id, privateKey) },
+      db,
+      snapshots,
+      new MockTurnstile('open'),
+    );
+    const badId = db.unpushedEvents()[0]!.eventId;
+
+    // Server returns 400 Bad Request for the poison batch.
+    const badBatchClient = makeMockClient(async () => ({
+      ok: false,
+      status: 400,
+      error: 'Invalid gateId in batch',
+    }));
+
+    for (let i = 0; i < MAX_PUSH_ATTEMPTS; i++) {
+      expect(await flushOutbox(db, badBatchClient, 'edge-1')).toBe(0);
+    }
+
+    // Poison row is parked at MAX_PUSH_ATTEMPTS and no longer selected by unpushedEvents.
+    expect(db.unpushedEvents()).toHaveLength(0);
+    expect(outboxSize(db)).toBe(1); // Still reported in outboxSize (#96).
+
+    // Subsequent valid scan can now be flushed.
+    await scan(
+      { gateId: 'g', token: issueToken(employee.id, privateKey) },
+      db,
+      snapshots,
+      new MockTurnstile('open'),
+    );
+    const okClient = makeMockClient(async (req) => ({
+      ok: true,
+      data: { accepted: req.events.map((e) => e.eventId) },
+    }));
+
+    expect(await flushOutbox(db, okClient, 'edge-1')).toBe(1);
+    expect(db.getEvent(badId)?.pushAttempts).toBe(MAX_PUSH_ATTEMPTS);
+  });
+
+  it('uses db.maxPushAttempts option in log messages instead of hardcoded constant (#96)', async () => {
+    const custom = createTempDb({ maxPushAttempts: 2 });
+    try {
+      expect(custom.db.maxPushAttempts).toBe(2);
+      const snapshots = makeLoadedSnapshots(custom.db, makeSnapshot([employee], publicKey));
+      await scan(
+        { gateId: 'g', token: issueToken(employee.id, privateKey) },
+        custom.db,
+        snapshots,
+        new MockTurnstile('open'),
+      );
+
+      const client = makeMockClient(async () => ({
+        ok: false,
+        status: 400,
+        error: 'Bad Request',
+      }));
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await flushOutbox(custom.db, client, 'edge-1');
+        expect(warnSpy.mock.calls.some((c) => String(c[0]).includes('(attempt 1/2)'))).toBe(true);
+
+        await flushOutbox(custom.db, client, 'edge-1');
+        expect(
+          warnSpy.mock.calls.some((c) =>
+            String(c[0]).includes('(reached max 2 attempts; parking)'),
+          ),
+        ).toBe(true);
+
+        expect(custom.db.unpushedEvents()).toHaveLength(0);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    } finally {
+      custom.cleanup();
+    }
+  });
+
+  it('backs off flush retries on repeated failures and resets upon success (#96)', async () => {
+    vi.useFakeTimers();
+    try {
+      const snapshots = makeLoadedSnapshots(db, makeSnapshot([employee], publicKey));
+      await scan(
+        { gateId: 'g', token: issueToken(employee.id, privateKey) },
+        db,
+        snapshots,
+        new MockTurnstile('open'),
+      );
+
+      let pushCalls = 0;
+      let shouldFail = true;
+      const client = makeMockClient(async (req) => {
+        pushCalls++;
+        if (shouldFail) {
+          return { ok: false, status: 503, error: 'Server unavailable' };
+        }
+        return { ok: true, data: { accepted: req.events.map((e) => e.eventId) } };
+      });
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      // startOutboxLoop runs immediate flush (pushCalls = 1).
+      const stop = startOutboxLoop(db, client, 'edge-1', 5_000, 30_000);
+      expect(pushCalls).toBe(1);
+
+      // Failure 1: next delay is 5s.
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(pushCalls).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(pushCalls).toBe(2);
+
+      // Failure 2: delay doubles to 10s.
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(pushCalls).toBe(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(pushCalls).toBe(3);
+
+      // Failure 3: delay doubles to 20s.
+      await vi.advanceTimersByTimeAsync(19_999);
+      expect(pushCalls).toBe(3);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(pushCalls).toBe(4);
+
+      // Failure 4: delay capped at maxBackoffMs (30s).
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(pushCalls).toBe(4);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(pushCalls).toBe(5);
+
+      // Server recovers!
+      shouldFail = false;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(pushCalls).toBe(6);
+      expect(db.unpushedEvents()).toHaveLength(0);
+
+      // Queue another scan so the next tick has an event to push.
+      await scan(
+        { gateId: 'g', token: issueToken(employee.id, privateKey) },
+        db,
+        snapshots,
+        new MockTurnstile('open'),
+      );
+
+      // Next interval resets back to base 5s.
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(pushCalls).toBe(6);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(pushCalls).toBe(7);
+
+      stop();
+      warnSpy.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('drains more than OUTBOX_BATCH_LIMIT queued events in a single flushOutbox call', async () => {

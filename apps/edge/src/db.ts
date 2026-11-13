@@ -167,11 +167,10 @@ export const openDb = (dataDir: string, options: DbOptions = {}) => {
     LIMIT  @batchLimit
   `);
 
-  const countOutbox = db.prepare<[{ maxAttempts: number }], { count: number }>(`
+  const countOutbox = db.prepare<[], { count: number }>(`
     SELECT COUNT(*) AS count
     FROM   scan_event
     WHERE  pushed_at IS NULL
-      AND  push_attempts < @maxAttempts
   `);
 
   const markPushed = db.prepare<[{ pushedAt: string; eventId: string }]>(
@@ -246,13 +245,14 @@ export const openDb = (dataDir: string, options: DbOptions = {}) => {
       return true;
     },
     getEvent: (eventId: string): LocalEvent | null => getEvent.get(eventId) ?? null,
+    maxPushAttempts,
     unpushedEvents: (): LocalEvent[] =>
       unpushedEvents.all({
         maxAttempts: maxPushAttempts,
         pendingModifier,
         batchLimit: OUTBOX_BATCH_LIMIT,
       }),
-    outboxCount: (): number => countOutbox.get({ maxAttempts: maxPushAttempts })?.count ?? 0,
+    outboxCount: (): number => countOutbox.get()?.count ?? 0,
     markPushed: (eventId: string): void => {
       markPushed.run({ pushedAt: new Date().toISOString(), eventId });
     },
