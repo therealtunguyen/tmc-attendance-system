@@ -141,6 +141,8 @@ describe('parseTcsBaseUrls', () => {
     'bd:ftp://a',
     'bd:bad',
     'bd:http://a?x=1',
+    'bd:http://a?',
+    'bd:http://a#',
     'bd:http://a#fragment',
     'bd:http://user:pass@a',
     'bd:http://a,bd:http://b',

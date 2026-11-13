@@ -113,8 +113,8 @@ export const parseTcsBaseUrls = (value: string | undefined): Record<string, stri
         !['http:', 'https:'].includes(url.protocol) ||
         url.username ||
         url.password ||
-        url.search ||
-        url.hash
+        url.href.includes('?') ||
+        url.href.includes('#')
       )
         throw new Error();
     } catch {
