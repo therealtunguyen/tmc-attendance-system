@@ -3,7 +3,7 @@ import { generateKeyPairSync, type KeyObject } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDb, type Db } from '../db.js';
+import { openDb, type Db, type DbOptions } from '../db.js';
 import { SnapshotManager } from '../snapshot.js';
 import type { ServerClient } from '../server-client.js';
 import { signQrToken, QR_TOKEN_TTL_S } from '../../../server/src/shared/contracts/qr-token.js';
@@ -54,9 +54,9 @@ export const issueToken = (
   );
 
 /** Creates a temporary SQLite db and a cleanup function. */
-export const createTempDb = (): { db: Db; cleanup: () => void } => {
+export const createTempDb = (options?: DbOptions): { db: Db; cleanup: () => void } => {
   const dir = mkdtempSync(join(tmpdir(), 'edge-test-'));
-  const db = openDb(dir);
+  const db = openDb(dir, options);
   return {
     db,
     cleanup: () => {
