@@ -7,8 +7,9 @@ import type { ServerClient } from './server-client.js';
 
 const inFlight = new WeakSet<Db>();
 
-// 4xx that say "not this event's fault" (auth, timeout, rate limit): never count an attempt.
-const TRANSIENT_4XX = new Set([401, 403, 408, 429]);
+// The only status the server uses to reject an event's content (validation, gate ownership).
+// Any other 4xx (401, 404 wrong URL, 429...) is about the route or auth: never count an attempt.
+const REJECTED = 400;
 
 const toEdgeEvent = (e: LocalEvent): EdgeEvent => ({
   eventId: e.eventId,
@@ -57,9 +58,9 @@ export const flushOutbox = async (
       const result = await client.pushEvents(req);
       if (!result.ok) {
         console.warn(`[outbox] push failed (${result.status}): ${result.error}`);
-        // On a 4xx, push the events one at a time to isolate the poison row (#96). An attempt
-        // counts only when a single-event push gets a non-transient 4xx; 5xx/network never count.
-        if (result.status >= 400 && result.status < 500) {
+        // On a 400, push the events one at a time to isolate the poison row (#96). An attempt
+        // counts only when a single-event push gets a 400; every other status never counts.
+        if (result.status === REJECTED) {
           for (const event of pending) {
             const r =
               pending.length === 1
@@ -70,7 +71,7 @@ export const flushOutbox = async (
                 db.markPushed(event.eventId);
                 totalConfirmed++;
               } else recordReject(event.eventId, 'omitted from accepted');
-            } else if (r.status >= 400 && r.status < 500 && !TRANSIENT_4XX.has(r.status)) {
+            } else if (r.status === REJECTED) {
               recordReject(event.eventId, `rejected with ${r.status}`);
             } else {
               console.warn(`[outbox] transient push failure (${r.status}); no attempt counted`);
@@ -114,7 +115,8 @@ export const OUTBOX_MAX_BACKOFF_MS = 60_000;
  * Starts the outbox flush loop with backoff on repeated failures (#96).
  * Flushes once immediately on startup. Under normal conditions (progress made or
  * outbox empty), flushes run every `intervalMs`. On repeated failures (e.g. 4xx/5xx or network
- * disconnects), the delay doubles up to `maxBackoffMs`.
+ * disconnects), the delay doubles up to `maxBackoffMs`: the first failure waits `intervalMs`,
+ * then 2x, 4x... (5 -> 10 -> 20 -> 40 -> 60 s at the defaults).
  * Returns a cleanup function.
  */
 export const startOutboxLoop = (

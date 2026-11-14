@@ -254,6 +254,10 @@ export const openDb = (dataDir: string, options: DbOptions = {}) => {
       }),
     // Includes parked rows on purpose (#96): a parked row is an unsynced punch, so the server
     // sees outboxSize > 0 and does not mark the edge synced.
+    // Operator (no unpark path yet): inspect parked rows in edge.db with
+    //   SELECT * FROM scan_event WHERE pushed_at IS NULL AND push_attempts >= 5; -- MAX_PUSH_ATTEMPTS
+    // and retry them after fixing the cause with
+    //   UPDATE scan_event SET push_attempts = 0 WHERE pushed_at IS NULL;
     outboxCount: (): number => countOutbox.get()?.count ?? 0,
     markPushed: (eventId: string): void => {
       markPushed.run({ pushedAt: new Date().toISOString(), eventId });

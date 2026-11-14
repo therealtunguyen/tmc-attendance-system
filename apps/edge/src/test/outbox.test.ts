@@ -454,6 +454,25 @@ describe('outbox — network drop then recovery (#27, #30)', () => {
     expect(pending.every((e) => e.pushAttempts === 0)).toBe(true);
   });
 
+  it('never parks valid events when every push returns 404 (wrong SERVER_BASE_URL) (#96)', async () => {
+    const snapshots = makeLoadedSnapshots(db, makeSnapshot([employee], publicKey));
+    for (const gateId of ['g1', 'g2', 'g3']) {
+      await scan(
+        { gateId, token: issueToken(employee.id, privateKey) },
+        db,
+        snapshots,
+        new MockTurnstile('open'),
+      );
+    }
+    const client = makeMockClient(async () => ({ ok: false, status: 404, error: 'Not Found' }));
+
+    for (let i = 0; i < MAX_PUSH_ATTEMPTS; i++) await flushOutbox(db, client, 'edge-1');
+
+    const pending = db.unpushedEvents();
+    expect(pending).toHaveLength(3);
+    expect(pending.every((e) => e.pushAttempts === 0)).toBe(true);
+  });
+
   it('drains more than OUTBOX_BATCH_LIMIT queued events in a single flushOutbox call', async () => {
     const total = OUTBOX_BATCH_LIMIT + 25;
     const baseTime = Date.now() - total * 1000;
